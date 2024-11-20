@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
+// Jay: Unused import (cargo clippy/check)
 use std::io::BufReader;
 use std::fs::File;
 use std::collections::HashMap;
 use std::error::Error;
 
-
+// Jay: Mid -> MidPrice. (Be more descriptive)
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct Mid {
     pub mid_price: Vec<f64>,
@@ -30,6 +31,8 @@ mod tests {
         let reader = BufReader::new(file);
         
         // JSON을 HashMap으로 파싱
+        // Jay: std Hashmap is somewhat slow for security safety
+        // Jay: Unless you publically servicing, use rustc_hash::FxHashMap
         let time_price_map: HashMap<String, f64> = serde_json::from_reader(reader)?;
         
         // HashMap의 값들을 mid_price 벡터에 추가
