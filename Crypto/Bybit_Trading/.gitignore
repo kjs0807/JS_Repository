@@ -1,0 +1,20 @@
+# API 키 (절대 커밋 금지)
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# DB
+db/*.db
+
+# 빌드
+build/
+dist/
+*.spec
+*.exe
+
+# 로그
+logs/backtest_results/
+logs/trades/

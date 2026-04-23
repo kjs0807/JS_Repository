@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ report_title }}</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Malgun Gothic', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f5f5f5; color: #333; line-height: 1.6;
+  }
+  .container { max-width: 1100px; margin: 0 auto; padding: 20px; }
+
+  /* 헤더 */
+  header {
+    background: linear-gradient(135deg, #1a237e, #283593);
+    color: white; padding: 30px 40px; border-radius: 8px;
+    margin-bottom: 24px;
+  }
+  header h1 { font-size: 1.8em; margin-bottom: 8px; }
+  header .meta { font-size: 0.9em; opacity: 0.85; }
+  header .meta span { margin-right: 20px; }
+
+  /* 섹션 공통 */
+  section {
+    background: white; border-radius: 8px; padding: 24px;
+    margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  }
+  section h2 {
+    font-size: 1.3em; color: #1a237e; margin-bottom: 16px;
+    padding-bottom: 8px; border-bottom: 2px solid #e8eaf6;
+  }
+
+  /* 중요도 배지 */
+  .badge {
+    display: inline-block; padding: 2px 10px; border-radius: 12px;
+    font-size: 0.75em; font-weight: bold; color: white;
+  }
+  .badge-high { background: #D32F2F; }
+  .badge-medium { background: #F57C00; }
+  .badge-low { background: #9E9E9E; }
+  .badge-unscored { background: #BDBDBD; }
+
+  /* 시장 요약 그리드 */
+  .market-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px; margin-bottom: 20px;
+  }
+  .market-card {
+    background: #fafafa; border-radius: 6px; padding: 14px;
+    border-left: 4px solid #1976D2;
+  }
+  .market-card.up { border-left-color: #2196F3; }
+  .market-card.down { border-left-color: #F44336; }
+  .market-card .ticker { font-weight: bold; font-size: 0.95em; }
+  .market-card .price { font-size: 1.1em; margin: 4px 0; }
+  .market-card .return-up { color: #2196F3; font-weight: bold; }
+  .market-card .return-down { color: #F44336; font-weight: bold; }
+
+  /* 차트 */
+  .chart-container { text-align: center; margin: 16px 0; }
+  .chart-container img { max-width: 100%; height: auto; border-radius: 4px; }
+
+  /* 기사 카드 */
+  .article-card {
+    border: 1px solid #e0e0e0; border-radius: 6px; padding: 14px;
+    margin-bottom: 10px; transition: box-shadow 0.2s;
+  }
+  .article-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+  .article-card.high-impact {
+    border-left: 4px solid #D32F2F; background: #fff5f5;
+  }
+  .article-card .article-title {
+    font-size: 1em; font-weight: bold; margin-bottom: 6px;
+  }
+  .article-card .article-title a {
+    color: #1a237e; text-decoration: none;
+  }
+  .article-card .article-title a:hover { text-decoration: underline; }
+  .article-card .article-meta {
+    font-size: 0.82em; color: #757575; margin-bottom: 6px;
+  }
+  .article-card .article-meta span { margin-right: 12px; }
+  .article-card .article-summary {
+    font-size: 0.9em; color: #555; line-height: 1.5;
+  }
+  .article-card .z-info {
+    font-size: 0.8em; color: #888; margin-top: 4px;
+  }
+
+  /* 카테고리 섹션 */
+  .category-section { border-left: 4px solid #1976D2; }
+  .category-section:nth-of-type(2) { border-left-color: #388E3C; }
+  .category-section:nth-of-type(3) { border-left-color: #F57C00; }
+  .category-section:nth-of-type(4) { border-left-color: #D32F2F; }
+  .category-section:nth-of-type(5) { border-left-color: #7B1FA2; }
+  .category-section:nth-of-type(6) { border-left-color: #00796B; }
+
+  /* 경제지표 테이블 */
+  .indicator-table {
+    width: 100%; border-collapse: collapse; margin: 12px 0;
+    font-size: 0.9em;
+  }
+  .indicator-table th {
+    background: #e8eaf6; padding: 8px 12px; text-align: left;
+    font-weight: bold;
+  }
+  .indicator-table td { padding: 8px 12px; border-bottom: 1px solid #eee; }
+  .indicator-table tr:hover { background: #f5f5f5; }
+
+  /* 푸터 */
+  footer {
+    text-align: center; padding: 20px; color: #9e9e9e;
+    font-size: 0.82em; border-top: 1px solid #e0e0e0; margin-top: 20px;
+  }
+
+  /* 인쇄 최적화 */
+  @media print {
+    body { background: white; }
+    header { background: #1a237e !important; -webkit-print-color-adjust: exact; }
+    section { break-inside: avoid; box-shadow: none; border: 1px solid #ddd; }
+    .article-card { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- 헤더 -->
+<header>
+  <h1>{{ report_title }}</h1>
+  <div class="meta">
+    <span>{{ start_date }} ~ {{ end_date }}</span>
+    <span>|</span>
+    <span>{{ stats.total }}건</span>
+    <span>|</span>
+    <span>생성: {{ generated_at }}</span>
+  </div>
+</header>
+
+<!-- 섹션 1: 시장 개요 -->
+<section id="market-overview">
+  <h2>Market Overview</h2>
+
+  {% if market_summary %}
+  <div class="market-grid">
+    {% for item in market_summary %}
+    <div class="market-card {{ item.direction }}">
+      <div class="ticker">{{ item.display_name or item.ticker }}</div>
+      <div class="price">{{ item.last_price }}</div>
+      <div class="return-{{ item.direction }}">
+        {% if item.direction == 'up' %}+{% endif %}{{ item.return_pct }}%
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if charts.market_overview %}
+  <div class="chart-container">
+    <img src="{{ charts.market_overview }}" alt="Market Overview">
+  </div>
+  {% endif %}
+
+  {% if charts.zscore_heatmap %}
+  <div class="chart-container">
+    <img src="{{ charts.zscore_heatmap }}" alt="Z-score Heatmap">
+  </div>
+  {% endif %}
+
+  {% if charts.zscore_bars %}
+  <div class="chart-container">
+    <img src="{{ charts.zscore_bars }}" alt="Z-score Bars">
+  </div>
+  {% endif %}
+</section>
+
+<!-- 경제지표 -->
+{% if ecos_indicators or fred_indicators %}
+<section id="indicators">
+  <h2>Economic Indicators</h2>
+
+  {% if ecos_indicators %}
+  <h3 style="font-size:1.05em; margin: 12px 0 8px;">ECOS (Korea)</h3>
+  <table class="indicator-table">
+    <thead><tr><th>Code</th><th>Latest Value</th><th>Date</th></tr></thead>
+    <tbody>
+    {% for ind in ecos_indicators %}
+    <tr>
+      <td>{{ ind.code }}</td>
+      <td>{{ ind.latest_value }}</td>
+      <td>{{ ind.latest_date }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if fred_indicators %}
+  <h3 style="font-size:1.05em; margin: 12px 0 8px;">FRED (U.S.)</h3>
+  <table class="indicator-table">
+    <thead><tr><th>Series</th><th>Latest Value</th><th>Date</th></tr></thead>
+    <tbody>
+    {% for ind in fred_indicators %}
+    <tr>
+      <td>{{ ind.series_id }}</td>
+      <td>{{ ind.latest_value }}</td>
+      <td>{{ ind.latest_date }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endif %}
+
+<!-- 섹션 2: HIGH IMPACT 뉴스 -->
+{% if high_impact_articles %}
+<section id="high-impact">
+  <h2>High Market Volatility Associated News</h2>
+  {% for article in high_impact_articles %}
+  <div class="article-card high-impact">
+    <div class="article-title">
+      <span class="badge badge-high">HIGH</span>
+      <a href="{{ article.url }}" target="_blank" rel="noopener">{{ article.title }}</a>
+    </div>
+    <div class="article-meta">
+      <span>{{ article.source }}</span>
+      <span>{{ article.published }}</span>
+      {% if article.z_score %}
+      <span>Z-score: {{ "%.2f"|format(article.z_score) }}</span>
+      {% endif %}
+    </div>
+    {% if article.summary %}
+    <div class="article-summary">{{ article.summary }}</div>
+    {% endif %}
+    {% if article.z_score_details %}
+    <div class="z-info">
+      {% for asset, z in article.z_score_details.items() %}
+      {{ ticker_names.get(asset, asset) if ticker_names is defined else asset }}: {{ "%.2f"|format(z) }}{% if not loop.last %}, {% endif %}
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+<!-- 섹션 3~8: 카테고리별 -->
+{% for cat_name, cat_articles in categorized_articles.items() %}
+<section class="category-section">
+  <h2>
+    {% if categories[cat_name] is defined and categories[cat_name].icon %}
+      {{ categories[cat_name].icon }}
+    {% endif %}
+    {{ cat_name }}
+    <span style="font-size:0.7em; color:#888; font-weight:normal;">
+      ({{ cat_articles|length }}건)
+    </span>
+  </h2>
+  {% for article in cat_articles %}
+  <div class="article-card">
+    <div class="article-title">
+      {% if article.importance == 'HIGH' %}
+      <span class="badge badge-high">HIGH</span>
+      {% elif article.importance == 'MEDIUM' %}
+      <span class="badge badge-medium">MEDIUM</span>
+      {% elif article.importance == 'LOW' %}
+      <span class="badge badge-low">LOW</span>
+      {% endif %}
+      <a href="{{ article.url }}" target="_blank" rel="noopener">{{ article.title }}</a>
+    </div>
+    <div class="article-meta">
+      <span>{{ article.source }}</span>
+      <span>{{ article.published }}</span>
+      {% if article.z_score and article.z_score != 0 %}
+      <span>Z: {{ "%.2f"|format(article.z_score) }}</span>
+      {% endif %}
+    </div>
+    {% if article.summary %}
+    <div class="article-summary">{{ article.summary }}</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endfor %}
+
+<!-- 카테고리 분포 차트 -->
+{% if charts.category_distribution %}
+<section id="category-stats">
+  <h2>Category Distribution</h2>
+  <div class="chart-container">
+    <img src="{{ charts.category_distribution }}" alt="Category Distribution">
+  </div>
+</section>
+{% endif %}
+
+<!-- 기타 (미분류) -->
+{% if uncategorized_articles %}
+<section id="uncategorized">
+  <h2>Uncategorized</h2>
+  {% for article in uncategorized_articles %}
+  <div class="article-card">
+    <div class="article-title">
+      <a href="{{ article.url }}" target="_blank" rel="noopener">{{ article.title }}</a>
+    </div>
+    <div class="article-meta">
+      <span>{{ article.source }}</span>
+      <span>{{ article.published }}</span>
+    </div>
+    {% if article.summary %}
+    <div class="article-summary">{{ article.summary }}</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+<!-- 푸터 -->
+<footer>
+  Financial News Report | Generated: {{ generated_at }}
+  | Articles: {{ stats.total }} | Sources: {{ stats.sources }}
+  | HIGH Impact: {{ stats.high_count }}
+  <br>
+  <em>This report is auto-generated. Market data from yfinance, ECOS, FRED.</em>
+</footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,95 @@
+"""core/config.py 단위 테스트."""
+import pytest
+import yaml
+from src.core.config import (
+    AppConfig, AppSettings, BacktestConfig, RiskConfig,
+    DataConfig, AlertConfig, load_config,
+)
+
+
+class TestAppSettings:
+    def test_defaults(self):
+        s = AppSettings()
+        assert s.base_url == "https://api-demo.bybit.com"
+        assert s.leverage == 3
+        assert s.mode == "demo"
+
+    def test_api_key_from_env(self, monkeypatch):
+        monkeypatch.setenv("BYBIT_API_KEY", "test_key_123")
+        monkeypatch.setenv("BYBIT_API_SECRET", "test_secret_456")
+        s = AppSettings()
+        assert s.api_key == "test_key_123"
+        assert s.api_secret == "test_secret_456"
+
+    def test_api_key_empty_when_no_env(self, monkeypatch):
+        monkeypatch.delenv("BYBIT_API_KEY", raising=False)
+        monkeypatch.delenv("BYBIT_API_SECRET", raising=False)
+        s = AppSettings()
+        assert s.api_key == ""
+        assert s.api_secret == ""
+
+
+class TestBacktestConfig:
+    def test_defaults(self):
+        c = BacktestConfig()
+        assert c.initial_capital == 50000.0
+        assert c.taker_fee_pct == 0.00055
+
+
+class TestRiskConfig:
+    def test_defaults(self):
+        r = RiskConfig()
+        assert r.max_position_pct == 0.05
+        assert r.max_drawdown_pct == 0.15
+
+
+class TestDataConfig:
+    def test_defaults(self):
+        d = DataConfig()
+        assert d.universe_size == 30
+        assert "DOGEUSDT" in d.meme_blacklist
+        assert "1h" in d.default_timeframes
+
+
+class TestAlertConfig:
+    def test_defaults(self):
+        a = AlertConfig()
+        assert a.telegram_enabled is False
+        assert a.alert_on_trade is True
+
+
+class TestLoadConfig:
+    def test_load_default_config(self, tmp_path):
+        config = load_config(config_path=str(tmp_path / "nonexistent.yaml"))
+        assert isinstance(config, AppConfig)
+        assert config.app.leverage == 3
+
+    def test_load_from_yaml(self, tmp_path):
+        yaml_content = {
+            "app": {"leverage": 5, "mode": "live"},
+            "backtest": {"initial_capital": 100000.0},
+            "risk": {"max_drawdown_pct": 0.20},
+            "data": {"universe_size": 50},
+            "alert": {"telegram_enabled": True},
+        }
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(yaml.dump(yaml_content), encoding="utf-8")
+        config = load_config(config_path=str(yaml_path))
+        assert config.app.leverage == 5
+        assert config.backtest.initial_capital == 100000.0
+        assert config.risk.max_drawdown_pct == 0.20
+
+    def test_partial_yaml_uses_defaults(self, tmp_path):
+        yaml_content = {"app": {"leverage": 10}}
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(yaml.dump(yaml_content), encoding="utf-8")
+        config = load_config(config_path=str(yaml_path))
+        assert config.app.leverage == 10
+        assert config.backtest.initial_capital == 50000.0
+
+    def test_env_overrides_telegram(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "bot123")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat456")
+        config = load_config(config_path=str(tmp_path / "nonexistent.yaml"))
+        assert config.alert.telegram_token == "bot123"
+        assert config.alert.telegram_chat_id == "chat456"

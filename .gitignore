@@ -1,0 +1,157 @@
+/.idea
+/.venv
+/Data.xlsx
+/ktb_trading_v2.zip
+/requirements.txt
+/__pycache__
+tmpclaude-*
+
+# Env backup (실제 폴더명: evn_backup)
+etc/evn_backup/
+
+# oh-my-claudecode plugin
+.omc/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller build artifacts
+*.toc
+*.pyz
+*.pkg
+*.zip
+*.manifest
+**/build/work/
+**/build/dist/
+**/build/*/localpycs/
+**/build/*/base_library.zip
+**/build/*/warn-*.txt
+**/build/*/xref-*.html
+**/build/*/*.pkg
+# Legacy paths removed (projects moved to KTB/, Crypto/, Overseas/, _Archive/)
+KTB/DB/DB_Insert/build/
+KTB/DB/DB_Insert/dist/
+
+# SQLite DB (large binary + WAL mode files)
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# json
+*.json
+
+# jsonl
+*.jsonl
+
+# txt
+*.txt
+
+# joblib
+*.joblib
+
+# exe
+*.exe
+
+# Build spec files
+*.spec
+
+# ── Secrets & credentials (전역) ──────────────────
+.env
+*.env
+.env.*
+!*.env.example
+.mcp.json
+
+# Token/session cache
+*.token_cache
+
+# Excel temp files
+~$*.xlsx
+~$*.xlsm
+~$*.xls
+
+# KIS Trading secrets (moved to _Archive or Overseas)
+Overseas/OverseasFutures/.env
+
+# Dead projects in _Archive (already covered by _Archive/ but explicit)
+_Archive/futures_price_mornitor/logs/ktbf_trade/settings.json
+
+# Blog (전체 제외)
+Blog/
+
+# News scrap config (may contain API keys)
+Common/News/news_scrap/news_monitor_config.json
+Common/News/news_scrap/reports/
+Common/News/news_scrap/db/
+Common/News/news_scrap/logs/
+Common/News/news_scrap/*.log
+Common/News/news_scrap/*.zip
+Common/News/news_scrap/__pycache__/
+
+# Auction
+KTB/Auction/data/
+KTB/Auction/build/
+
+# Bybit_Trading research outputs (large parquet/json artifacts)
+Crypto/**/logs/
+Crypto/**/_legacy/
+Crypto/**/cache/
+Crypto/**/db/
+Crypto/**/snapshots/
+
+# KTB DB
+KTB/DB/trading_realtime.db
+KTB/DB/Realtimedata.xlsx
+
+# KTB Master — build_master_v2.py가 이 파일로 KTB_Master.xlsx 빌드
+# 위쪽 *.json 전역 배제를 negate로 예외 처리
+!KTB/Master/formulas_catalog.json
+!KTB/DB/realtimedata_spec.json
+
+# Bond_Analyze_Data 내 OTC_Chat 텍스트 로그 (전역 *.txt 배제에 대한 예외)
+!KTB/Master/Bond_Analyze_Data/**/*.txt
+
+# Node.js
+node_modules/
+
+# Claude worktrees & settings
+.claude/worktrees/
+.claude/settings.local.json
+
+# Runtime state files
+**/state.json
+
+# Virtual environment / site-packages / embedded venv artifacts
+**/Lib/site-packages/
+**/Lib/
+**/Scripts/
+**/share/man/
+
+# MCP Servers (third-party, local config)
+MCP_Servers/
+
+# Bond_Vol artifacts
+Bond_Vol/output/
+Bond_Vol/backup/
+
+# KTB_VWAP 백테스트 산출물
+KTB/KTB_VWAP/results/
+KTB/KTB_VWAP/daily_reports/
+KTB/KTB_VWAP/charts/
+KTB/KTB_VWAP/cache/
+KTB/KTB_VWAP/logs/
+
+# Archive
+_Archive/
+
+# Log files
+*.log
+
+# PNG chart images
+*.png
+
+# Pickle cache
+*.pkl

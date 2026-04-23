@@ -1,0 +1,31 @@
+# Bybit Trading System Configuration
+app:
+  mode: demo
+  leverage: 3
+  log_level: INFO
+
+backtest:
+  initial_capital: 50000.0
+  taker_fee_pct: 0.00055
+  maker_fee_pct: 0.0002
+  slippage_pct: 0.0003
+
+risk:
+  max_position_pct: 0.05
+  max_concurrent: 10
+  daily_loss_limit_pct: 0.05
+  max_drawdown_pct: 0.15
+
+data:
+  universe_size: 30
+  history_days: 365
+  default_timeframes:
+    - 15m
+    - 1h
+    - 4h
+
+alert:
+  telegram_enabled: false
+  alert_on_trade: true
+  alert_on_error: true
+  alert_on_daily_summary: true
