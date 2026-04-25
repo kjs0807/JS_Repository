@@ -31,7 +31,14 @@ class BBKCSqueeze:
         sl_pct: float = 0.07,
         leverage: int = 3,
         timeframe: str = "1h",
+        exit_mode: str = "fixed",
+        trail_be_r: float = 1.0,
+        trail_start_r: float = 2.0,
+        trail_distance_r: float = 0.5,
+        time_stop_bars: int = 0,
     ) -> None:
+        if exit_mode not in ("fixed", "be_trail"):
+            raise ValueError(f"exit_mode must be 'fixed' or 'be_trail', got {exit_mode!r}")
         self.bb_period = bb_period
         self.bb_std = bb_std
         self.kc_period = kc_period
@@ -43,6 +50,12 @@ class BBKCSqueeze:
         self.sl_pct = sl_pct
         self.leverage = leverage
         self.timeframe = timeframe
+        self.exit_mode = exit_mode
+        self.trail_be_r = trail_be_r
+        self.trail_start_r = trail_start_r
+        self.trail_distance_r = trail_distance_r
+        self.time_stop_bars = time_stop_bars
+        self._pos_meta: dict = {}
 
     @property
     def warmup_bars(self) -> int:
@@ -138,6 +151,11 @@ class BBKCSqueeze:
             "tp_pct": self.tp_pct,
             "sl_pct": self.sl_pct,
             "leverage": self.leverage,
+            "exit_mode": self.exit_mode,
+            "trail_be_r": self.trail_be_r,
+            "trail_start_r": self.trail_start_r,
+            "trail_distance_r": self.trail_distance_r,
+            "time_stop_bars": self.time_stop_bars,
         }
 
     def set_params(self, params: dict) -> None:
