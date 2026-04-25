@@ -39,7 +39,10 @@ from src.strategies.registry_builder import STRATEGY_CONFIGS
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "AVAXUSDT"]
 DATA_START = "2024-03-01"
 DATA_END = "2026-04-30"
-OUTPUT_DIR = PROJECT_ROOT / "logs" / "research" / "bbkc_squeeze" / "exit_round"
+OUTPUT_BASE = PROJECT_ROOT / "logs" / "research" / "bbkc_squeeze" / "exit_round"
+# Per-run output dir is OUTPUT_BASE/<timestamp>/. After success, files are
+# also copied to OUTPUT_BASE/latest/ for convenience.
+OUTPUT_DIR = OUTPUT_BASE  # placeholder; overwritten in main()
 
 logger = logging.getLogger("bbkc_exit_eval")
 
@@ -362,13 +365,33 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _publish_to_latest(run_dir: Path, base: Path) -> None:
+    """Copy run_dir/* into base/latest/ for the canonical 'most recent' view."""
+    import shutil
+    latest = base / "latest"
+    if latest.exists():
+        shutil.rmtree(latest)
+    latest.mkdir(parents=True)
+    for f in run_dir.iterdir():
+        if f.is_file():
+            shutil.copy2(f, latest / f.name)
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s: %(message)s",
     )
     args = parse_args()
+
+    # Per-run timestamped output dir + latest/ pointer.
+    timestamp = datetime.now().strftime("%Y-%m-%d_T%H%M")
+    if args.smoke:
+        timestamp = f"{timestamp}_smoke"
+    global OUTPUT_DIR
+    OUTPUT_DIR = OUTPUT_BASE / timestamp
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info("output dir: %s", OUTPUT_DIR)
 
     grid = STRATEGY_CONFIGS["BBKCSqueeze"]["exit_round_grid"]
     cells = [c for c in grid if args.cell is None or c["cell_id"] == args.cell]
@@ -435,6 +458,10 @@ def main() -> None:
     report_path = OUTPUT_DIR / "report.md"
     build_report(summary_judged, auxiliary, report_path)
     logger.info("wrote %s", report_path)
+
+    # Publish to latest/ for easy access (full overwrite each run)
+    _publish_to_latest(OUTPUT_DIR, OUTPUT_BASE)
+    logger.info("published to %s", OUTPUT_BASE / "latest")
 
 
 if __name__ == "__main__":
