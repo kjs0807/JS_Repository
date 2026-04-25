@@ -133,6 +133,68 @@ def run_one_window(
     return run["trades"], run["per_symbol"][symbol]
 
 
+def compute_auxiliary(
+    trades: List[Any], sl_pct: float = 0.07, leverage: int = 3,
+) -> Dict[str, Any]:
+    """Per-window auxiliary metrics. Used for interpretation, NOT for PROMOTE/KILL.
+
+    Reads max_favorable from TradeRecord (added in Phase A).
+    """
+    if not trades:
+        return {
+            "exit_reason_dist": {},
+            "mean_r_win": 0.0,
+            "mean_r_loss": 0.0,
+            "mfe_retention": 0.0,
+            "mean_holding_bars": 0.0,
+        }
+
+    # Exit reason distribution
+    counts: Dict[str, int] = {}
+    for t in trades:
+        counts[t.exit_reason] = counts.get(t.exit_reason, 0) + 1
+    total = len(trades)
+    dist = {k: v / total for k, v in counts.items()}
+
+    win_rs: List[float] = []
+    loss_rs: List[float] = []
+    retentions: List[float] = []
+    holdings: List[float] = []
+    for t in trades:
+        risk = t.entry_price * sl_pct / leverage * t.qty
+        if risk <= 0:
+            continue
+        r = t.pnl / risk
+        if t.pnl > 0:
+            win_rs.append(r)
+        else:
+            loss_rs.append(r)
+        # MFE retention: realized_R / max_favorable_R; max_favorable is in price terms
+        max_fav_pnl = t.max_favorable * t.qty   # absolute distance × qty = max favorable PnL
+        if max_fav_pnl > 0:
+            retentions.append(t.pnl / max_fav_pnl)
+        # Holding bars (1h timeframe)
+        holdings.append((t.exit_time - t.entry_time) / (60 * 60 * 1000))
+
+    return {
+        "exit_reason_dist": dist,
+        "mean_r_win": sum(win_rs) / len(win_rs) if win_rs else 0.0,
+        "mean_r_loss": sum(loss_rs) / len(loss_rs) if loss_rs else 0.0,
+        "mfe_retention": sum(retentions) / len(retentions) if retentions else 0.0,
+        "mean_holding_bars": sum(holdings) / len(holdings) if holdings else 0.0,
+    }
+
+
+def _avg_dist(dists: List[Dict[str, float]]) -> Dict[str, float]:
+    """Average distribution dicts (e.g. exit_reason_dist) across windows."""
+    keys: set = set()
+    for d in dists:
+        keys.update(d.keys())
+    if not dists:
+        return {}
+    return {k: sum(d.get(k, 0.0) for d in dists) / len(dists) for k in keys}
+
+
 def compute_window_metrics(
     trades: List[Any], metrics_block: Dict[str, Any], cell: Dict[str, Any], symbol: str,
     w_idx: int, is_s: datetime, is_e: datetime, oos_s: datetime, oos_e: datetime,
@@ -198,6 +260,7 @@ def main() -> None:
     db = DBManager(cfg.app.db_path)
 
     out_jsonl = OUTPUT_DIR / "wf_results.jsonl"
+    aux_buckets: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     n_done = 0
     n_total = len(cells) * len(symbols) * len(windows)
     with out_jsonl.open("w", encoding="utf-8") as fout:
@@ -216,7 +279,24 @@ def main() -> None:
                     )
                     fout.write(json.dumps(asdict(result)) + "\n")
                     fout.flush()
+                    aux = compute_auxiliary(trades)
+                    aux_buckets.setdefault((cell["cell_id"], sym), []).append(aux)
     logger.info("wrote %s", out_jsonl)
+
+    # Aggregate auxiliary across windows for each (cell, symbol)
+    auxiliary: Dict[str, Dict[str, Any]] = {}
+    for (cell_id, sym), lst in aux_buckets.items():
+        avg = {
+            "exit_reason_dist": _avg_dist([d["exit_reason_dist"] for d in lst]),
+            "mean_r_win": sum(d["mean_r_win"] for d in lst) / len(lst),
+            "mean_r_loss": sum(d["mean_r_loss"] for d in lst) / len(lst),
+            "mfe_retention": sum(d["mfe_retention"] for d in lst) / len(lst),
+            "mean_holding_bars": sum(d["mean_holding_bars"] for d in lst) / len(lst),
+        }
+        auxiliary.setdefault(cell_id, {})[sym] = avg
+    aux_path = OUTPUT_DIR / "auxiliary.json"
+    aux_path.write_text(json.dumps(auxiliary, indent=2), encoding="utf-8")
+    logger.info("wrote %s", aux_path)
 
 
 if __name__ == "__main__":
