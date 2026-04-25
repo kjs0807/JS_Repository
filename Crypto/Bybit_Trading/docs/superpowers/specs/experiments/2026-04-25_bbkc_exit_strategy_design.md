@@ -562,3 +562,83 @@ WF 9 윈도우 평균 + 분산 같이 출력.
 1. **본 문서 사용자 검토 + 승인**
 2. **writing-plans 스킬로 전환** — 본 설계를 단계별 구현 plan으로 분해
 3. 구현은 plan 승인 후 시작
+
+---
+
+## 12. Round 2 Results (2026-04-25 sweep)
+
+**Run**: `logs/research/bbkc_squeeze/exit_round/2026-04-25_T2036/` + `latest/`
+**Coverage**: 12 cells × 3 symbols × 9 WF windows = **324 backtests**, ~2분 소요
+
+### 12.1 판정 결과
+
+**모든 셀 KILL** (baseline F0 포함하여 PROMOTE 0건). 표면적으로는 어떤 청산 변경도 7/9 게이트를 못 넘었지만, 실제 데이터는 두 가지 별개의 메시지를 담고 있다.
+
+### 12.2 핵심 발견 1: be_trail 침묵 (수학적 unreachable)
+
+`be_trail` 셀(`T05_*`, `T10_*`)이 `fixed` 셀(`F0/F24/F48/F72`)과 **숫자 한 자릿수까지 동일**. 디버그 추적:
+- `_manage_position` 호출: 204회 (정상)
+- `broker.update_stop()` 호출: **0회** (BE/trailing 미발동)
+
+**원인** — BBKC의 청산 스케일이 R-단위 thresholds와 충돌:
+
+```
+tp_pct=0.06, sl_pct=0.07, leverage=3
+→ TP 거리 = 2.00%, SL 거리 = 2.33% (= 1R)
+
+trail_be_r=1.0  → BE trigger at +2.33% favorable
+trail_start_r=2.0 → trail trigger at +4.66% favorable
+TP at +2.00% favorable
+
+→ 가격이 TP(+2%)에 먼저 닿아 청산. BE(+2.33%) 도달 불가능. trail(+4.66%) 더더욱 불가.
+```
+
+**`sl_pct ≥ tp_pct` AND R-단위 thresholds AND TP 유지** 세 조건이 동시에 만족되면 trailing은 reachable space 외부로 밀려난다. 설계 단계 Q4에서 합의한 조합이 BBKC scale에서는 dead path.
+
+**라운드 3 후보**:
+- **(R3a)** `trail_be_r`를 TP 거리 비율로 재정의: 예 `trail_be_at_tp_frac=0.5` → BE at +1.00%, `trail_start_at_tp_frac=0.8` → trail at +1.60%
+- **(R3b)** be_trail 모드에서 TP 제거 (`trail_drops_tp=True` 추가) — fat-tail 가설 직접 검증
+- **(R3c)** sl_pct < tp_pct 전략에만 be_trail 적용 (BBKC는 제외, 다른 전략 도입 시)
+
+### 12.3 핵심 발견 2: time_stop, 심볼별 효과 갈림
+
+`time_stop` 자체는 정상 작동 (exit_reason `time_stop` 비율 확인됨, ETH F24 = 15.1%). 효과는 심볼별로 갈림:
+
+| 심볼 | F0 (baseline) | F24 (time_stop=24) | 효과 |
+|---|---|---|---|
+| BTC | 3/9, R/trade -0.048, +169 PnL | 1/9, -0.096, -190 PnL | **악화** (긴 추세 자름) |
+| ETH | 4/9, +0.024, +154 PnL, MFE retention -7.78 | **5/9, +0.118, +466 PnL, MFE -5.33** | **R/trade 5×, PnL 3× 개선** |
+| AVAX | 3/9, -0.145, -95 PnL | 4/9, -0.146, -97 PnL | 거의 무변화 |
+
+ETH는 명확히 짧게 컷이 유리한 시장 구조 (boom/bust 반복, 추세 짧음). BTC는 반대 (추세 길게 살릴 때 수익). AVAX는 중간.
+
+**라운드 3 후보**:
+- **(R3d)** ETH 한정 time_stop 정밀 sweep (`{0, 12, 18, 24, 36, 48}`)
+- **(R3e)** 심볼별 다른 청산 운영 (BTC=fixed/long, ETH=fixed+time_stop=24)
+
+### 12.4 핵심 발견 3: 7/9 게이트와 baseline의 미스매치
+
+baseline F0 자체가 모든 심볼에서 3-4/9 OOS+. 2026-03-30 그리드의 "WF 7/9 = 78%"와 차이가 큼.
+
+**원인 후보**:
+- 평가 기간/윈도우 폭 차이: 2026-03-30은 다른 holdout/WF 셋업 (정확한 셋업 미기록)
+- 2024-08~2026-02 전체 구간이 BBKC에 덜 우호적일 수 있음 (2024년 변동성 환경 차이)
+
+→ 메인 게이트 7/9는 spec §6.1에서 직역한 임계치이지만, **이번 sweep WF 셋업에 맞춰 재보정해야 의미 있음**. 예: "F0 baseline 대비 OOS+ 카운트 ≥ baseline + 1" 같은 상대 게이트.
+
+### 12.5 부수 검증
+
+- F2 흐름 자체는 라이브에서 검증 안 됨 (sweep은 BacktestBroker 사용). 다음 라이브 BBKC 진입 시 set_trading_stop 호출 + idempotent 거동을 확인할 것.
+- BBKC trailing gate 또한 다음 라이브 BBKC 진입에서 stop이 fixed 그대로 머무는지 확인 필요.
+- MFE retention 수치가 모든 셀에서 음수(-4 ~ -8) — 손실 거래의 실현 R / max favorable R 비율이 음수라 절대값이 큼. 이건 수치 정의상 자연스러운 결과 (loss / positive max_fav < 0). 다음 라운드에서 wins-only retention만 따로 계산하는 것을 검토.
+
+### 12.6 라운드 2 종료 액션
+
+- ✅ 코드 변경 (Phase A-D) 모두 main 머지
+- ✅ be_trail 로직 코드 유지 (default fixed라 운영 영향 없음, 라운드 3 자산)
+- ⏭ 라운드 3 사전 결정: R3a/R3b/R3c 중 어느 trailing 재설계, R3d/R3e time_stop 정밀화 — 별도 라운드에서 brainstorming 진입
+- ⏭ 7/9 게이트 재보정 또는 baseline-relative 게이트로 변경 — 라운드 3 spec 단계에서
+
+### 12.7 한 줄 요약
+
+**round 2는 PROMOTE 0건이지만 두 가지 학습을 산출**: be_trail thresholds는 BBKC scale에서 unreachable이고, time_stop은 ETH에는 유효하나 BTC에 해롭다. 라운드 3는 trailing 재정의 + 심볼별 청산 분기를 다뤄야 한다.

@@ -14,6 +14,7 @@ class Position:
     take_profit: Optional[float]
     unrealized_pnl: float
     strategy_name: str
+    max_favorable: float = 0.0
 
 @dataclass
 class Portfolio:

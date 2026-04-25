@@ -31,7 +31,14 @@ class BBKCSqueeze:
         sl_pct: float = 0.07,
         leverage: int = 3,
         timeframe: str = "1h",
+        exit_mode: str = "fixed",
+        trail_be_r: float = 1.0,
+        trail_start_r: float = 2.0,
+        trail_distance_r: float = 0.5,
+        time_stop_bars: int = 0,
     ) -> None:
+        if exit_mode not in ("fixed", "be_trail"):
+            raise ValueError(f"exit_mode must be 'fixed' or 'be_trail', got {exit_mode!r}")
         self.bb_period = bb_period
         self.bb_std = bb_std
         self.kc_period = kc_period
@@ -43,6 +50,12 @@ class BBKCSqueeze:
         self.sl_pct = sl_pct
         self.leverage = leverage
         self.timeframe = timeframe
+        self.exit_mode = exit_mode
+        self.trail_be_r = trail_be_r
+        self.trail_start_r = trail_start_r
+        self.trail_distance_r = trail_distance_r
+        self.time_stop_bars = time_stop_bars
+        self._pos_meta: dict = {}
 
     @property
     def warmup_bars(self) -> int:
@@ -71,7 +84,32 @@ class BBKCSqueeze:
         if i < 1:
             return
 
-        # 지표 값 조회
+        sym = bar.symbol
+        pos = broker.get_position(sym)
+
+        # ── _pos_meta lazy init / cleanup (on_fill 비의존) ─────────────────
+        if pos is None and sym in self._pos_meta:
+            del self._pos_meta[sym]
+        if pos is not None and sym not in self._pos_meta:
+            if pos.side == "LONG":
+                R = pos.entry_price - pos.stop_loss
+            else:
+                R = pos.stop_loss - pos.entry_price
+            self._pos_meta[sym] = {
+                "R": R,
+                "initial_sl": pos.stop_loss,
+                "be_triggered": False,
+                "trail_active": False,
+                "bars_held": 0,
+            }
+
+        # 포지션 보유 중: bars_held 증가 + 관리
+        if pos is not None:
+            self._pos_meta[sym]["bars_held"] += 1
+            self._manage_position(bar, pos, broker)
+            return
+
+        # ── 진입 로직 ─────────────────────────────────────────────────────
         bb_mid = cache.arrays["bb_mid"][i]
         rsi_val = cache.arrays["rsi"][i]
         squeeze_now = cache.arrays["squeeze_on"][i]
@@ -82,11 +120,6 @@ class BBKCSqueeze:
             return
 
         close = bar.close
-        pos = broker.get_position(bar.symbol)
-
-        # 이미 포지션 있으면 스킵 (Fixed TP/SL은 Broker가 자동 처리)
-        if pos is not None:
-            return
 
         # Squeeze 해제 감지: 직전 봉 squeeze ON → 현재 봉 squeeze OFF
         if not (squeeze_prev >= 1.0 and squeeze_now < 1.0):
@@ -123,6 +156,49 @@ class BBKCSqueeze:
         idx = len(series) - 1
         self.on_bar_fast(bar, idx, cache, broker)
 
+    def _manage_position(self, bar: Bar, pos, broker: Broker) -> None:
+        """포지션 보유 중 관리: be_trail BE/trailing + time_stop."""
+        sym = bar.symbol
+        meta = self._pos_meta[sym]
+        R = meta["R"]
+        if R <= 0:
+            return  # invariants violated; bail out safely
+
+        close = bar.close
+        if pos.side == "LONG":
+            move = close - pos.entry_price
+        else:
+            move = pos.entry_price - close
+
+        if self.exit_mode == "be_trail":
+            # BE step: 1R favorable 도달 시 SL을 entry로 이동 (한 번만 트리거)
+            if not meta["be_triggered"] and move >= self.trail_be_r * R:
+                broker.update_stop(sym, pos.entry_price)
+                meta["be_triggered"] = True
+
+            # Trailing step: 2R favorable 도달 시 활성화, 이후 ratchet up/down only
+            if move >= self.trail_start_r * R:
+                if pos.side == "LONG":
+                    new_sl = close - self.trail_distance_r * R
+                else:
+                    new_sl = close + self.trail_distance_r * R
+
+                if not meta["trail_active"]:
+                    broker.update_stop(sym, new_sl)
+                    meta["trail_active"] = True
+                else:
+                    # Ratchet: LONG only goes up, SHORT only goes down
+                    if pos.side == "LONG" and new_sl > pos.stop_loss:
+                        broker.update_stop(sym, new_sl)
+                    elif pos.side == "SHORT" and new_sl < pos.stop_loss:
+                        broker.update_stop(sym, new_sl)
+
+        # time_stop fallback (직교 with exit_mode). SL/TP/trailing이 먼저
+        # 트리거되면 broker가 포지션을 제거 → 다음 봉에서 pos is None 이라
+        # _manage_position 자체가 호출 안 됨. 즉 실질 fallback.
+        if self.time_stop_bars > 0 and meta["bars_held"] >= self.time_stop_bars:
+            broker.close(sym, reason="time_stop")
+
     def on_fill(self, fill: Fill) -> None:
         pass
 
@@ -138,6 +214,11 @@ class BBKCSqueeze:
             "tp_pct": self.tp_pct,
             "sl_pct": self.sl_pct,
             "leverage": self.leverage,
+            "exit_mode": self.exit_mode,
+            "trail_be_r": self.trail_be_r,
+            "trail_start_r": self.trail_start_r,
+            "trail_distance_r": self.trail_distance_r,
+            "time_stop_bars": self.time_stop_bars,
         }
 
     def set_params(self, params: dict) -> None:
