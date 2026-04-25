@@ -1388,7 +1388,10 @@ class TradingEngine:
             pos.max_adverse = max(pos.max_adverse, adverse)
 
             # 트레일링 스톱 갱신 (활성화 조건: 수익이 trailing_activation_atr * ATR 이상)
-            if pos.atr > 0:
+            # round 2 §4.7: BBKCSqueeze는 자체 청산 정책(fixed/be_trail)을 따르므로
+            # 전역 ATR trailing 제외. 평가(src/strategies/bbkc_squeeze.py fixed) 와
+            # 라이브 fixed의 의미를 일치시키기 위함.
+            if pos.strategy != "BBKCSqueeze" and pos.atr > 0:
                 activation_dist = self.risk_manager.params.trailing_activation_atr * pos.atr
                 if pos.direction == "LONG":
                     profit_dist = current_price - pos.entry_price
