@@ -327,3 +327,29 @@ def test_time_stop_skipped_if_position_already_gone():
     bar2 = Bar("BTCUSDT", 1700000000001, "1h", 100, 100, 100, 100, 1000)
     s.on_bar_fast(bar2, 51, cache, broker)
     assert broker.closes == []
+
+
+# ── Task 8: integration smoke ──────────────────────────────────────────────
+
+
+def test_be_trail_full_lifecycle_smoke():
+    """Smoke: ensure entry → BE → trail path works end-to-end with a fabricated position."""
+    s = BBKCSqueeze(exit_mode="be_trail", trail_distance_r=0.5)
+    broker = _MockBroker()
+    cache = _stub_cache_with_position(s)
+
+    # Fabricate a fresh LONG position (we're testing management, not entry detection)
+    broker.positions["BTCUSDT"] = Position(
+        "BTCUSDT", "LONG", 1.0, 100.0, 1700000000000, 95.0, 130.0, 0.0, "BBKCSqueeze", 0.0,
+    )
+
+    # Walk to +1R
+    bar_be = Bar("BTCUSDT", 1700000000001, "1h", 105, 105, 105, 105, 1000)
+    s.on_bar_fast(bar_be, 50, cache, broker)
+    assert ("BTCUSDT", 100.0) in broker.stop_updates
+    assert s._pos_meta["BTCUSDT"]["be_triggered"] is True
+
+    # Walk to +2R+ (also triggers trailing)
+    bar_trail = Bar("BTCUSDT", 1700000000002, "1h", 115, 115, 115, 115, 1000)
+    s.on_bar_fast(bar_trail, 51, cache, broker)
+    assert s._pos_meta["BTCUSDT"]["trail_active"] is True
