@@ -193,6 +193,12 @@ class BBKCSqueeze:
                     elif pos.side == "SHORT" and new_sl < pos.stop_loss:
                         broker.update_stop(sym, new_sl)
 
+        # time_stop fallback (직교 with exit_mode). SL/TP/trailing이 먼저
+        # 트리거되면 broker가 포지션을 제거 → 다음 봉에서 pos is None 이라
+        # _manage_position 자체가 호출 안 됨. 즉 실질 fallback.
+        if self.time_stop_bars > 0 and meta["bars_held"] >= self.time_stop_bars:
+            broker.close(sym, reason="time_stop")
+
     def on_fill(self, fill: Fill) -> None:
         pass
 

@@ -262,3 +262,68 @@ def test_be_trail_short_symmetry_at_2R():
     s.on_bar_fast(bar, 50, cache, broker)
     assert ("BTCUSDT", 100.0) in broker.stop_updates       # BE
     assert ("BTCUSDT", 92.5) in broker.stop_updates        # trail
+
+
+# ── Task 7: time_stop fallback ──────────────────────────────────────────────
+
+
+def test_time_stop_zero_does_nothing():
+    s = BBKCSqueeze(exit_mode="fixed", time_stop_bars=0)
+    broker = _MockBroker()
+    cache = _stub_cache_with_position(s)
+    broker.positions["BTCUSDT"] = Position(
+        "BTCUSDT", "LONG", 1.0, 100.0, 1700000000000,
+        95.0, 110.0, 0.0, "BBKCSqueeze", 0.0,
+    )
+    for k in range(100):
+        bar = Bar("BTCUSDT", 1700000000000 + k, "1h", 100, 100, 100, 100, 1000)
+        s.on_bar_fast(bar, 50 + k, cache, broker)
+    assert broker.closes == []
+
+
+def test_time_stop_triggers_at_N_bars_held():
+    s = BBKCSqueeze(exit_mode="fixed", time_stop_bars=3)
+    broker = _MockBroker()
+    cache = _stub_cache_with_position(s)
+    broker.positions["BTCUSDT"] = Position(
+        "BTCUSDT", "LONG", 1.0, 100.0, 1700000000000,
+        95.0, 110.0, 0.0, "BBKCSqueeze", 0.0,
+    )
+    # bars_held increments to 1, 2, 3 → at 3 should fire close
+    for k in range(3):
+        bar = Bar("BTCUSDT", 1700000000000 + k, "1h", 100, 100, 100, 100, 1000)
+        s.on_bar_fast(bar, 50 + k, cache, broker)
+    assert broker.closes == [("BTCUSDT", "time_stop")]
+
+
+def test_time_stop_works_with_be_trail():
+    s = BBKCSqueeze(exit_mode="be_trail", time_stop_bars=2)
+    broker = _MockBroker()
+    cache = _stub_cache_with_position(s)
+    broker.positions["BTCUSDT"] = Position(
+        "BTCUSDT", "LONG", 1.0, 100.0, 1700000000000,
+        95.0, 110.0, 0.0, "BBKCSqueeze", 0.0,
+    )
+    # Below 1R both bars → no BE, just bars_held increments
+    bar1 = Bar("BTCUSDT", 1700000000000, "1h", 102, 102, 102, 102, 1000)
+    s.on_bar_fast(bar1, 50, cache, broker)
+    bar2 = Bar("BTCUSDT", 1700000000001, "1h", 103, 103, 103, 103, 1000)
+    s.on_bar_fast(bar2, 51, cache, broker)
+    assert broker.closes == [("BTCUSDT", "time_stop")]
+
+
+def test_time_stop_skipped_if_position_already_gone():
+    s = BBKCSqueeze(exit_mode="fixed", time_stop_bars=2)
+    broker = _MockBroker()
+    cache = _stub_cache_with_position(s)
+    broker.positions["BTCUSDT"] = Position(
+        "BTCUSDT", "LONG", 1.0, 100.0, 1700000000000,
+        95.0, 110.0, 0.0, "BBKCSqueeze", 0.0,
+    )
+    bar1 = Bar("BTCUSDT", 1700000000000, "1h", 100, 100, 100, 100, 1000)
+    s.on_bar_fast(bar1, 50, cache, broker)
+    # SL hit externally → broker removes position
+    del broker.positions["BTCUSDT"]
+    bar2 = Bar("BTCUSDT", 1700000000001, "1h", 100, 100, 100, 100, 1000)
+    s.on_bar_fast(bar2, 51, cache, broker)
+    assert broker.closes == []
