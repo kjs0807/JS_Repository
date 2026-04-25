@@ -84,7 +84,31 @@ class BBKCSqueeze:
         if i < 1:
             return
 
-        # 지표 값 조회
+        sym = bar.symbol
+        pos = broker.get_position(sym)
+
+        # ── _pos_meta lazy init / cleanup (on_fill 비의존) ─────────────────
+        if pos is None and sym in self._pos_meta:
+            del self._pos_meta[sym]
+        if pos is not None and sym not in self._pos_meta:
+            if pos.side == "LONG":
+                R = pos.entry_price - pos.stop_loss
+            else:
+                R = pos.stop_loss - pos.entry_price
+            self._pos_meta[sym] = {
+                "R": R,
+                "initial_sl": pos.stop_loss,
+                "be_triggered": False,
+                "trail_active": False,
+                "bars_held": 0,
+            }
+
+        # 포지션 보유 중: bars_held 증가 + 관리 (Task 5에서 _manage_position 추가 예정)
+        if pos is not None:
+            self._pos_meta[sym]["bars_held"] += 1
+            return
+
+        # ── 진입 로직 ─────────────────────────────────────────────────────
         bb_mid = cache.arrays["bb_mid"][i]
         rsi_val = cache.arrays["rsi"][i]
         squeeze_now = cache.arrays["squeeze_on"][i]
@@ -95,11 +119,6 @@ class BBKCSqueeze:
             return
 
         close = bar.close
-        pos = broker.get_position(bar.symbol)
-
-        # 이미 포지션 있으면 스킵 (Fixed TP/SL은 Broker가 자동 처리)
-        if pos is not None:
-            return
 
         # Squeeze 해제 감지: 직전 봉 squeeze ON → 현재 봉 squeeze OFF
         if not (squeeze_prev >= 1.0 and squeeze_now < 1.0):
