@@ -138,3 +138,65 @@ def test_short_pos_meta_R_calculation():
     meta = s._pos_meta["BTCUSDT"]
     # SHORT: R = SL - entry = 105 - 100 = 5
     assert meta["R"] == pytest.approx(5.0)
+
+
+# ── Task 5: be_trail BE step (+1R → SL=entry) ─────────────────────────────
+
+
+def test_be_trail_long_below_1R_no_change():
+    s = BBKCSqueeze(exit_mode="be_trail")
+    broker = _MockBroker()
+    cache = _stub_cache_with_position(s)
+    broker.positions["BTCUSDT"] = Position(
+        "BTCUSDT", "LONG", 1.0, 100.0, 1700000000000,
+        95.0, 110.0, 0.0, "BBKCSqueeze", 0.0,
+    )
+    # close=104 → +4 < 1R(=5) → no BE
+    bar = Bar("BTCUSDT", 1700000000000, "1h", 104, 104, 104, 104, 1000)
+    s.on_bar_fast(bar, 50, cache, broker)
+    assert broker.stop_updates == []
+    assert s._pos_meta["BTCUSDT"]["be_triggered"] is False
+
+
+def test_be_trail_long_at_1R_triggers_BE():
+    s = BBKCSqueeze(exit_mode="be_trail")
+    broker = _MockBroker()
+    cache = _stub_cache_with_position(s)
+    broker.positions["BTCUSDT"] = Position(
+        "BTCUSDT", "LONG", 1.0, 100.0, 1700000000000,
+        95.0, 110.0, 0.0, "BBKCSqueeze", 0.0,
+    )
+    # close=105 → +5 >= 1R → BE: stop = entry = 100
+    bar = Bar("BTCUSDT", 1700000000000, "1h", 105, 105, 105, 105, 1000)
+    s.on_bar_fast(bar, 50, cache, broker)
+    assert broker.stop_updates == [("BTCUSDT", 100.0)]
+    assert s._pos_meta["BTCUSDT"]["be_triggered"] is True
+
+
+def test_be_trail_long_BE_only_triggers_once():
+    s = BBKCSqueeze(exit_mode="be_trail")
+    broker = _MockBroker()
+    cache = _stub_cache_with_position(s)
+    broker.positions["BTCUSDT"] = Position(
+        "BTCUSDT", "LONG", 1.0, 100.0, 1700000000000,
+        95.0, 110.0, 0.0, "BBKCSqueeze", 0.0,
+    )
+    bar = Bar("BTCUSDT", 1700000000000, "1h", 105, 105, 105, 105, 1000)
+    s.on_bar_fast(bar, 50, cache, broker)
+    # Second bar still above 1R but below 2R — should NOT re-trigger BE
+    bar2 = Bar("BTCUSDT", 1700000000001, "1h", 106, 106, 106, 106, 1000)
+    s.on_bar_fast(bar2, 51, cache, broker)
+    assert len(broker.stop_updates) == 1
+
+
+def test_be_trail_fixed_mode_does_not_BE():
+    s = BBKCSqueeze(exit_mode="fixed")  # NOT be_trail
+    broker = _MockBroker()
+    cache = _stub_cache_with_position(s)
+    broker.positions["BTCUSDT"] = Position(
+        "BTCUSDT", "LONG", 1.0, 100.0, 1700000000000,
+        95.0, 110.0, 0.0, "BBKCSqueeze", 0.0,
+    )
+    bar = Bar("BTCUSDT", 1700000000000, "1h", 110, 110, 110, 110, 1000)
+    s.on_bar_fast(bar, 50, cache, broker)
+    assert broker.stop_updates == []   # fixed never updates stop

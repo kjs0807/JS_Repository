@@ -103,9 +103,10 @@ class BBKCSqueeze:
                 "bars_held": 0,
             }
 
-        # 포지션 보유 중: bars_held 증가 + 관리 (Task 5에서 _manage_position 추가 예정)
+        # 포지션 보유 중: bars_held 증가 + 관리
         if pos is not None:
             self._pos_meta[sym]["bars_held"] += 1
+            self._manage_position(bar, pos, broker)
             return
 
         # ── 진입 로직 ─────────────────────────────────────────────────────
@@ -154,6 +155,27 @@ class BBKCSqueeze:
         cache = self.prepare(series)
         idx = len(series) - 1
         self.on_bar_fast(bar, idx, cache, broker)
+
+    def _manage_position(self, bar: Bar, pos, broker: Broker) -> None:
+        """포지션 보유 중 관리: be_trail BE/trailing + time_stop."""
+        sym = bar.symbol
+        meta = self._pos_meta[sym]
+        R = meta["R"]
+        if R <= 0:
+            return  # invariants violated; bail out safely
+
+        close = bar.close
+        if pos.side == "LONG":
+            move = close - pos.entry_price
+        else:
+            move = pos.entry_price - close
+
+        if self.exit_mode == "be_trail":
+            # BE step: 1R favorable 도달 시 SL을 entry로 이동 (한 번만 트리거)
+            if not meta["be_triggered"] and move >= self.trail_be_r * R:
+                broker.update_stop(sym, pos.entry_price)
+                meta["be_triggered"] = True
+            # Trailing step: Task 6에서 추가 예정
 
     def on_fill(self, fill: Fill) -> None:
         pass
