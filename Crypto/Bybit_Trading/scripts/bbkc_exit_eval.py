@@ -133,6 +133,70 @@ def run_one_window(
     return run["trades"], run["per_symbol"][symbol]
 
 
+def build_report(
+    summary_judged: Dict[str, Dict[str, Dict[str, Any]]],
+    auxiliary: Dict[str, Dict[str, Dict[str, Any]]],
+    out_path: Path,
+) -> None:
+    """Generate human-readable Markdown report."""
+    lines: List[str] = [
+        "# BBKC Exit Round 2 — Sweep Report",
+        "",
+        f"Generated: {datetime.now(timezone.utc).isoformat()}",
+        "",
+        "## Per-Symbol Verdicts",
+        "",
+    ]
+
+    # Sort cell IDs in our canonical grid order
+    cell_order = [c["cell_id"] for c in STRATEGY_CONFIGS["BBKCSqueeze"]["exit_round_grid"]]
+    seen_cells = set()
+    for c in cell_order:
+        if c in summary_judged:
+            seen_cells.add(c)
+    extra_cells = sorted(set(summary_judged.keys()) - seen_cells)
+    final_cells = [c for c in cell_order if c in summary_judged] + extra_cells
+
+    for sym in SYMBOLS:
+        lines.append(f"### {sym}")
+        lines.append("")
+        lines.append("| Cell | WF OOS+/9 | R/trade | Max DD | Trades | Mean PnL | Verdict |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for cell_id in final_cells:
+            m = summary_judged.get(cell_id, {}).get(sym)
+            if not m:
+                continue
+            verdict = m["verdict"]
+            if m.get("warning"):
+                verdict += " (WARN: low trade count)"
+            lines.append(
+                f"| {cell_id} | {m['wf_oos_positive']}/{m['wf_total']} | "
+                f"{m['mean_r_per_trade']:+.3f} | {m['max_dd']*100:.2f}% | "
+                f"{m['trade_count']} | {m['mean_oos_pnl']:+.2f} | {verdict} |"
+            )
+        lines.append("")
+
+    lines.append("## Auxiliary Metrics (per cell × symbol, averaged across windows)")
+    lines.append("")
+    for cell_id in final_cells:
+        if cell_id not in auxiliary:
+            continue
+        lines.append(f"### {cell_id}")
+        lines.append("")
+        for sym, aux in auxiliary[cell_id].items():
+            lines.append(f"**{sym}**")
+            lines.append("")
+            er = aux.get("exit_reason_dist", {})
+            er_str = ", ".join(f"{k}: {v*100:.1f}%" for k, v in sorted(er.items()))
+            lines.append(f"- Exit reasons: {er_str or '(none)'}")
+            lines.append(f"- Mean R/win: {aux['mean_r_win']:+.3f}, R/loss: {aux['mean_r_loss']:+.3f}")
+            lines.append(f"- MFE retention: {aux['mfe_retention']:+.3f}")
+            lines.append(f"- Mean holding bars: {aux['mean_holding_bars']:.1f}")
+            lines.append("")
+
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def build_summary(jsonl_path: Path) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """Aggregate per-window WindowResult into per-(cell, symbol) summary."""
     rows: List[Dict[str, Any]] = []
@@ -367,6 +431,10 @@ def main() -> None:
     sum_path = OUTPUT_DIR / "summary.json"
     sum_path.write_text(json.dumps(summary_judged, indent=2), encoding="utf-8")
     logger.info("wrote %s", sum_path)
+
+    report_path = OUTPUT_DIR / "report.md"
+    build_report(summary_judged, auxiliary, report_path)
+    logger.info("wrote %s", report_path)
 
 
 if __name__ == "__main__":
