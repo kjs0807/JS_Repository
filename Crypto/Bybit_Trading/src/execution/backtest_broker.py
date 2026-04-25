@@ -29,6 +29,7 @@ class TradeRecord:
     fee: float
     exit_reason: str
     source: str
+    max_favorable: float = 0.0
 
 
 class BacktestBroker:
@@ -158,6 +159,14 @@ class BacktestBroker:
             )
             return
 
+        # Track max_favorable using bar high/low BEFORE checking exits
+        if pos.side == "LONG":
+            mfe_this_bar = bar.high - pos.entry_price
+        else:
+            mfe_this_bar = pos.entry_price - bar.low
+        if mfe_this_bar > pos.max_favorable:
+            pos.max_favorable = mfe_this_bar
+
         exit_price, exit_reason = self._check_exit(
             pos.side, pos.stop_loss, pos.take_profit,
             bar.open, bar.high, bar.low,
@@ -202,6 +211,7 @@ class BacktestBroker:
             entry_time=pos.entry_time, exit_time=timestamp,
             entry_price=pos.entry_price, exit_price=price,
             qty=pos.qty, pnl=pnl, fee=fee, exit_reason=reason, source=source,
+            max_favorable=pos.max_favorable,
         ))
         self._positions.close(symbol)
 
@@ -217,6 +227,7 @@ class BacktestBroker:
             entry_time=pos.entry_time, exit_time=timestamp,
             entry_price=pos.entry_price, exit_price=exit_price,
             qty=pos.qty, pnl=pnl, fee=fee, exit_reason=exit_reason, source="STRATEGY",
+            max_favorable=pos.max_favorable,
         ))
         self._positions.close(pos.symbol)
 
