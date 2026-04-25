@@ -129,6 +129,9 @@ node_modules/
 **/Lib/
 **/Scripts/
 **/share/man/
+# Allow project-local scripts directories (Windows ignorecase makes Scripts/==scripts/)
+!Crypto/Bybit_Trading/scripts/
+!Crypto/Bybit_Trading/scripts/**
 
 # MCP Servers (third-party, local config)
 MCP_Servers/
