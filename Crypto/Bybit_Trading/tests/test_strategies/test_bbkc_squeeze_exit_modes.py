@@ -200,3 +200,65 @@ def test_be_trail_fixed_mode_does_not_BE():
     bar = Bar("BTCUSDT", 1700000000000, "1h", 110, 110, 110, 110, 1000)
     s.on_bar_fast(bar, 50, cache, broker)
     assert broker.stop_updates == []   # fixed never updates stop
+
+
+# ── Task 6: be_trail trailing step (+2R → trail SL) ────────────────────────
+
+
+def test_be_trail_long_at_2R_activates_trailing_with_first_sl():
+    s = BBKCSqueeze(exit_mode="be_trail", trail_distance_r=0.5)
+    broker = _MockBroker()
+    cache = _stub_cache_with_position(s)
+    broker.positions["BTCUSDT"] = Position(
+        "BTCUSDT", "LONG", 1.0, 100.0, 1700000000000,
+        95.0, 130.0, 0.0, "BBKCSqueeze", 0.0,
+    )
+    # close=110 → +10 == 2R(=10) → BE + trailing activated
+    # trailing SL = close - 0.5*R = 110 - 2.5 = 107.5
+    bar = Bar("BTCUSDT", 1700000000000, "1h", 110, 110, 110, 110, 1000)
+    s.on_bar_fast(bar, 50, cache, broker)
+    assert ("BTCUSDT", 100.0) in broker.stop_updates
+    assert ("BTCUSDT", 107.5) in broker.stop_updates
+    assert s._pos_meta["BTCUSDT"]["trail_active"] is True
+
+
+def test_be_trail_long_trailing_only_ratchets_up():
+    s = BBKCSqueeze(exit_mode="be_trail", trail_distance_r=0.5)
+    broker = _MockBroker()
+    cache = _stub_cache_with_position(s)
+    broker.positions["BTCUSDT"] = Position(
+        "BTCUSDT", "LONG", 1.0, 100.0, 1700000000000,
+        95.0, 130.0, 0.0, "BBKCSqueeze", 0.0,
+    )
+    # First bar: close=112 → +12 >= 2R → trail activated, SL = 112 - 2.5 = 109.5
+    bar1 = Bar("BTCUSDT", 1700000000000, "1h", 112, 112, 112, 112, 1000)
+    s.on_bar_fast(bar1, 50, cache, broker)
+    # Simulate broker now reflects the trailed stop
+    broker.positions["BTCUSDT"].stop_loss = 109.5
+
+    # Second bar: close=111 (lower) → would compute SL=108.5, but ratchet says no
+    broker.stop_updates.clear()
+    bar2 = Bar("BTCUSDT", 1700000000001, "1h", 111, 111, 111, 111, 1000)
+    s.on_bar_fast(bar2, 51, cache, broker)
+    assert broker.stop_updates == []
+
+    # Third bar: close=115 → SL=112.5, higher than 109.5 → ratchet up
+    bar3 = Bar("BTCUSDT", 1700000000002, "1h", 115, 115, 115, 115, 1000)
+    s.on_bar_fast(bar3, 52, cache, broker)
+    assert broker.stop_updates == [("BTCUSDT", 112.5)]
+
+
+def test_be_trail_short_symmetry_at_2R():
+    s = BBKCSqueeze(exit_mode="be_trail", trail_distance_r=0.5)
+    broker = _MockBroker()
+    cache = _stub_cache_with_position(s)
+    broker.positions["BTCUSDT"] = Position(
+        "BTCUSDT", "SHORT", 1.0, 100.0, 1700000000000,
+        105.0, 70.0, 0.0, "BBKCSqueeze", 0.0,
+    )
+    # SHORT R=5. close=90 → move=10 >= 2R → BE + trailing
+    # trailing SL = close + 0.5*R = 90 + 2.5 = 92.5
+    bar = Bar("BTCUSDT", 1700000000000, "1h", 90, 90, 90, 90, 1000)
+    s.on_bar_fast(bar, 50, cache, broker)
+    assert ("BTCUSDT", 100.0) in broker.stop_updates       # BE
+    assert ("BTCUSDT", 92.5) in broker.stop_updates        # trail

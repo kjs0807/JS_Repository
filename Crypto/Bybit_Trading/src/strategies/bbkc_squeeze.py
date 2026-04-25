@@ -175,7 +175,23 @@ class BBKCSqueeze:
             if not meta["be_triggered"] and move >= self.trail_be_r * R:
                 broker.update_stop(sym, pos.entry_price)
                 meta["be_triggered"] = True
-            # Trailing step: Task 6에서 추가 예정
+
+            # Trailing step: 2R favorable 도달 시 활성화, 이후 ratchet up/down only
+            if move >= self.trail_start_r * R:
+                if pos.side == "LONG":
+                    new_sl = close - self.trail_distance_r * R
+                else:
+                    new_sl = close + self.trail_distance_r * R
+
+                if not meta["trail_active"]:
+                    broker.update_stop(sym, new_sl)
+                    meta["trail_active"] = True
+                else:
+                    # Ratchet: LONG only goes up, SHORT only goes down
+                    if pos.side == "LONG" and new_sl > pos.stop_loss:
+                        broker.update_stop(sym, new_sl)
+                    elif pos.side == "SHORT" and new_sl < pos.stop_loss:
+                        broker.update_stop(sym, new_sl)
 
     def on_fill(self, fill: Fill) -> None:
         pass
