@@ -101,6 +101,19 @@ Crypto/**/_legacy/
 Crypto/**/cache/
 Crypto/**/db/
 Crypto/**/snapshots/
+# Allow _legacy source code (Python only); inner logs/cache/db/snapshots
+# stay ignored via the patterns above. Same for tests/_legacy/.
+!Crypto/Bybit_Trading/_legacy/
+!Crypto/Bybit_Trading/_legacy/**
+!Crypto/Bybit_Trading/tests/_legacy/
+!Crypto/Bybit_Trading/tests/_legacy/**
+# Re-ignore non-source artifacts that may live under _legacy/
+Crypto/Bybit_Trading/_legacy/**/__pycache__/
+Crypto/Bybit_Trading/_legacy/**/*.pyc
+Crypto/Bybit_Trading/_legacy/db/
+Crypto/Bybit_Trading/_legacy/cache/
+Crypto/Bybit_Trading/_legacy/logs/
+Crypto/Bybit_Trading/_legacy/.omc/
 
 # KTB DB
 KTB/DB/trading_realtime.db
