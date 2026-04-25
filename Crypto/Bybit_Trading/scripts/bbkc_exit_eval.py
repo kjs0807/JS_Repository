@@ -133,6 +133,69 @@ def run_one_window(
     return run["trades"], run["per_symbol"][symbol]
 
 
+def build_summary(jsonl_path: Path) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Aggregate per-window WindowResult into per-(cell, symbol) summary."""
+    rows: List[Dict[str, Any]] = []
+    with jsonl_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+
+    by_pair: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for r in rows:
+        by_pair.setdefault((r["cell_id"], r["symbol"]), []).append(r)
+
+    summary: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for (cell_id, sym), windows in by_pair.items():
+        oos_pos = sum(1 for w in windows if w["oos_pnl"] > 0)
+        mean_r = sum(w["oos_r_per_trade"] for w in windows) / len(windows)
+        max_dd = max(w["oos_max_dd"] for w in windows)
+        n_trades = sum(w["oos_trades"] for w in windows)
+        mean_pnl = sum(w["oos_pnl"] for w in windows) / len(windows)
+        summary.setdefault(cell_id, {})[sym] = {
+            "wf_oos_positive": oos_pos,
+            "wf_total": len(windows),
+            "mean_r_per_trade": mean_r,
+            "max_dd": max_dd,
+            "trade_count": n_trades,
+            "mean_oos_pnl": mean_pnl,
+        }
+    return summary
+
+
+def judge(summary: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Apply PROMOTE / STRONG_PROMOTE / KILL / WARNING per (cell, symbol).
+
+    baseline = F0 of the same symbol. Cells without an F0 baseline (e.g. when
+    --cell skips F0) get verdict='UNKNOWN'.
+    """
+    f0 = summary.get("F0", {})
+    out: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for cell_id, by_sym in summary.items():
+        for sym, m in by_sym.items():
+            base = f0.get(sym)
+            verdict = "UNKNOWN"
+            warning = False
+            if base is not None:
+                if cell_id == "F0":
+                    verdict = "BASELINE"
+                else:
+                    if m["trade_count"] < base["trade_count"] * 0.5:
+                        warning = True
+                    if m["wf_oos_positive"] >= 7 and m["mean_r_per_trade"] >= base["mean_r_per_trade"]:
+                        verdict = "PROMOTE"
+                        if m["max_dd"] <= base["max_dd"]:
+                            verdict = "STRONG_PROMOTE"
+                    else:
+                        verdict = "KILL"
+            entry = dict(m)
+            entry["verdict"] = verdict
+            entry["warning"] = warning
+            out.setdefault(cell_id, {})[sym] = entry
+    return out
+
+
 def compute_auxiliary(
     trades: List[Any], sl_pct: float = 0.07, leverage: int = 3,
 ) -> Dict[str, Any]:
@@ -297,6 +360,13 @@ def main() -> None:
     aux_path = OUTPUT_DIR / "auxiliary.json"
     aux_path.write_text(json.dumps(auxiliary, indent=2), encoding="utf-8")
     logger.info("wrote %s", aux_path)
+
+    # Summary + verdict
+    summary_raw = build_summary(out_jsonl)
+    summary_judged = judge(summary_raw)
+    sum_path = OUTPUT_DIR / "summary.json"
+    sum_path.write_text(json.dumps(summary_judged, indent=2), encoding="utf-8")
+    logger.info("wrote %s", sum_path)
 
 
 if __name__ == "__main__":
