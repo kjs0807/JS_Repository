@@ -32,13 +32,24 @@ class BBKCSqueeze:
         leverage: int = 3,
         timeframe: str = "1h",
         exit_mode: str = "fixed",
-        trail_be_r: float = 1.0,
-        trail_start_r: float = 2.0,
-        trail_distance_r: float = 0.5,
+        trail_be_at_tp_frac: float = 0.5,
+        trail_start_at_tp_frac: float = 0.8,
+        trail_distance_tp_frac: float = 0.3,
+        drop_tp: bool = False,
         time_stop_bars: int = 0,
     ) -> None:
         if exit_mode not in ("fixed", "be_trail"):
             raise ValueError(f"exit_mode must be 'fixed' or 'be_trail', got {exit_mode!r}")
+        if exit_mode == "be_trail":
+            if not (0 < trail_be_at_tp_frac < trail_start_at_tp_frac < 1.0):
+                raise ValueError(
+                    f"need 0 < trail_be_at_tp_frac < trail_start_at_tp_frac < 1.0, "
+                    f"got be={trail_be_at_tp_frac}, start={trail_start_at_tp_frac}"
+                )
+            if trail_distance_tp_frac <= 0:
+                raise ValueError(
+                    f"trail_distance_tp_frac must be > 0, got {trail_distance_tp_frac}"
+                )
         self.bb_period = bb_period
         self.bb_std = bb_std
         self.kc_period = kc_period
@@ -51,9 +62,10 @@ class BBKCSqueeze:
         self.leverage = leverage
         self.timeframe = timeframe
         self.exit_mode = exit_mode
-        self.trail_be_r = trail_be_r
-        self.trail_start_r = trail_start_r
-        self.trail_distance_r = trail_distance_r
+        self.trail_be_at_tp_frac = trail_be_at_tp_frac
+        self.trail_start_at_tp_frac = trail_start_at_tp_frac
+        self.trail_distance_tp_frac = trail_distance_tp_frac
+        self.drop_tp = drop_tp
         self.time_stop_bars = time_stop_bars
         self._pos_meta: dict = {}
 
@@ -215,9 +227,10 @@ class BBKCSqueeze:
             "sl_pct": self.sl_pct,
             "leverage": self.leverage,
             "exit_mode": self.exit_mode,
-            "trail_be_r": self.trail_be_r,
-            "trail_start_r": self.trail_start_r,
-            "trail_distance_r": self.trail_distance_r,
+            "trail_be_at_tp_frac": self.trail_be_at_tp_frac,
+            "trail_start_at_tp_frac": self.trail_start_at_tp_frac,
+            "trail_distance_tp_frac": self.trail_distance_tp_frac,
+            "drop_tp": self.drop_tp,
             "time_stop_bars": self.time_stop_bars,
         }
 
