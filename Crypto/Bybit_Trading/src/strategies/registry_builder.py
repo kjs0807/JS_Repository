@@ -63,22 +63,18 @@ STRATEGY_CONFIGS: Dict[str, Dict[str, Any]] = {
             "tp_pct": [0.04, 0.06, 0.08],
             "sl_pct": [0.05, 0.07],
         },
-        # 2026-04-25 round 2: exit_mode × trail_distance_r × time_stop_bars
-        # 12 cells, evaluated separately from coarse_grid (see scripts/bbkc_exit_eval.py).
-        # Indicator params are FIXED at 2026-03-30 winner values during the exit round.
+        # 2026-04-28 round 3: TP-fraction trailing thresholds (round 2 R-unit dead path).
+        # 8 hand-picked archetypes. time_stop=0 across all (round 4 deferred).
+        # Indicator params FIXED at 2026-03-30 winner values during the exit round.
         "exit_round_grid": [
-            {"cell_id": "F0",     "exit_mode": "fixed",    "trail_distance_r": None, "time_stop_bars": 0},
-            {"cell_id": "F24",    "exit_mode": "fixed",    "trail_distance_r": None, "time_stop_bars": 24},
-            {"cell_id": "F48",    "exit_mode": "fixed",    "trail_distance_r": None, "time_stop_bars": 48},
-            {"cell_id": "F72",    "exit_mode": "fixed",    "trail_distance_r": None, "time_stop_bars": 72},
-            {"cell_id": "T05_0",  "exit_mode": "be_trail", "trail_distance_r": 0.5,  "time_stop_bars": 0},
-            {"cell_id": "T05_24", "exit_mode": "be_trail", "trail_distance_r": 0.5,  "time_stop_bars": 24},
-            {"cell_id": "T05_48", "exit_mode": "be_trail", "trail_distance_r": 0.5,  "time_stop_bars": 48},
-            {"cell_id": "T05_72", "exit_mode": "be_trail", "trail_distance_r": 0.5,  "time_stop_bars": 72},
-            {"cell_id": "T10_0",  "exit_mode": "be_trail", "trail_distance_r": 1.0,  "time_stop_bars": 0},
-            {"cell_id": "T10_24", "exit_mode": "be_trail", "trail_distance_r": 1.0,  "time_stop_bars": 24},
-            {"cell_id": "T10_48", "exit_mode": "be_trail", "trail_distance_r": 1.0,  "time_stop_bars": 48},
-            {"cell_id": "T10_72", "exit_mode": "be_trail", "trail_distance_r": 1.0,  "time_stop_bars": 72},
+            {"cell_id": "F0",           "exit_mode": "fixed",    "trail_be_at_tp_frac": None, "trail_start_at_tp_frac": None, "trail_distance_tp_frac": None, "drop_tp": False, "time_stop_bars": 0},
+            {"cell_id": "TF_default",   "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.50, "trail_start_at_tp_frac": 0.80, "trail_distance_tp_frac": 0.30, "drop_tp": False, "time_stop_bars": 0},
+            {"cell_id": "TF_wide",      "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.50, "trail_start_at_tp_frac": 0.80, "trail_distance_tp_frac": 0.50, "drop_tp": False, "time_stop_bars": 0},
+            {"cell_id": "TF_early",     "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.30, "trail_start_at_tp_frac": 0.60, "trail_distance_tp_frac": 0.30, "drop_tp": False, "time_stop_bars": 0},
+            {"cell_id": "TF_late",      "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.70, "trail_start_at_tp_frac": 0.90, "trail_distance_tp_frac": 0.30, "drop_tp": False, "time_stop_bars": 0},
+            {"cell_id": "TF_immediate", "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.49, "trail_start_at_tp_frac": 0.50, "trail_distance_tp_frac": 0.30, "drop_tp": False, "time_stop_bars": 0},
+            {"cell_id": "TR_default",   "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.50, "trail_start_at_tp_frac": 0.80, "trail_distance_tp_frac": 0.30, "drop_tp": True,  "time_stop_bars": 0},
+            {"cell_id": "TR_immediate", "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.49, "trail_start_at_tp_frac": 0.50, "trail_distance_tp_frac": 0.30, "drop_tp": True,  "time_stop_bars": 0},
         ],
         "symbols": SYMBOLS_DEFAULT,
         "timeframes": TIMEFRAMES_DEFAULT,
