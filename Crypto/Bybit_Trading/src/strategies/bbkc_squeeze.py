@@ -136,8 +136,8 @@ class BBKCSqueeze:
 
         # LONG: 상단 이탈 + RSI 과열 아님
         if close > bb_mid and rsi_val < self.rsi_filter:
-            tp = close * (1 + price_tp)
             sl = close * (1 - price_sl)
+            tp = None if self.drop_tp else close * (1 + price_tp)
             qty = broker.calc_qty(bar.symbol, risk_pct=0.02, stop_distance=close - sl)
             if qty > 0:
                 broker.buy(bar.symbol, qty, stop_loss=sl, take_profit=tp,
@@ -145,8 +145,8 @@ class BBKCSqueeze:
 
         # SHORT: 하단 이탈 + RSI 과매도 아님
         elif close < bb_mid and rsi_val > (100.0 - self.rsi_filter):
-            tp = close * (1 - price_tp)
             sl = close * (1 + price_sl)
+            tp = None if self.drop_tp else close * (1 - price_tp)
             qty = broker.calc_qty(bar.symbol, risk_pct=0.02, stop_distance=sl - close)
             if qty > 0:
                 broker.sell(bar.symbol, qty, stop_loss=sl, take_profit=tp,

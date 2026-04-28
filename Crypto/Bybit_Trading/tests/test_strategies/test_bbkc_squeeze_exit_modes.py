@@ -332,3 +332,68 @@ def test_be_trail_full_lifecycle_smoke():
     bar_trail = Bar("BTCUSDT", 1700000000002, "1h", 102.0, 102.0, 102.0, 102.0, 1000)
     s.on_bar_fast(bar_trail, 51, cache, broker)
     assert s._pos_meta["BTCUSDT"]["trail_active"] is True
+
+
+# ── drop_tp behavior at entry ────────────────────────────────────────────
+
+
+from src.strategies.base import IndicatorCache
+
+
+def _forced_entry_cache(n: int = 60) -> IndicatorCache:
+    """Cache that forces squeeze release LONG signal at index n-1."""
+    return IndicatorCache(arrays={
+        "bb_upper": np.array([102.0] * n),
+        "bb_mid":   np.array([100.0] * n),   # LONG: close > bb_mid
+        "bb_lower": np.array([98.0] * n),
+        "kc_upper": np.array([103.0] * n),
+        "kc_lower": np.array([97.0] * n),
+        "rsi":      np.array([55.0] * n),    # < rsi_filter (70)
+        "squeeze_on": np.array([1.0] * (n - 1) + [0.0]),  # release on last bar
+    })
+
+
+def test_drop_tp_false_passes_take_profit_at_entry():
+    s = BBKCSqueeze(exit_mode="be_trail", drop_tp=False)
+    broker = _MockBroker()
+    cache = _forced_entry_cache(60)
+    # close > bb_mid(100) → LONG entry
+    bar = Bar("BTCUSDT", 1700000000000, "1h", 101.0, 101.0, 101.0, 101.0, 1000)
+    s.on_bar_fast(bar, 59, cache, broker)
+    assert len(broker.buys) == 1
+    sym, qty, sl, tp, _ = broker.buys[0]
+    assert tp is not None
+    assert tp > 101.0   # LONG: TP above entry
+
+
+def test_drop_tp_true_passes_none_take_profit_at_entry():
+    s = BBKCSqueeze(exit_mode="be_trail", drop_tp=True)
+    broker = _MockBroker()
+    cache = _forced_entry_cache(60)
+    bar = Bar("BTCUSDT", 1700000000000, "1h", 101.0, 101.0, 101.0, 101.0, 1000)
+    s.on_bar_fast(bar, 59, cache, broker)
+    assert len(broker.buys) == 1
+    sym, qty, sl, tp, _ = broker.buys[0]
+    assert tp is None
+    assert sl is not None and sl < 101.0   # SL still set
+
+
+def test_drop_tp_true_short_also_passes_none_tp():
+    s = BBKCSqueeze(exit_mode="be_trail", drop_tp=True)
+    broker = _MockBroker()
+    # SHORT: close < bb_mid + RSI > 30
+    cache = IndicatorCache(arrays={
+        "bb_upper": np.array([102.0] * 60),
+        "bb_mid":   np.array([100.0] * 60),
+        "bb_lower": np.array([98.0] * 60),
+        "kc_upper": np.array([103.0] * 60),
+        "kc_lower": np.array([97.0] * 60),
+        "rsi":      np.array([45.0] * 60),
+        "squeeze_on": np.array([1.0] * 59 + [0.0]),
+    })
+    bar = Bar("BTCUSDT", 1700000000000, "1h", 99.0, 99.0, 99.0, 99.0, 1000)
+    s.on_bar_fast(bar, 59, cache, broker)
+    assert len(broker.sells) == 1
+    sym, qty, sl, tp, _ = broker.sells[0]
+    assert tp is None
+    assert sl is not None and sl > 99.0
