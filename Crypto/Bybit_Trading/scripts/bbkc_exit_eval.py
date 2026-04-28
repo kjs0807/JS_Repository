@@ -237,31 +237,51 @@ def build_summary(jsonl_path: Path) -> Dict[str, Dict[str, Dict[str, Any]]]:
 
 
 def judge(summary: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    """Apply PROMOTE / STRONG_PROMOTE / KILL / WARNING per (cell, symbol).
+    """Apply baseline-relative delta rules per (cell, symbol). Round 3 §9.
 
-    baseline = F0 of the same symbol. Cells without an F0 baseline (e.g. when
-    --cell skips F0) get verdict='UNKNOWN'.
+    F0 is BASELINE per symbol. Cells without an F0 baseline (e.g. when --cell
+    skipped F0) get verdict='UNKNOWN'.
+
+    Verdict tiers (baseline = F0 same symbol):
+      STRONG_PROMOTE — Δwf_oos+ ≥ 2  AND  Δr ≥ 0  AND  DD ≤ baseline
+      PROMOTE        — Δwf_oos+ ≥ 1  AND  Δr ≥ 0
+      NEUTRAL        — |Δwf_oos+| ≤ 1  AND  |Δr| ≤ 0.05
+      KILL           — Δwf_oos+ < -1  OR  Δr < -0.05
+    WARNING (덧붙음) — trade_count < baseline × 0.5 (verdict와 별도 플래그)
     """
     f0 = summary.get("F0", {})
     out: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for cell_id, by_sym in summary.items():
         for sym, m in by_sym.items():
-            base = f0.get(sym)
-            verdict = "UNKNOWN"
-            warning = False
-            if base is not None:
-                if cell_id == "F0":
-                    verdict = "BASELINE"
-                else:
-                    if m["trade_count"] < base["trade_count"] * 0.5:
-                        warning = True
-                    if m["wf_oos_positive"] >= 7 and m["mean_r_per_trade"] >= base["mean_r_per_trade"]:
-                        verdict = "PROMOTE"
-                        if m["max_dd"] <= base["max_dd"]:
-                            verdict = "STRONG_PROMOTE"
-                    else:
-                        verdict = "KILL"
             entry = dict(m)
+            if cell_id == "F0":
+                entry["verdict"] = "BASELINE"
+                entry["warning"] = False
+                out.setdefault(cell_id, {})[sym] = entry
+                continue
+            base = f0.get(sym)
+            if base is None:
+                # F0 없이 부분 실행된 경우. baseline 비교 불가.
+                entry["verdict"] = "UNKNOWN"
+                entry["warning"] = False
+                out.setdefault(cell_id, {})[sym] = entry
+                continue
+
+            warning = m["trade_count"] < base["trade_count"] * 0.5
+            pos_delta = m["wf_oos_positive"] - base["wf_oos_positive"]
+            r_delta = m["mean_r_per_trade"] - base["mean_r_per_trade"]
+
+            if pos_delta >= 2 and r_delta >= 0 and m["max_dd"] <= base["max_dd"]:
+                verdict = "STRONG_PROMOTE"
+            elif pos_delta >= 1 and r_delta >= 0:
+                verdict = "PROMOTE"
+            elif abs(pos_delta) <= 1 and abs(r_delta) <= 0.05:
+                verdict = "NEUTRAL"
+            elif pos_delta < -1 or r_delta < -0.05:
+                verdict = "KILL"
+            else:
+                verdict = "NEUTRAL"   # safety fallback
+
             entry["verdict"] = verdict
             entry["warning"] = warning
             out.setdefault(cell_id, {})[sym] = entry
