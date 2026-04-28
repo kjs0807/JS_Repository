@@ -64,18 +64,23 @@ class WindowResult:
 
 
 def make_strategy_factory(cell: Dict[str, Any]):
-    """Return a zero-arg factory that builds BBKCSqueeze with cell params."""
+    """Return a zero-arg factory that builds BBKCSqueeze with cell params (round 3 schema).
+
+    fixed cells leave trail/be defaults untouched (no be_trail invariant check).
+    be_trail cells supply the three TP-fraction params explicitly.
+    """
     kwargs: Dict[str, Any] = dict(
         bb_period=20, bb_std=1.5, kc_period=20, kc_mult=1.0,
         atr_period=14, rsi_period=14, rsi_filter=70.0,
         tp_pct=0.06, sl_pct=0.07, leverage=3, timeframe="1h",
         exit_mode=cell["exit_mode"],
-        trail_be_r=1.0,
-        trail_start_r=2.0,
+        drop_tp=cell.get("drop_tp", False),
         time_stop_bars=cell["time_stop_bars"],
     )
-    if cell["trail_distance_r"] is not None:
-        kwargs["trail_distance_r"] = cell["trail_distance_r"]
+    if cell["exit_mode"] == "be_trail":
+        kwargs["trail_be_at_tp_frac"] = cell["trail_be_at_tp_frac"]
+        kwargs["trail_start_at_tp_frac"] = cell["trail_start_at_tp_frac"]
+        kwargs["trail_distance_tp_frac"] = cell["trail_distance_tp_frac"]
     return lambda: BBKCSqueeze(**kwargs)
 
 
