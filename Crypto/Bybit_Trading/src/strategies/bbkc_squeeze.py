@@ -32,13 +32,24 @@ class BBKCSqueeze:
         leverage: int = 3,
         timeframe: str = "1h",
         exit_mode: str = "fixed",
-        trail_be_r: float = 1.0,
-        trail_start_r: float = 2.0,
-        trail_distance_r: float = 0.5,
+        trail_be_at_tp_frac: float = 0.5,
+        trail_start_at_tp_frac: float = 0.8,
+        trail_distance_tp_frac: float = 0.3,
+        drop_tp: bool = False,
         time_stop_bars: int = 0,
     ) -> None:
         if exit_mode not in ("fixed", "be_trail"):
             raise ValueError(f"exit_mode must be 'fixed' or 'be_trail', got {exit_mode!r}")
+        if exit_mode == "be_trail":
+            if not (0 < trail_be_at_tp_frac < trail_start_at_tp_frac < 1.0):
+                raise ValueError(
+                    f"need 0 < trail_be_at_tp_frac < trail_start_at_tp_frac < 1.0, "
+                    f"got be={trail_be_at_tp_frac}, start={trail_start_at_tp_frac}"
+                )
+            if trail_distance_tp_frac <= 0:
+                raise ValueError(
+                    f"trail_distance_tp_frac must be > 0, got {trail_distance_tp_frac}"
+                )
         self.bb_period = bb_period
         self.bb_std = bb_std
         self.kc_period = kc_period
@@ -51,9 +62,10 @@ class BBKCSqueeze:
         self.leverage = leverage
         self.timeframe = timeframe
         self.exit_mode = exit_mode
-        self.trail_be_r = trail_be_r
-        self.trail_start_r = trail_start_r
-        self.trail_distance_r = trail_distance_r
+        self.trail_be_at_tp_frac = trail_be_at_tp_frac
+        self.trail_start_at_tp_frac = trail_start_at_tp_frac
+        self.trail_distance_tp_frac = trail_distance_tp_frac
+        self.drop_tp = drop_tp
         self.time_stop_bars = time_stop_bars
         self._pos_meta: dict = {}
 
@@ -91,13 +103,7 @@ class BBKCSqueeze:
         if pos is None and sym in self._pos_meta:
             del self._pos_meta[sym]
         if pos is not None and sym not in self._pos_meta:
-            if pos.side == "LONG":
-                R = pos.entry_price - pos.stop_loss
-            else:
-                R = pos.stop_loss - pos.entry_price
             self._pos_meta[sym] = {
-                "R": R,
-                "initial_sl": pos.stop_loss,
                 "be_triggered": False,
                 "trail_active": False,
                 "bars_held": 0,
@@ -130,8 +136,8 @@ class BBKCSqueeze:
 
         # LONG: 상단 이탈 + RSI 과열 아님
         if close > bb_mid and rsi_val < self.rsi_filter:
-            tp = close * (1 + price_tp)
             sl = close * (1 - price_sl)
+            tp = None if self.drop_tp else close * (1 + price_tp)
             qty = broker.calc_qty(bar.symbol, risk_pct=0.02, stop_distance=close - sl)
             if qty > 0:
                 broker.buy(bar.symbol, qty, stop_loss=sl, take_profit=tp,
@@ -139,8 +145,8 @@ class BBKCSqueeze:
 
         # SHORT: 하단 이탈 + RSI 과매도 아님
         elif close < bb_mid and rsi_val > (100.0 - self.rsi_filter):
-            tp = close * (1 - price_tp)
             sl = close * (1 + price_sl)
+            tp = None if self.drop_tp else close * (1 - price_tp)
             qty = broker.calc_qty(bar.symbol, risk_pct=0.02, stop_distance=sl - close)
             if qty > 0:
                 broker.sell(bar.symbol, qty, stop_loss=sl, take_profit=tp,
@@ -157,12 +163,14 @@ class BBKCSqueeze:
         self.on_bar_fast(bar, idx, cache, broker)
 
     def _manage_position(self, bar: Bar, pos, broker: Broker) -> None:
-        """포지션 보유 중 관리: be_trail BE/trailing + time_stop."""
+        """포지션 보유 중 관리: be_trail BE/trailing (TP-fraction 단위) + time_stop."""
         sym = bar.symbol
         meta = self._pos_meta[sym]
-        R = meta["R"]
-        if R <= 0:
-            return  # invariants violated; bail out safely
+
+        # tp_distance = entry × tp_pct / leverage. Safety guards.
+        if pos.entry_price <= 0 or self.tp_pct <= 0 or self.leverage <= 0:
+            return
+        tp_distance = pos.entry_price * self.tp_pct / self.leverage
 
         close = bar.close
         if pos.side == "LONG":
@@ -171,23 +179,20 @@ class BBKCSqueeze:
             move = pos.entry_price - close
 
         if self.exit_mode == "be_trail":
-            # BE step: 1R favorable 도달 시 SL을 entry로 이동 (한 번만 트리거)
-            if not meta["be_triggered"] and move >= self.trail_be_r * R:
+            # BE step (한 번만): close 가 entry 기준 trail_be_at_tp_frac × tp_dist 이상 유리
+            if not meta["be_triggered"] and move >= self.trail_be_at_tp_frac * tp_distance:
                 broker.update_stop(sym, pos.entry_price)
                 meta["be_triggered"] = True
 
-            # Trailing step: 2R favorable 도달 시 활성화, 이후 ratchet up/down only
-            if move >= self.trail_start_r * R:
-                if pos.side == "LONG":
-                    new_sl = close - self.trail_distance_r * R
-                else:
-                    new_sl = close + self.trail_distance_r * R
+            # Trailing step (활성 후 ratchet only)
+            if move >= self.trail_start_at_tp_frac * tp_distance:
+                offset = self.trail_distance_tp_frac * tp_distance
+                new_sl = (close - offset) if pos.side == "LONG" else (close + offset)
 
                 if not meta["trail_active"]:
                     broker.update_stop(sym, new_sl)
                     meta["trail_active"] = True
                 else:
-                    # Ratchet: LONG only goes up, SHORT only goes down
                     if pos.side == "LONG" and new_sl > pos.stop_loss:
                         broker.update_stop(sym, new_sl)
                     elif pos.side == "SHORT" and new_sl < pos.stop_loss:
@@ -215,9 +220,10 @@ class BBKCSqueeze:
             "sl_pct": self.sl_pct,
             "leverage": self.leverage,
             "exit_mode": self.exit_mode,
-            "trail_be_r": self.trail_be_r,
-            "trail_start_r": self.trail_start_r,
-            "trail_distance_r": self.trail_distance_r,
+            "trail_be_at_tp_frac": self.trail_be_at_tp_frac,
+            "trail_start_at_tp_frac": self.trail_start_at_tp_frac,
+            "trail_distance_tp_frac": self.trail_distance_tp_frac,
+            "drop_tp": self.drop_tp,
             "time_stop_bars": self.time_stop_bars,
         }
 

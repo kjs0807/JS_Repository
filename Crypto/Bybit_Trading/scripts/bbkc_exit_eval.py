@@ -1,4 +1,4 @@
-"""BBKC Exit Round 2 evaluation runner.
+"""BBKC Exit Round 3 evaluation runner.
 
 Sweeps 12 exit cells × BIGTHREE × 9 walk-forward windows.
 Reuses the existing HoldoutSpec/run_strategy_on_holdout pipeline; each
@@ -64,18 +64,23 @@ class WindowResult:
 
 
 def make_strategy_factory(cell: Dict[str, Any]):
-    """Return a zero-arg factory that builds BBKCSqueeze with cell params."""
+    """Return a zero-arg factory that builds BBKCSqueeze with cell params (round 3 schema).
+
+    fixed cells leave trail/be defaults untouched (no be_trail invariant check).
+    be_trail cells supply the three TP-fraction params explicitly.
+    """
     kwargs: Dict[str, Any] = dict(
         bb_period=20, bb_std=1.5, kc_period=20, kc_mult=1.0,
         atr_period=14, rsi_period=14, rsi_filter=70.0,
         tp_pct=0.06, sl_pct=0.07, leverage=3, timeframe="1h",
         exit_mode=cell["exit_mode"],
-        trail_be_r=1.0,
-        trail_start_r=2.0,
+        drop_tp=cell.get("drop_tp", False),
         time_stop_bars=cell["time_stop_bars"],
     )
-    if cell["trail_distance_r"] is not None:
-        kwargs["trail_distance_r"] = cell["trail_distance_r"]
+    if cell["exit_mode"] == "be_trail":
+        kwargs["trail_be_at_tp_frac"] = cell["trail_be_at_tp_frac"]
+        kwargs["trail_start_at_tp_frac"] = cell["trail_start_at_tp_frac"]
+        kwargs["trail_distance_tp_frac"] = cell["trail_distance_tp_frac"]
     return lambda: BBKCSqueeze(**kwargs)
 
 
@@ -143,7 +148,7 @@ def build_report(
 ) -> None:
     """Generate human-readable Markdown report."""
     lines: List[str] = [
-        "# BBKC Exit Round 2 — Sweep Report",
+        "# BBKC Exit Round 3 — Sweep Report",
         "",
         f"Generated: {datetime.now(timezone.utc).isoformat()}",
         "",
@@ -232,31 +237,51 @@ def build_summary(jsonl_path: Path) -> Dict[str, Dict[str, Dict[str, Any]]]:
 
 
 def judge(summary: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    """Apply PROMOTE / STRONG_PROMOTE / KILL / WARNING per (cell, symbol).
+    """Apply baseline-relative delta rules per (cell, symbol). Round 3 §9.
 
-    baseline = F0 of the same symbol. Cells without an F0 baseline (e.g. when
-    --cell skips F0) get verdict='UNKNOWN'.
+    F0 is BASELINE per symbol. Cells without an F0 baseline (e.g. when --cell
+    skipped F0) get verdict='UNKNOWN'.
+
+    Verdict tiers (baseline = F0 same symbol):
+      STRONG_PROMOTE — Δwf_oos+ ≥ 2  AND  Δr ≥ 0  AND  DD ≤ baseline
+      PROMOTE        — Δwf_oos+ ≥ 1  AND  Δr ≥ 0
+      NEUTRAL        — |Δwf_oos+| ≤ 1  AND  |Δr| ≤ 0.05
+      KILL           — Δwf_oos+ < -1  OR  Δr < -0.05
+    WARNING (덧붙음) — trade_count < baseline × 0.5 (verdict와 별도 플래그)
     """
     f0 = summary.get("F0", {})
     out: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for cell_id, by_sym in summary.items():
         for sym, m in by_sym.items():
-            base = f0.get(sym)
-            verdict = "UNKNOWN"
-            warning = False
-            if base is not None:
-                if cell_id == "F0":
-                    verdict = "BASELINE"
-                else:
-                    if m["trade_count"] < base["trade_count"] * 0.5:
-                        warning = True
-                    if m["wf_oos_positive"] >= 7 and m["mean_r_per_trade"] >= base["mean_r_per_trade"]:
-                        verdict = "PROMOTE"
-                        if m["max_dd"] <= base["max_dd"]:
-                            verdict = "STRONG_PROMOTE"
-                    else:
-                        verdict = "KILL"
             entry = dict(m)
+            if cell_id == "F0":
+                entry["verdict"] = "BASELINE"
+                entry["warning"] = False
+                out.setdefault(cell_id, {})[sym] = entry
+                continue
+            base = f0.get(sym)
+            if base is None:
+                # F0 없이 부분 실행된 경우. baseline 비교 불가.
+                entry["verdict"] = "UNKNOWN"
+                entry["warning"] = False
+                out.setdefault(cell_id, {})[sym] = entry
+                continue
+
+            warning = m["trade_count"] < base["trade_count"] * 0.5
+            pos_delta = m["wf_oos_positive"] - base["wf_oos_positive"]
+            r_delta = m["mean_r_per_trade"] - base["mean_r_per_trade"]
+
+            if pos_delta >= 2 and r_delta >= 0 and m["max_dd"] <= base["max_dd"]:
+                verdict = "STRONG_PROMOTE"
+            elif pos_delta >= 1 and r_delta >= 0:
+                verdict = "PROMOTE"
+            elif abs(pos_delta) <= 1 and abs(r_delta) <= 0.05:
+                verdict = "NEUTRAL"
+            elif pos_delta < -1 or r_delta < -0.05:
+                verdict = "KILL"
+            else:
+                verdict = "NEUTRAL"   # safety fallback
+
             entry["verdict"] = verdict
             entry["warning"] = warning
             out.setdefault(cell_id, {})[sym] = entry

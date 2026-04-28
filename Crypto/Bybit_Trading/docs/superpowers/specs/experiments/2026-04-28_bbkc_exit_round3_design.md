@@ -372,20 +372,75 @@ trailing 작동 sanity check: TF_* 셀과 F0의 exit_reason 분포가 다르면 
 
 ---
 
-## 15. Round 3 Results (sweep 후 채울 placeholder)
+## 15. Round 3 Results (2026-04-28 sweep)
 
-**Status**: TBD
+**Run**: `logs/research/bbkc_squeeze/exit_round/2026-04-28_T2104/` + `latest/`
+**Coverage**: 8 cells × 3 symbols × 9 WF windows = **216 backtests**, ~46초
 
 ### 15.1 판정 결과
 
-(per-symbol verdict 테이블)
+24 cell-symbol pair (F0 BASELINE 3개 제외 21 평가):
 
-### 15.2 핵심 발견
+**Verdict 분포**: STRONG_PROMOTE 1, PROMOTE 0, NEUTRAL 12, KILL 8
 
-- be_trail 컨셉이 BBKC에 살아있는가? (Yes/No/Conditional)
-- 어느 archetype이 winner?
-- drop_tp 효과 (TR vs TF 비교)?
+| Cell | BTC | ETH | AVAX |
+|---|---|---|---|
+| F0 (baseline) | wf 3/9, R -0.048 | wf 4/9, R +0.024 | wf 3/9, R -0.145 |
+| TF_default | NEUTRAL (3/9, R -0.007) | NEUTRAL (3/9, R +0.005) | KILL (2/9, R -0.257) |
+| TF_wide | NEUTRAL (3/9, R -0.008) | NEUTRAL (3/9, R +0.004) | KILL (2/9, R -0.241) |
+| **TF_early** | NEUTRAL (3/9, R -0.011) | **STRONG_PROMOTE (6/9, R +0.064, n=154)** | KILL (2/9, R -0.219) |
+| TF_late | NEUTRAL (3/9, R -0.004) | NEUTRAL (3/9, R +0.012) | NEUTRAL (3/9, R -0.152) |
+| TF_immediate | NEUTRAL (3/9, R -0.029) | NEUTRAL (4/9, R +0.008) | KILL (2/9, R -0.234) |
+| TR_default | NEUTRAL (3/9, R -0.032) | KILL (2/9, R -0.031) | KILL (1/9, R -0.341) |
+| TR_immediate | NEUTRAL (3/9, R -0.036) | KILL (3/9, R -0.034) | KILL (1/9, R -0.313) |
 
-### 15.3 라운드 4 후보
+### 15.2 핵심 발견 1: be_trail 컨셉이 BBKC에 살아있는가? **Conditional Yes (ETH only)**
 
-(이번 라운드 학습 기반)
+라운드 2의 R-unit 침묵 문제는 TP-fraction 단위 전환으로 완전 해소. 모든 셀이 baseline과 다른 R/trade·trade count·exit_reason 분포를 산출 (라운드 2처럼 숫자 동일 패턴 0건). `_manage_position` 호출과 `update_stop` 호출이 정상 발생함이 결과로 검증됨.
+
+단 archetype별 효과는 **심볼-특이적**:
+- **ETH** — TF_early에서 WF 안정성 +2 (4/9 → 6/9), R/trade 개선 (+0.024 → +0.064), DD ≤ baseline → STRONG_PROMOTE
+- **BTC** — 6 archetype 모두 NEUTRAL. trailing이 주는 보호와 잘려나간 이익이 상쇄. fixed가 가장 무난
+- **AVAX** — TF_late만 NEUTRAL, 나머지 5 archetype + 2 TR 모두 KILL. 변동성 큰 알트에서 trailing이 fat-tail을 자르는 비용이 보호 이득보다 큼
+
+### 15.3 핵심 발견 2: drop_tp(R3b) 가설 기각
+
+TR_default vs TF_default, TR_immediate vs TF_immediate 비교 결과 모든 심볼에서 TR_*가 TF_*보다 동등 또는 열등:
+- BTC: TR_default R -0.032 < TF_default -0.007 (열등)
+- ETH: TR_default KILL vs TF_default NEUTRAL (열등)
+- AVAX: TR_default KILL (R -0.341) < TF_default KILL (R -0.257) (더 깊은 KILL)
+
+**해석**: 이번 평가 구간(2024-08~2026-02 OOS)에서 TP cap은 noise 보호 역할을 했고, 제거 시 fat-tail 캡처 이득이 SL hit 손실을 상쇄하지 못함. drop_tp 가설은 이 시장 환경에서는 의미 없음. `exit_reason_dist`의 TP=0% sanity check는 모든 TR 셀에서 통과 (drop_tp 동작 자체는 정상).
+
+### 15.4 archetype 비교 학습
+
+- **TF_default vs TF_wide**: 거의 동일 (NEUTRAL/KILL 패턴 동일). trail_distance 0.3 vs 0.5 차이 미미. 이번 구간에서 trailing 폭은 핵심 변수 아님
+- **TF_early vs TF_default**: **trigger 위치가 핵심**. ETH에서 0.3/0.6이 0.5/0.8을 큰 차이로 능가 (STRONG_PROMOTE vs NEUTRAL). 더 일찍 보호 시작 → ETH 변동성 패턴에 잘 맞음
+- **TF_late**: trail_start=0.9는 TP(=2.0%)에 너무 가까워 trailing 거의 일 안 함 (사전 §13 리스크 #1 예측 적중). fixed와 사실상 동일 결과 (모든 심볼 NEUTRAL)
+- **TF_immediate vs TF_default**: BE plateau 제거 효과 미미. ETH/AVAX/BTC 모두 NEUTRAL/KILL 패턴 유지. plateau 자체는 critical 변수 아님
+
+### 15.5 부수 검증
+
+- ✅ TR_default exit_reason_dist 확인: TP 비율 = 0.0% (drop_tp 동작 sanity 통과)
+- ✅ TF_default ETH window-level 분산: 6/9 OOS+ 확보. 1윈도우만 음수가 아니라 robust한 신호로 보임
+- ❗ TF_early가 ETH에만 특화: BTC NEUTRAL, AVAX KILL이라 cherry-pick 위험 있음. 라운드 4에서 같은 trigger로 fine sweep + 인접 archetype까지 함께 검증 필요
+
+### 15.6 라운드 4 후보 (ETH 중심 정밀 탐색)
+
+라운드 3에서 ETH × TF_early 1셀이 STRONG_PROMOTE를 받았으나, 이는 archetype-level 신호로 cherry-pick 위험이 있다. 라운드 4는 **TF_early 주변 정밀 sweep**으로 검증.
+
+추천 sweep 범위:
+- `trail_be_at_tp_frac` ∈ {0.25, 0.30, 0.35}
+- `trail_start_at_tp_frac` ∈ {0.50, 0.60, 0.70}
+- `trail_distance_tp_frac` ∈ {0.20, 0.30, 0.40}
+
+제약 `trail_be < trail_start` 적용 시 약 9~12셀. ETH BIGTHREE × 9 윈도우 = ~108 runs.
+
+부수:
+- BTC/AVAX는 라운드 3 결과로 trailing 비추천 확정 → 라운드 4에서는 fixed 유지
+- 결과 적합 시 ETH 한정 라이브 운영 정책 검토 (심볼별 다른 exit_mode 운영)
+- time_stop ETH 정밀 sweep (라운드 2 §12.6 보류 항목)도 같은 라운드에 함께 가능
+
+### 15.7 한 줄 요약
+
+**라운드 3은 be_trail 컨셉을 ETH × TF_early에서 살려냈다 (STRONG_PROMOTE). drop_tp는 모든 심볼에서 기각. BTC/AVAX는 fixed 유지. 라운드 4는 ETH × TF_early 주변 정밀 sweep으로 신호 robustness 검증.**
