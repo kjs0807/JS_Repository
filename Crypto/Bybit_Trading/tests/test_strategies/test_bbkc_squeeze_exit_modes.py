@@ -75,6 +75,72 @@ def test_invariant_skipped_for_fixed_mode():
     assert s.exit_mode == "fixed"
 
 
+# ── set_params() invariant validation (optimizer / walk_forward 경로) ────
+
+
+def test_set_params_rejects_invalid_be_geq_start():
+    """set_params must run the same invariant as __init__."""
+    s = BBKCSqueeze(exit_mode="be_trail")
+    with pytest.raises(ValueError):
+        s.set_params({"trail_be_at_tp_frac": 0.9, "trail_start_at_tp_frac": 0.5})
+
+
+def test_set_params_rejects_invalid_distance():
+    s = BBKCSqueeze(exit_mode="be_trail")
+    with pytest.raises(ValueError):
+        s.set_params({"trail_distance_tp_frac": 0.0})
+
+
+def test_set_params_rejects_partial_invariant_violation():
+    """Even when only one of be/start is set in dict, invariant uses current
+    other attr — so be_at=0.9 with current start=0.8 must be rejected."""
+    s = BBKCSqueeze(exit_mode="be_trail")  # default 0.5/0.8/0.3
+    with pytest.raises(ValueError):
+        s.set_params({"trail_be_at_tp_frac": 0.9})
+
+
+def test_set_params_no_partial_mutation_on_failure():
+    """If validation fails, no attribute should have changed."""
+    s = BBKCSqueeze(exit_mode="be_trail",
+                    trail_be_at_tp_frac=0.5,
+                    trail_start_at_tp_frac=0.8,
+                    trail_distance_tp_frac=0.3)
+    # Mix of valid + invalid — should reject atomically
+    with pytest.raises(ValueError):
+        s.set_params({
+            "rsi_filter": 65.0,           # valid, would normally apply
+            "trail_be_at_tp_frac": 0.95,  # invalid (>= start=0.8)
+        })
+    # rsi_filter must NOT have been mutated
+    assert s.rsi_filter == 70.0
+    assert s.trail_be_at_tp_frac == 0.5
+
+
+def test_set_params_accepts_valid_full_replacement():
+    s = BBKCSqueeze(exit_mode="be_trail")
+    s.set_params({
+        "trail_be_at_tp_frac": 0.30,
+        "trail_start_at_tp_frac": 0.60,
+        "trail_distance_tp_frac": 0.20,
+    })
+    assert s.trail_be_at_tp_frac == 0.30
+    assert s.trail_start_at_tp_frac == 0.60
+    assert s.trail_distance_tp_frac == 0.20
+
+
+def test_set_params_invariant_skipped_when_switching_to_fixed():
+    """If exit_mode goes to 'fixed', trail invariants are not enforced."""
+    s = BBKCSqueeze(exit_mode="be_trail")
+    # Switch to fixed AND set invalid trail values in same call — must succeed
+    s.set_params({
+        "exit_mode": "fixed",
+        "trail_be_at_tp_frac": 0.9,
+        "trail_start_at_tp_frac": 0.5,
+    })
+    assert s.exit_mode == "fixed"
+    assert s.trail_be_at_tp_frac == 0.9
+
+
 # ── _pos_meta lazy init / cleanup (no R in meta) + be_trail TP-fraction ──
 
 

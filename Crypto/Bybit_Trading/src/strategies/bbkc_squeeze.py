@@ -18,6 +18,33 @@ class BBKCSqueeze:
 
     name: str = "BBKCSqueeze"
 
+    @staticmethod
+    def _validate_exit_params(
+        exit_mode: str,
+        trail_be_at_tp_frac: float,
+        trail_start_at_tp_frac: float,
+        trail_distance_tp_frac: float,
+    ) -> None:
+        """Validate exit-mode invariants. Raises ValueError on violation.
+
+        Shared between __init__ and set_params so dict-based param injection
+        (optimizer / walk_forward) cannot bypass the checks.
+        """
+        if exit_mode not in ("fixed", "be_trail"):
+            raise ValueError(
+                f"exit_mode must be 'fixed' or 'be_trail', got {exit_mode!r}"
+            )
+        if exit_mode == "be_trail":
+            if not (0 < trail_be_at_tp_frac < trail_start_at_tp_frac < 1.0):
+                raise ValueError(
+                    f"need 0 < trail_be_at_tp_frac < trail_start_at_tp_frac < 1.0, "
+                    f"got be={trail_be_at_tp_frac}, start={trail_start_at_tp_frac}"
+                )
+            if trail_distance_tp_frac <= 0:
+                raise ValueError(
+                    f"trail_distance_tp_frac must be > 0, got {trail_distance_tp_frac}"
+                )
+
     def __init__(
         self,
         bb_period: int = 20,
@@ -38,18 +65,9 @@ class BBKCSqueeze:
         drop_tp: bool = False,
         time_stop_bars: int = 0,
     ) -> None:
-        if exit_mode not in ("fixed", "be_trail"):
-            raise ValueError(f"exit_mode must be 'fixed' or 'be_trail', got {exit_mode!r}")
-        if exit_mode == "be_trail":
-            if not (0 < trail_be_at_tp_frac < trail_start_at_tp_frac < 1.0):
-                raise ValueError(
-                    f"need 0 < trail_be_at_tp_frac < trail_start_at_tp_frac < 1.0, "
-                    f"got be={trail_be_at_tp_frac}, start={trail_start_at_tp_frac}"
-                )
-            if trail_distance_tp_frac <= 0:
-                raise ValueError(
-                    f"trail_distance_tp_frac must be > 0, got {trail_distance_tp_frac}"
-                )
+        self._validate_exit_params(
+            exit_mode, trail_be_at_tp_frac, trail_start_at_tp_frac, trail_distance_tp_frac,
+        )
         self.bb_period = bb_period
         self.bb_std = bb_std
         self.kc_period = kc_period
@@ -228,6 +246,28 @@ class BBKCSqueeze:
         }
 
     def set_params(self, params: dict) -> None:
+        """Update parameters with invariant validation.
+
+        Builds candidate values for the four exit-mode invariant inputs,
+        validates atomically, then applies all params. On failure no attribute
+        is mutated (no partial state).
+        """
+        # Candidate values: incoming dict overrides current attrs for the
+        # four invariant-relevant keys.
+        candidate_exit_mode = params.get("exit_mode", self.exit_mode)
+        candidate_be = params.get(
+            "trail_be_at_tp_frac", self.trail_be_at_tp_frac,
+        )
+        candidate_start = params.get(
+            "trail_start_at_tp_frac", self.trail_start_at_tp_frac,
+        )
+        candidate_distance = params.get(
+            "trail_distance_tp_frac", self.trail_distance_tp_frac,
+        )
+        self._validate_exit_params(
+            candidate_exit_mode, candidate_be, candidate_start, candidate_distance,
+        )
+        # Validation passed → apply all params
         for k, v in params.items():
             if hasattr(self, k):
                 setattr(self, k, v)
