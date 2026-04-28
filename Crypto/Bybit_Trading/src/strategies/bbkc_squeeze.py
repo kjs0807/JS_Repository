@@ -103,13 +103,7 @@ class BBKCSqueeze:
         if pos is None and sym in self._pos_meta:
             del self._pos_meta[sym]
         if pos is not None and sym not in self._pos_meta:
-            if pos.side == "LONG":
-                R = pos.entry_price - pos.stop_loss
-            else:
-                R = pos.stop_loss - pos.entry_price
             self._pos_meta[sym] = {
-                "R": R,
-                "initial_sl": pos.stop_loss,
                 "be_triggered": False,
                 "trail_active": False,
                 "bars_held": 0,
@@ -169,12 +163,14 @@ class BBKCSqueeze:
         self.on_bar_fast(bar, idx, cache, broker)
 
     def _manage_position(self, bar: Bar, pos, broker: Broker) -> None:
-        """포지션 보유 중 관리: be_trail BE/trailing + time_stop."""
+        """포지션 보유 중 관리: be_trail BE/trailing (TP-fraction 단위) + time_stop."""
         sym = bar.symbol
         meta = self._pos_meta[sym]
-        R = meta["R"]
-        if R <= 0:
-            return  # invariants violated; bail out safely
+
+        # tp_distance = entry × tp_pct / leverage. Safety guards.
+        if pos.entry_price <= 0 or self.tp_pct <= 0 or self.leverage <= 0:
+            return
+        tp_distance = pos.entry_price * self.tp_pct / self.leverage
 
         close = bar.close
         if pos.side == "LONG":
@@ -183,23 +179,20 @@ class BBKCSqueeze:
             move = pos.entry_price - close
 
         if self.exit_mode == "be_trail":
-            # BE step: 1R favorable 도달 시 SL을 entry로 이동 (한 번만 트리거)
-            if not meta["be_triggered"] and move >= self.trail_be_r * R:
+            # BE step (한 번만): close 가 entry 기준 trail_be_at_tp_frac × tp_dist 이상 유리
+            if not meta["be_triggered"] and move >= self.trail_be_at_tp_frac * tp_distance:
                 broker.update_stop(sym, pos.entry_price)
                 meta["be_triggered"] = True
 
-            # Trailing step: 2R favorable 도달 시 활성화, 이후 ratchet up/down only
-            if move >= self.trail_start_r * R:
-                if pos.side == "LONG":
-                    new_sl = close - self.trail_distance_r * R
-                else:
-                    new_sl = close + self.trail_distance_r * R
+            # Trailing step (활성 후 ratchet only)
+            if move >= self.trail_start_at_tp_frac * tp_distance:
+                offset = self.trail_distance_tp_frac * tp_distance
+                new_sl = (close - offset) if pos.side == "LONG" else (close + offset)
 
                 if not meta["trail_active"]:
                     broker.update_stop(sym, new_sl)
                     meta["trail_active"] = True
                 else:
-                    # Ratchet: LONG only goes up, SHORT only goes down
                     if pos.side == "LONG" and new_sl > pos.stop_loss:
                         broker.update_stop(sym, new_sl)
                     elif pos.side == "SHORT" and new_sl < pos.stop_loss:
