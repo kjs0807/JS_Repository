@@ -77,3 +77,87 @@ def test_warning_flag_when_trade_count_below_half_baseline():
     judged = judge(s)
     assert judged["TF_default"]["BTCUSDT"]["warning"] is True
     assert judged["TF_default"]["BTCUSDT"]["verdict"] == "PROMOTE"
+
+
+# ── integrate_label: per-cell roll-up tests (round 4 §6.2) ────────────────
+
+
+from scripts.bbkc_exit_eval import integrate_label
+
+
+def _per_sym(verdict: str, warning: bool = False) -> dict:
+    return {"verdict": verdict, "warning": warning}
+
+
+def test_integrate_label_F0_returns_BASELINE():
+    by_sym = {
+        "ETHUSDT": _per_sym("BASELINE"),
+        "BTCUSDT": _per_sym("BASELINE"),
+        "AVAXUSDT": _per_sym("BASELINE"),
+    }
+    assert integrate_label("F0", by_sym) == "BASELINE"
+
+
+def test_integrate_label_eth_warning_routes_to_MIXED():
+    """ETH PROMOTE with warning=True must NOT reach ROBUST_PROMOTE."""
+    by_sym = {
+        "ETHUSDT": _per_sym("PROMOTE", warning=True),
+        "BTCUSDT": _per_sym("NEUTRAL"),
+        "AVAXUSDT": _per_sym("NEUTRAL"),
+    }
+    assert integrate_label("be30_st60_di30", by_sym) == "ETH_PROMOTE_MIXED"
+
+
+def test_integrate_label_eth_only_promote_when_one_other_KILL():
+    by_sym = {
+        "ETHUSDT": _per_sym("PROMOTE"),
+        "BTCUSDT": _per_sym("KILL"),
+        "AVAXUSDT": _per_sym("NEUTRAL"),
+    }
+    assert integrate_label("be30_st60_di30", by_sym) == "ETH_ONLY_PROMOTE"
+
+
+def test_integrate_label_eth_only_promote_when_both_others_KILL():
+    """Both BTC and AVAX KILL → still ETH_ONLY_PROMOTE (not DAMAGING since ETH gains)."""
+    by_sym = {
+        "ETHUSDT": _per_sym("PROMOTE"),
+        "BTCUSDT": _per_sym("KILL"),
+        "AVAXUSDT": _per_sym("KILL"),
+    }
+    assert integrate_label("be30_st60_di30", by_sym) == "ETH_ONLY_PROMOTE"
+
+
+def test_integrate_label_eth_promote_mixed_when_other_warning_no_kill():
+    by_sym = {
+        "ETHUSDT": _per_sym("PROMOTE"),
+        "BTCUSDT": _per_sym("NEUTRAL", warning=True),
+        "AVAXUSDT": _per_sym("NEUTRAL"),
+    }
+    assert integrate_label("be30_st60_di30", by_sym) == "ETH_PROMOTE_MIXED"
+
+
+def test_integrate_label_robust_promote_when_all_safe():
+    by_sym = {
+        "ETHUSDT": _per_sym("STRONG_PROMOTE"),
+        "BTCUSDT": _per_sym("NEUTRAL"),
+        "AVAXUSDT": _per_sym("BASELINE"),
+    }
+    assert integrate_label("be30_st60_di30", by_sym) == "ROBUST_PROMOTE"
+
+
+def test_integrate_label_damaging_when_eth_no_promote_other_KILL():
+    by_sym = {
+        "ETHUSDT": _per_sym("NEUTRAL"),
+        "BTCUSDT": _per_sym("KILL"),
+        "AVAXUSDT": _per_sym("NEUTRAL"),
+    }
+    assert integrate_label("be30_st60_di30", by_sym) == "DAMAGING"
+
+
+def test_integrate_label_no_signal_when_eth_no_promote_no_other_KILL():
+    by_sym = {
+        "ETHUSDT": _per_sym("NEUTRAL"),
+        "BTCUSDT": _per_sym("NEUTRAL"),
+        "AVAXUSDT": _per_sym("NEUTRAL"),
+    }
+    assert integrate_label("be30_st60_di30", by_sym) == "NO_SIGNAL"

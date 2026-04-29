@@ -1,4 +1,4 @@
-"""BBKC Exit Round 3 evaluation runner.
+"""BBKC Exit Round 4 evaluation runner.
 
 Sweeps 12 exit cells × BIGTHREE × 9 walk-forward windows.
 Reuses the existing HoldoutSpec/run_strategy_on_holdout pipeline; each
@@ -12,7 +12,7 @@ Output dir: logs/research/bbkc_squeeze/exit_round/
 
 Usage:
     python -m scripts.bbkc_exit_eval --smoke         # 1 cell × 1 symbol × 1 window
-    python -m scripts.bbkc_exit_eval --full          # all 324 runs
+    python -m scripts.bbkc_exit_eval --full          # all 756 runs (28 cells × 3 sym × 9 wf)
     python -m scripts.bbkc_exit_eval --cell F0 --symbol BTCUSDT
 """
 from __future__ import annotations
@@ -44,6 +44,25 @@ OUTPUT_BASE = PROJECT_ROOT / "logs" / "research" / "bbkc_squeeze" / "exit_round"
 # also copied to OUTPUT_BASE/latest/ for convenience.
 OUTPUT_DIR = OUTPUT_BASE  # placeholder; overwritten in main()
 
+# ── Round 4 §7: reproducibility sanity ─────────────────────────────────────
+# `be30_st60_di30 × ETHUSDT` re-runs round 3's TF_early × ETH (same params,
+# same code path). Expected exact floats from
+# logs/research/bbkc_squeeze/exit_round/2026-04-28_T2104/summary.json.
+REPRODUCE_CELL_ID = "be30_st60_di30"
+REPRODUCE_SYMBOL = "ETHUSDT"
+EXPECTED_REPRODUCE = {
+    "wf_oos_positive": 6,
+    "mean_r_per_trade": 0.0635821965450038,
+    "trade_count": 154,
+    "max_dd": 0.11123736375303807,
+    "mean_oos_pnl": 325.6180389395652,
+}
+REPRODUCE_TOLERANCE = {
+    "wf_oos_positive_exact": 6,
+    "mean_r_per_trade_abs": 0.005,
+    "trade_count_abs": 2,
+}
+
 logger = logging.getLogger("bbkc_exit_eval")
 
 
@@ -64,7 +83,7 @@ class WindowResult:
 
 
 def make_strategy_factory(cell: Dict[str, Any]):
-    """Return a zero-arg factory that builds BBKCSqueeze with cell params (round 3 schema).
+    """Return a zero-arg factory that builds BBKCSqueeze with cell params (round 4 schema).
 
     fixed cells leave trail/be defaults untouched (no be_trail invariant check).
     be_trail cells supply the three TP-fraction params explicitly.
@@ -141,6 +160,174 @@ def run_one_window(
     return run["trades"], run["per_symbol"][symbol]
 
 
+def format_reproducibility_block(
+    summary_judged: Dict[str, Dict[str, Dict[str, Any]]],
+) -> List[str]:
+    """Round 4 §7: Reproducibility sanity vs round 3 TF_early × ETH.
+
+    Compares summary_judged[REPRODUCE_CELL_ID][REPRODUCE_SYMBOL] against
+    EXPECTED_REPRODUCE within REPRODUCE_TOLERANCE. Always emits a block
+    (even if cell missing — uses fallback message).
+    """
+    lines: List[str] = [
+        f"## Reproducibility Sanity ({REPRODUCE_CELL_ID} × {REPRODUCE_SYMBOL} vs Round 3 TF_early)",
+        "",
+    ]
+    cell = summary_judged.get(REPRODUCE_CELL_ID, {})
+    actual = cell.get(REPRODUCE_SYMBOL)
+    if not actual:
+        lines.append(
+            f"❗ MATCH SKIPPED — `{REPRODUCE_CELL_ID} × {REPRODUCE_SYMBOL}` "
+            f"not in summary (partial run?)."
+        )
+        lines.append("")
+        return lines
+
+    diffs: List[str] = []
+    if actual["wf_oos_positive"] != REPRODUCE_TOLERANCE["wf_oos_positive_exact"]:
+        diffs.append(
+            f"wf {actual['wf_oos_positive']} != {REPRODUCE_TOLERANCE['wf_oos_positive_exact']}"
+        )
+    if abs(actual["mean_r_per_trade"] - EXPECTED_REPRODUCE["mean_r_per_trade"]) > REPRODUCE_TOLERANCE["mean_r_per_trade_abs"]:
+        diffs.append(
+            f"R {actual['mean_r_per_trade']:+.6f} vs "
+            f"{EXPECTED_REPRODUCE['mean_r_per_trade']:+.6f} "
+            f"(tol ±{REPRODUCE_TOLERANCE['mean_r_per_trade_abs']})"
+        )
+    if abs(actual["trade_count"] - EXPECTED_REPRODUCE["trade_count"]) > REPRODUCE_TOLERANCE["trade_count_abs"]:
+        diffs.append(
+            f"n {actual['trade_count']} vs {EXPECTED_REPRODUCE['trade_count']} "
+            f"(tol ±{REPRODUCE_TOLERANCE['trade_count_abs']})"
+        )
+
+    expected_str = (
+        f"  Round 3 TF_early ETH: wf {EXPECTED_REPRODUCE['wf_oos_positive']}/9, "
+        f"R/trade {EXPECTED_REPRODUCE['mean_r_per_trade']:+.4f}, "
+        f"n={EXPECTED_REPRODUCE['trade_count']}"
+    )
+    actual_str = (
+        f"  Round 4 reproduce:    wf {actual['wf_oos_positive']}/9, "
+        f"R/trade {actual['mean_r_per_trade']:+.4f}, "
+        f"n={actual['trade_count']}"
+    )
+    lines.append(expected_str)
+    lines.append(actual_str)
+    if not diffs:
+        lines.append("  Match: ✓")
+    else:
+        lines.append("  Match: ✗")
+        lines.append("  Diffs: " + "; ".join(diffs))
+        lines.append("  ⚠️  REPRODUCIBILITY MISMATCH — investigate before trusting other cells.")
+    lines.append("")
+    return lines
+
+
+def format_integrated_labels_block(
+    summary_judged: Dict[str, Dict[str, Dict[str, Any]]],
+    grid: List[Dict[str, Any]],
+) -> List[str]:
+    """Round 4 §8.2: Markdown table of (cell, label, ETH/BTC/AVAX verdict)."""
+    lines: List[str] = [
+        "## Per-Cell Integrated Labels",
+        "",
+        "| cell | label | ETH | BTC | AVAX |",
+        "|---|---|---|---|---|",
+    ]
+    for c in grid:
+        cell_id = c["cell_id"]
+        cell_entry = summary_judged.get(cell_id, {})
+        label = cell_entry.get("_cell", {}).get("integrated_label", "?")
+        eth_v = cell_entry.get("ETHUSDT", {}).get("verdict", "-")
+        btc_v = cell_entry.get("BTCUSDT", {}).get("verdict", "-")
+        avx_v = cell_entry.get("AVAXUSDT", {}).get("verdict", "-")
+        eth_w = " *" if cell_entry.get("ETHUSDT", {}).get("warning") else ""
+        btc_w = " *" if cell_entry.get("BTCUSDT", {}).get("warning") else ""
+        avx_w = " *" if cell_entry.get("AVAXUSDT", {}).get("warning") else ""
+        lines.append(
+            f"| {cell_id} | {label} | {eth_v}{eth_w} | {btc_v}{btc_w} | {avx_v}{avx_w} |"
+        )
+    lines.append("")
+    return lines
+
+
+def format_label_distribution_block(
+    summary_judged: Dict[str, Dict[str, Dict[str, Any]]],
+) -> List[str]:
+    """Round 4 §8.2: integrated label counter."""
+    counts: Dict[str, int] = {}
+    for cell_id, cell_entry in summary_judged.items():
+        label = cell_entry.get("_cell", {}).get("integrated_label", "?")
+        counts[label] = counts.get(label, 0) + 1
+    label_order = [
+        "ROBUST_PROMOTE", "ETH_ONLY_PROMOTE", "ETH_PROMOTE_MIXED",
+        "DAMAGING", "NO_SIGNAL", "BASELINE",
+    ]
+    lines: List[str] = ["## Label Distribution", ""]
+    for label in label_order:
+        n = counts.get(label, 0)
+        lines.append(f"- {label}: {n}")
+    for label, n in counts.items():
+        if label not in label_order:
+            lines.append(f"- {label}: {n}  (unexpected)")
+    lines.append("")
+    return lines
+
+
+_VERDICT_ABBREV = {
+    "STRONG_PROMOTE": "SP",
+    "PROMOTE": "P",
+    "NEUTRAL": "N",
+    "KILL": "K",
+    "BASELINE": "B",
+    "UNKNOWN": "U",
+}
+
+
+def _abbrev(per_sym_entry: Dict[str, Any]) -> str:
+    """Abbreviate per-symbol verdict; suffix '*' if warning=True."""
+    v = per_sym_entry.get("verdict", "?")
+    abbrev = _VERDICT_ABBREV.get(v, v[:2] if v else "?")
+    if per_sym_entry.get("warning"):
+        abbrev += "*"
+    return abbrev
+
+
+def format_heatmaps_block(
+    summary_judged: Dict[str, Dict[str, Dict[str, Any]]],
+) -> List[str]:
+    """Round 4 §8.2: 9 heatmaps (3 symbols × 3 dist), each 3×3 (be × start)."""
+    lines: List[str] = [
+        "## Per-Symbol × Distance Heatmaps (3×3 grid of be × start, per-symbol verdict per cell)",
+        "",
+    ]
+    be_values = (0.25, 0.30, 0.35)
+    st_values = (0.50, 0.60, 0.70)
+    di_values = (0.20, 0.30, 0.40)
+    symbols = ["ETHUSDT", "BTCUSDT", "AVAXUSDT"]   # ETH first (primary)
+
+    for sym in symbols:
+        for di in di_values:
+            lines.append(f"### {sym}, dist={di:.2f}")
+            lines.append("")
+            header = "|        | " + " | ".join(f"st={st:.2f}" for st in st_values) + " |"
+            sep = "|" + "|".join(["--------"] * (len(st_values) + 1)) + "|"
+            lines.append(header)
+            lines.append(sep)
+            for be in be_values:
+                row_cells = []
+                for st in st_values:
+                    cell_id = (
+                        f"be{int(round(be * 100)):02d}"
+                        f"_st{int(round(st * 100)):02d}"
+                        f"_di{int(round(di * 100)):02d}"
+                    )
+                    entry = summary_judged.get(cell_id, {}).get(sym, {})
+                    row_cells.append(_abbrev(entry) if entry else "-")
+                lines.append(f"| be={be:.2f} | " + " | ".join(row_cells) + " |")
+            lines.append("")
+    return lines
+
+
 def build_report(
     summary_judged: Dict[str, Dict[str, Dict[str, Any]]],
     auxiliary: Dict[str, Dict[str, Dict[str, Any]]],
@@ -148,13 +335,20 @@ def build_report(
 ) -> None:
     """Generate human-readable Markdown report."""
     lines: List[str] = [
-        "# BBKC Exit Round 3 — Sweep Report",
+        "# BBKC Exit Round 4 — Sweep Report",
         "",
         f"Generated: {datetime.now(timezone.utc).isoformat()}",
         "",
+    ]
+    lines.extend(format_reproducibility_block(summary_judged))
+    grid = STRATEGY_CONFIGS["BBKCSqueeze"]["exit_round_grid"]
+    lines.extend(format_integrated_labels_block(summary_judged, grid))
+    lines.extend(format_label_distribution_block(summary_judged))
+    lines.extend(format_heatmaps_block(summary_judged))
+    lines.extend([
         "## Per-Symbol Verdicts",
         "",
-    ]
+    ])
 
     # Sort cell IDs in our canonical grid order
     cell_order = [c["cell_id"] for c in STRATEGY_CONFIGS["BBKCSqueeze"]["exit_round_grid"]]
@@ -236,6 +430,48 @@ def build_summary(jsonl_path: Path) -> Dict[str, Dict[str, Dict[str, Any]]]:
     return summary
 
 
+def integrate_label(cell_id: str, by_sym: Dict[str, Dict[str, Any]]) -> str:
+    """Per-cell integrated label from per-symbol verdicts (round 4 §6.2).
+
+    Priority order (first match wins):
+      1. F0                                                → BASELINE
+      2. ETH promote AND ETH warning=True                  → ETH_PROMOTE_MIXED
+      3. ETH promote AND any (BTC/AVAX) KILL               → ETH_ONLY_PROMOTE
+      4. ETH promote AND any (BTC/AVAX) UNKNOWN/warning    → ETH_PROMOTE_MIXED
+      5. ETH promote AND no KILL/UNKNOWN/warning anywhere  → ROBUST_PROMOTE
+      6. ETH not promote AND any (BTC/AVAX) KILL           → DAMAGING
+      7. otherwise                                          → NO_SIGNAL
+
+    "promote" means verdict in {"STRONG_PROMOTE", "PROMOTE"}.
+    """
+    if cell_id == "F0":
+        return "BASELINE"
+
+    eth = by_sym.get("ETHUSDT", {})
+    others = [by_sym.get("BTCUSDT", {}), by_sym.get("AVAXUSDT", {})]
+
+    eth_promote = eth.get("verdict") in ("STRONG_PROMOTE", "PROMOTE")
+    eth_warning = eth.get("warning") is True
+    has_kill = any(o.get("verdict") == "KILL" for o in others)
+    has_unknown_or_warning = any(
+        o.get("verdict") == "UNKNOWN" or o.get("warning") is True
+        for o in others
+    )
+
+    if eth_promote:
+        if eth_warning:
+            return "ETH_PROMOTE_MIXED"
+        if has_kill:
+            return "ETH_ONLY_PROMOTE"
+        if has_unknown_or_warning:
+            return "ETH_PROMOTE_MIXED"
+        return "ROBUST_PROMOTE"
+    else:
+        if has_kill:
+            return "DAMAGING"
+        return "NO_SIGNAL"
+
+
 def judge(summary: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """Apply baseline-relative delta rules per (cell, symbol). Round 3 §9.
 
@@ -285,6 +521,13 @@ def judge(summary: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str, 
             entry["verdict"] = verdict
             entry["warning"] = warning
             out.setdefault(cell_id, {})[sym] = entry
+
+    # Round 4 §6.2: attach per-cell integrated label.
+    # Stored under synthetic "_cell" key inside each cell's dict so existing
+    # per-symbol entries (BTCUSDT/ETHUSDT/AVAXUSDT) remain untouched.
+    for cell_id, by_sym in out.items():
+        cell_label = integrate_label(cell_id, by_sym)
+        by_sym["_cell"] = {"integrated_label": cell_label}
     return out
 
 
@@ -384,7 +627,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--smoke", action="store_true",
                    help="1 cell × 1 symbol × 1 window")
     p.add_argument("--full", action="store_true",
-                   help="all 12 cells × 3 symbols × 9 windows = 324 runs")
+                   help="all 28 cells × 3 symbols × 9 windows = 756 runs")
     p.add_argument("--cell", default=None, help="run only this cell_id (e.g. F0)")
     p.add_argument("--symbol", default=None, help="run only this symbol")
     return p.parse_args()
