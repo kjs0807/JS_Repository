@@ -23,6 +23,16 @@ class LiveBroker:
         self._equity: float = initial_capital
         self._sync_wallet()
 
+    def _position_idx_for_side(self, side: str) -> int:
+        """Hedge mode 가정: LONG=1, SHORT=2.
+
+        NOTE: 계정이 one-way mode이면 0을 반환해야 함. 현재 src 경로는
+        rest_client.place_order의 자동 도출 로직(side='Buy' → 1)과 동일하게
+        hedge를 가정. one-way 전환 시 이 헬퍼 + place_order 모두 수정 필요.
+        Round 5 §5.2 참조.
+        """
+        return 1 if side == "LONG" else 2
+
     def buy(self, symbol: str, qty: float, stop_loss: float,
             take_profit: Optional[float] = None, reason: str = "") -> str:
         return self._execute_order(symbol, "Buy", qty, stop_loss, take_profit, "STRATEGY", reason)
