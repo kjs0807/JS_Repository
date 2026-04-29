@@ -115,3 +115,49 @@ def test_manual_update_tp_routes_through_update_tp():
     broker.manual_update_tp("BTCUSDT", 113.0)
     assert broker._rest.set_trading_stop.call_count == 1
     assert broker._positions["BTCUSDT"].take_profit == 113.0
+
+
+def test_sync_positions_parses_stop_loss_take_profit():
+    broker = _make_broker()
+    broker._rest.get_positions.return_value = [
+        {
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "size": "0.1",
+            "avgPrice": "100.0",
+            "stopLoss": "95.5",
+            "takeProfit": "110.5",
+            "unrealisedPnl": "0.0",
+        },
+    ]
+    broker.sync_positions()
+    pos = broker._positions["BTCUSDT"]
+    assert pos.stop_loss == 95.5
+    assert pos.take_profit == 110.5
+    assert pos.entry_price == 100.0
+    assert pos.qty == 0.1
+
+
+def test_sync_positions_handles_empty_stop_loss_string():
+    broker = _make_broker()
+    broker._rest.get_positions.return_value = [
+        {"symbol": "BTCUSDT", "side": "Buy", "size": "0.1", "avgPrice": "100.0",
+         "stopLoss": "", "takeProfit": "", "unrealisedPnl": "0.0"},
+    ]
+    broker.sync_positions()
+    pos = broker._positions["BTCUSDT"]
+    assert pos.stop_loss == 0.0
+    assert pos.take_profit is None
+
+
+def test_sync_positions_handles_zero_stop_loss():
+    broker = _make_broker()
+    broker._rest.get_positions.return_value = [
+        {"symbol": "BTCUSDT", "side": "Sell", "size": "0.1", "avgPrice": "100.0",
+         "stopLoss": "0", "takeProfit": "0", "unrealisedPnl": "0.0"},
+    ]
+    broker.sync_positions()
+    pos = broker._positions["BTCUSDT"]
+    assert pos.stop_loss == 0.0
+    assert pos.take_profit is None
+    assert pos.side == "SHORT"

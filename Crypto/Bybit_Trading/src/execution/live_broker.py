@@ -125,17 +125,34 @@ class LiveBroker:
         return (self._equity * risk_pct) / stop_distance
 
     def sync_positions(self) -> None:
+        """Bybit get_positions 응답에서 SL/TP 파싱 (round 5 §5.4).
+
+        재시작 후 BE/trail로 이동된 stop_loss/take_profit을 잃지 않도록 함.
+        빈 문자열 / "0" / None은 해당 필드 미설정으로 취급.
+        """
         raw_positions = self._rest.get_positions()
         new_positions: Dict[str, Position] = {}
         for raw in raw_positions:
             size = float(raw.get("size", 0))
-            if size <= 0: continue
+            if size <= 0:
+                continue
             symbol = raw["symbol"]
             side = "LONG" if raw.get("side") == "Buy" else "SHORT"
-            new_positions[symbol] = Position(symbol=symbol, side=side, qty=size,
-                entry_price=float(raw.get("avgPrice", 0)), entry_time=0,
-                stop_loss=0.0, take_profit=None,
-                unrealized_pnl=float(raw.get("unrealisedPnl", 0)), strategy_name="SYNCED")
+
+            sl_raw = raw.get("stopLoss")
+            tp_raw = raw.get("takeProfit")
+            sl_value = float(sl_raw) if sl_raw not in (None, "", "0") else 0.0
+            tp_value = float(tp_raw) if tp_raw not in (None, "", "0") else None
+
+            new_positions[symbol] = Position(
+                symbol=symbol, side=side, qty=size,
+                entry_price=float(raw.get("avgPrice", 0)),
+                entry_time=0,
+                stop_loss=sl_value,
+                take_profit=tp_value,
+                unrealized_pnl=float(raw.get("unrealisedPnl", 0)),
+                strategy_name="SYNCED",
+            )
         self._positions = new_positions
 
     def _sync_wallet(self) -> None:
