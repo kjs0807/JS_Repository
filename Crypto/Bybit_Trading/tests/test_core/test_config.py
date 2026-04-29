@@ -93,3 +93,72 @@ class TestLoadConfig:
         config = load_config(config_path=str(tmp_path / "nonexistent.yaml"))
         assert config.alert.telegram_token == "bot123"
         assert config.alert.telegram_chat_id == "chat456"
+
+
+# ── Round 5: BBKCExitConfig + BBKC_EXIT_MODE env override (§7.1) ──────────
+
+
+from src.core.config import BBKCExitConfig
+
+
+class TestBBKCExitConfig:
+    def test_defaults_match_round4_winner(self):
+        c = BBKCExitConfig()
+        assert c.mode == "be_trail"
+        assert c.trail_be_at_tp_frac == 0.25
+        assert c.trail_start_at_tp_frac == 0.60
+        assert c.trail_distance_tp_frac == 0.30
+        assert c.drop_tp is False
+        assert c.time_stop_bars == 0
+
+    def test_loaded_from_yaml(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BBKC_EXIT_MODE", raising=False)
+        yaml_content = """
+app:
+  mode: demo
+bbkc_exit:
+  mode: be_trail
+  trail_be_at_tp_frac: 0.25
+  trail_start_at_tp_frac: 0.60
+  trail_distance_tp_frac: 0.30
+  drop_tp: false
+  time_stop_bars: 0
+"""
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(yaml_content, encoding="utf-8")
+        cfg = load_config(str(yaml_path))
+        assert isinstance(cfg.bbkc_exit, BBKCExitConfig)
+        assert cfg.bbkc_exit.mode == "be_trail"
+        assert cfg.bbkc_exit.trail_be_at_tp_frac == 0.25
+        assert cfg.bbkc_exit.trail_start_at_tp_frac == 0.60
+        assert cfg.bbkc_exit.trail_distance_tp_frac == 0.30
+        assert cfg.bbkc_exit.drop_tp is False
+        assert cfg.bbkc_exit.time_stop_bars == 0
+
+    def test_env_override_to_fixed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BBKC_EXIT_MODE", "fixed")
+        yaml_content = """
+app:
+  mode: demo
+bbkc_exit:
+  mode: be_trail
+  trail_be_at_tp_frac: 0.25
+  trail_start_at_tp_frac: 0.60
+  trail_distance_tp_frac: 0.30
+  drop_tp: false
+  time_stop_bars: 0
+"""
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(yaml_content, encoding="utf-8")
+        cfg = load_config(str(yaml_path))
+        assert cfg.bbkc_exit.mode == "fixed"
+
+    def test_defaults_when_yaml_missing_block(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BBKC_EXIT_MODE", raising=False)
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text("app:\n  mode: demo\n", encoding="utf-8")
+        cfg = load_config(str(yaml_path))
+        assert cfg.bbkc_exit.mode == "be_trail"
+        assert cfg.bbkc_exit.trail_be_at_tp_frac == 0.25
+        assert cfg.bbkc_exit.trail_start_at_tp_frac == 0.60
+        assert cfg.bbkc_exit.trail_distance_tp_frac == 0.30
