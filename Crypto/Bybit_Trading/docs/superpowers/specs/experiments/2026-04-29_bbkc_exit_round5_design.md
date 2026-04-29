@@ -82,6 +82,17 @@ def update_stop(self, symbol: str, new_stop: float) -> None:
 - "1개월 후 자동 평가 모드 전환" 같은 schedule 기반 동작
 - 캘린더 기반 자동 fallback
 
+**기존 옵션의 사용 금지** (Round 5 운영 한정):
+
+`scripts/run_bbkc_live_trade.py`와 `scripts/run_bbkc_paper_live.py` 모두 historical 동기에서 추가됐던 `--stop-at <date>` / `--stop-in-minutes <N>` 옵션을 그대로 갖고 있음 (run_bbkc_live_trade.py:41-45, run_bbkc_paper_live.py:40-53).
+
+이 옵션들은 **Round 5 forward 운영에서 사용 금지**:
+- **이유**: Forward는 사용자가 수동으로 중지하거나 kill switch(`BBKC_EXIT_MODE=fixed`)를 켤 때까지 무기한 실행되어야 함. `--stop-at`은 정확히 §2.3이 금지하는 캘린더 기반 자동 중단 동작.
+- **운영 절차**: Round 5 runbook(`docs/operations/bbkc_exit_round5_runbook.md`)에 다음 명시:
+  > Round 5 forward 시작 시 `python -m scripts.run_bbkc_live_trade --run-id <id>` 만 사용. `--stop-at`/`--stop-in-minutes`는 절대 붙이지 않는다. 종료는 SIGINT(Ctrl+C) 또는 kill switch만.
+- **권장 강제 (옵션)**: `scripts/run_bbkc_live_trade.py`에 환경변수 가드 추가 검토 — `BBKC_ROUND5_MODE=true`일 때 `--stop-at`/`--stop-in-minutes`가 입력되면 ValueError로 거부. 이번 라운드 IN으로 포함 (구현 비용 낮음, 사고 방지 가치 높음).
+- **smoke 테스트는 예외**: `--stop-in-minutes 2` 같은 짧은 smoke는 `BBKC_ROUND5_MODE=true` 미설정 상태에서 사용 가능. 실제 forward 진입 시에만 `BBKC_ROUND5_MODE=true` 설정.
+
 **1개월/3개월 review = 사람의 점검 일정**. 시스템은 사용자가 수동 중지하거나 kill switch를 켤 때까지 계속 실행.
 
 리뷰 도구는 운영 체크리스트(문서) + DB 쿼리 + 백테스트 비교 — **코드에 박는 게 아님**.
@@ -103,8 +114,9 @@ def update_stop(self, symbol: str, new_stop: float) -> None:
 5. `src/execution/backtest_broker.py` + `position_tracker.py`: `update_tp` 구현
 6. `config.yaml` + `src/core/config.py`: `bbkc_exit:` 섹션 + env var override 로딩
 7. **15m synthetic 1h vs Bybit direct 1h parity check** — 운영 도구로 추가
-8. 운영 정책 문서 (Round 5 설계 문서 §7 + 운영 체크리스트)
-9. Forward test 절차 정의 + 시작 신호
+8. **`BBKC_ROUND5_MODE=true` 가드** — `scripts/run_bbkc_live_trade.py`에 추가하여 Round 5 모드일 때 `--stop-at`/`--stop-in-minutes` 입력 시 ValueError로 거부 (§2.3 자동 종료 금지 강제)
+9. 운영 정책 문서 (Round 5 설계 문서 §7 + 운영 체크리스트)
+10. Forward test 절차 정의 + 시작 신호
 
 ### OUT (Round 6 이후)
 
@@ -121,19 +133,32 @@ def update_stop(self, symbol: str, new_stop: float) -> None:
 
 Round 5 첫 단계에서 src 라이브 경로가 forward 운영에 충분한지 audit.
 
-### 4.1 비교 대상 파일
+### 4.1 Forward 기본 엔트리포인트 = `scripts/run_bbkc_live_trade.py`
+
+Round 5의 핵심 검증 질문이 "Bybit set_trading_stop이 실거래소 SL을 실제로 이동시키는가"이므로, **실제 Bybit Demo REST API를 호출하는 경로**가 기본 엔트리포인트.
+
+| 스크립트 | broker | API 호출 | Round 5 역할 |
+|---|---|---|---|
+| **`scripts/run_bbkc_live_trade.py`** | BbkcDemoBroker → LiveBroker | **실제 Bybit Demo REST** (place_order, set_trading_stop, get_positions) | **forward 기본 엔트리포인트** |
+| `scripts/run_bbkc_paper_live.py` | PaperBroker (오프라인 sim) | **No Bybit order API ever called** (스크립트 docstring 명시) | audit/reference 또는 별도 parity 검증 보조 (live trade와 같은 시그널 환경에서 거래 결과 비교용) |
+
+`run_bbkc_paper_live.py`는 set_trading_stop 검증에 부적합 (PaperBroker는 API 호출 안 함). Round 5 forward 모니터링은 반드시 `run_bbkc_live_trade.py`로 실행.
+
+### 4.2 비교 대상 파일
 
 **src 경로**:
-- `scripts/run_bbkc_paper_live.py`
+- `scripts/run_bbkc_live_trade.py` (forward 기본)
+- `scripts/run_bbkc_paper_live.py` (audit 참고용)
 - `src/execution/paper_runner.py`
 - `src/execution/paper_broker.py`
 - `src/execution/live_broker.py`
+- `src/execution/bbkc_demo_broker.py` (live_trade에서 사용하는 wrapper)
 
 **legacy 경로** (reference):
 - `_legacy/run_bbkc_trade.py`
 - `_legacy/paper_engine/trading_engine.py`
 
-### 4.2 비교 항목
+### 4.3 비교 항목
 
 운영 필수 기능 체크리스트:
 
@@ -151,7 +176,7 @@ Round 5 첫 단계에서 src 라이브 경로가 forward 운영에 충분한지 
 | 15m synthetic 1h vs Bybit direct 1h parity | 합성한 1h가 직접 받은 1h와 일치하는지 검증 |
 | 같은 계정/심볼 동시 실행 시 conflict | demo 두 개 동시 실행 시 PositionIdx 충돌 |
 
-### 4.3 결정 게이트
+### 4.4 결정 게이트
 
 | audit 결과 | 결정 |
 |---|---|
@@ -397,7 +422,7 @@ def load_bbkc_exit_config() -> Dict[str, Any]:
     return cfg
 ```
 
-`scripts/run_bbkc_paper_live.py` 또는 audit 후 채택된 진입점이 이 config로 전략 인스턴스화.
+`scripts/run_bbkc_live_trade.py` 또는 audit 후 채택된 진입점이 이 config로 전략 인스턴스화.
 
 ### 7.2 Kill switch 절차
 
@@ -459,18 +484,33 @@ $ python -m scripts.run_bbkc_paper_live   # 또는 데모 재시작
 
 ### 8.3 3개월 final 평가 (성과 비교)
 
+**주 기준**: ETH **R/trade** (거래당 R 단위 수익률). 단위 안정적, 기간/표본 크기에 둔감, baseline 비교가 명확.
+
+**보조 기준**: mean PnL — 단 단위 정렬을 위해 **L2 (forward 같은 캘린더 기간 fixed 재계산)와만 비교**. L1과 직접 비교 안 함 (단위 불일치 위험).
+
 baseline:
-- **L1**: Round 4 F0 ETH 백테스트 (wf 4/9, R/trade +0.024, mean PnL +154/2mo OOS)
-- **L2** (의심 시): forward 3개월과 같은 캘린더 기간의 fixed 백테스트 재계산 — 시장 환경 차이 보정용
+- **L1 (참고용)**: Round 4 F0 ETH 백테스트 (wf 4/9, R/trade +0.024, mean PnL +154/2mo OOS window 평균). **R/trade는 forward와 같은 단위라 직접 비교 가능**, mean PnL은 윈도우 길이/표본 크기 다르므로 직접 비교 금지.
+- **L2 (final 평가 시 권장 + PnL 비교의 유일한 baseline)**: forward 3개월과 정확히 같은 캘린더 기간 (예 2026-04-29 ~ 2026-07-29)의 fixed 백테스트 재계산. forward 결과와 단위/기간 정렬됨 — PnL 직접 비교 가능.
 
 forward 3개월 데이터를 단일 OOS 윈도우 취급하여 비교:
 
-| 판정 | 조건 |
+| 판정 | 조건 (R/trade 주 기준) |
 |---|---|
-| **PASS** | ETH R/trade ≥ 0 AND mean PnL ≥ L1 baseline |
+| **PASS** | ETH R/trade ≥ 0 AND ETH R/trade ≥ L1 R/trade (=+0.024) AND L2와 비교 시 mean PnL ≥ L2 mean PnL |
 | **STRONG PASS** | 위 + R/trade > +0.04 (Round 4 backtest 7셀 평균보다 약간 낮은 보수 기준선) |
 | **WATCH** | -0.05 < ETH R/trade < 0 → 추가 1개월 관찰 |
-| **FAIL** | ETH R/trade < -0.05 OR mean PnL < 0 → env rollback + 원인 분석 |
+| **FAIL** | ETH R/trade < -0.05 OR (L2와 비교 시 mean PnL < 0 AND L2 mean PnL > 0) → env rollback + 원인 분석 |
+
+**단위 정합 명시**:
+- R/trade는 거래당 R 단위로 무차원, forward와 backtest가 직접 비교 가능 → L1/L2 모두 사용
+- PnL은 절댓값 + 통화 단위, 기간에 비례 → L2만 사용 (같은 캘린더 기간)
+- L1 mean PnL +154는 "참고용 historical 컨텍스트"로 문서에 표시하되 PASS/FAIL 룰에 직접 사용 안 함
+
+**L2 재계산 절차**:
+1. forward 시작/종료 일자 기록
+2. 같은 기간으로 `python -m scripts.bbkc_exit_eval --cell F0 --symbol ETHUSDT` 옵션 확장 (또는 별도 ad-hoc 스크립트)
+3. fixed 백테스트 결과의 ETH 거래 → mean PnL, R/trade 산출
+4. forward 실측치와 비교
 
 ### 8.4 평가는 사람의 일정
 
@@ -503,7 +543,9 @@ forward 3개월 데이터를 단일 OOS 윈도우 취급하여 비교:
 - `src/execution/backtest_broker.py` — `update_tp` 메서드 추가
 - `config.yaml` — `bbkc_exit:` 섹션 추가
 - `src/core/config.py` — env var override 로딩
-- `scripts/run_bbkc_paper_live.py` (또는 audit 후 결정된 진입점) — config에서 exit 파라미터 읽어 BBKCSqueeze 인스턴스화
+- `scripts/run_bbkc_live_trade.py` (forward 기본 엔트리포인트):
+  - config에서 exit 파라미터 읽어 BBKCSqueeze 인스턴스화
+  - **`BBKC_ROUND5_MODE=true` 환경변수 가드 추가**: 활성 시 `--stop-at`/`--stop-in-minutes` 입력 거부 (ValueError) — §2.3 강제. smoke 테스트는 가드 미설정으로 우회 가능
 - 테스트 (위 §5.7 영향 받는 mock들)
 
 ### 미변경 (확인용)
@@ -541,7 +583,7 @@ forward 3개월 데이터를 단일 OOS 윈도우 취급하여 비교:
 
 ### 10.4 Audit 산출물 (코드가 아닌 문서)
 
-- `docs/operations/src_vs_legacy_audit.md` — §4.2 비교표 + 결정
+- `docs/operations/src_vs_legacy_audit.md` — §4.3 비교표 + §4.4 결정
 
 ---
 
