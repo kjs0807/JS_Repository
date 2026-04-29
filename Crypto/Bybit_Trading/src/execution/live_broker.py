@@ -51,8 +51,22 @@ class LiveBroker:
         return order_id
 
     def update_stop(self, symbol: str, new_stop: float) -> None:
+        """API 경유 SL 갱신 (round 5 §5.2). 성공 시에만 로컬 갱신."""
         pos = self._positions.get(symbol)
-        if pos: pos.stop_loss = new_stop
+        if pos is None:
+            return
+        pos_idx = self._position_idx_for_side(pos.side)
+        try:
+            self._rest.set_trading_stop(
+                symbol=symbol, stop_loss=new_stop, position_idx=pos_idx,
+            )
+            pos.stop_loss = new_stop   # 성공 시에만 (서버 ↔ 로컬 일치)
+        except Exception as exc:
+            logger.warning(
+                "set_trading_stop(stop_loss) failed for %s: %s "
+                "— local stop_loss not updated to keep server/local consistent",
+                symbol, exc,
+            )
 
     def manual_buy(self, symbol: str, qty: float, stop_loss: Optional[float] = None,
                    take_profit: Optional[float] = None, reason: str = "") -> str:
