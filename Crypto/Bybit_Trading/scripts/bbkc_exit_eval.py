@@ -236,6 +236,48 @@ def build_summary(jsonl_path: Path) -> Dict[str, Dict[str, Dict[str, Any]]]:
     return summary
 
 
+def integrate_label(cell_id: str, by_sym: Dict[str, Dict[str, Any]]) -> str:
+    """Per-cell integrated label from per-symbol verdicts (round 4 §6.2).
+
+    Priority order (first match wins):
+      1. F0                                                → BASELINE
+      2. ETH promote AND ETH warning=True                  → ETH_PROMOTE_MIXED
+      3. ETH promote AND any (BTC/AVAX) KILL               → ETH_ONLY_PROMOTE
+      4. ETH promote AND any (BTC/AVAX) UNKNOWN/warning    → ETH_PROMOTE_MIXED
+      5. ETH promote AND no KILL/UNKNOWN/warning anywhere  → ROBUST_PROMOTE
+      6. ETH not promote AND any (BTC/AVAX) KILL           → DAMAGING
+      7. otherwise                                          → NO_SIGNAL
+
+    "promote" means verdict in {"STRONG_PROMOTE", "PROMOTE"}.
+    """
+    if cell_id == "F0":
+        return "BASELINE"
+
+    eth = by_sym.get("ETHUSDT", {})
+    others = [by_sym.get("BTCUSDT", {}), by_sym.get("AVAXUSDT", {})]
+
+    eth_promote = eth.get("verdict") in ("STRONG_PROMOTE", "PROMOTE")
+    eth_warning = eth.get("warning") is True
+    has_kill = any(o.get("verdict") == "KILL" for o in others)
+    has_unknown_or_warning = any(
+        o.get("verdict") == "UNKNOWN" or o.get("warning") is True
+        for o in others
+    )
+
+    if eth_promote:
+        if eth_warning:
+            return "ETH_PROMOTE_MIXED"
+        if has_kill:
+            return "ETH_ONLY_PROMOTE"
+        if has_unknown_or_warning:
+            return "ETH_PROMOTE_MIXED"
+        return "ROBUST_PROMOTE"
+    else:
+        if has_kill:
+            return "DAMAGING"
+        return "NO_SIGNAL"
+
+
 def judge(summary: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """Apply baseline-relative delta rules per (cell, symbol). Round 3 §9.
 
@@ -285,6 +327,13 @@ def judge(summary: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str, 
             entry["verdict"] = verdict
             entry["warning"] = warning
             out.setdefault(cell_id, {})[sym] = entry
+
+    # Round 4 §6.2: attach per-cell integrated label.
+    # Stored under synthetic "_cell" key inside each cell's dict so existing
+    # per-symbol entries (BTCUSDT/ETHUSDT/AVAXUSDT) remain untouched.
+    for cell_id, by_sym in out.items():
+        cell_label = integrate_label(cell_id, by_sym)
+        by_sym["_cell"] = {"integrated_label": cell_label}
     return out
 
 
