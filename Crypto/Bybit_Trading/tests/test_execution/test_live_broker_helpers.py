@@ -89,3 +89,29 @@ def test_update_stop_short_uses_position_idx_2():
     broker.update_stop("BTCUSDT", 103.5)
     kwargs = broker._rest.set_trading_stop.call_args.kwargs
     assert kwargs["position_idx"] == 2
+
+
+def test_update_tp_calls_set_trading_stop_with_take_profit():
+    broker = _make_broker_with_long_pos()
+    broker._rest.set_trading_stop.return_value = {"retCode": 0, "result": {}}
+    broker.update_tp("BTCUSDT", 112.0)
+    kwargs = broker._rest.set_trading_stop.call_args.kwargs
+    assert kwargs["take_profit"] == 112.0
+    assert kwargs["position_idx"] == 1
+    assert broker._positions["BTCUSDT"].take_profit == 112.0
+
+
+def test_update_tp_does_not_update_local_on_api_failure():
+    broker = _make_broker_with_long_pos()
+    broker._rest.set_trading_stop.side_effect = RuntimeError("boom")
+    broker.update_tp("BTCUSDT", 112.0)
+    # 로컬 미갱신 (110.0 그대로)
+    assert broker._positions["BTCUSDT"].take_profit == 110.0
+
+
+def test_manual_update_tp_routes_through_update_tp():
+    broker = _make_broker_with_long_pos()
+    broker._rest.set_trading_stop.return_value = {"retCode": 0, "result": {}}
+    broker.manual_update_tp("BTCUSDT", 113.0)
+    assert broker._rest.set_trading_stop.call_count == 1
+    assert broker._positions["BTCUSDT"].take_profit == 113.0

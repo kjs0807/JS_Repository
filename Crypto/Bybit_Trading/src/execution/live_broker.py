@@ -85,9 +85,27 @@ class LiveBroker:
     def manual_update_stop(self, symbol: str, new_stop: float) -> None:
         self.update_stop(symbol, new_stop)
 
-    def manual_update_tp(self, symbol: str, new_tp: float) -> None:
+    def update_tp(self, symbol: str, new_tp: Optional[float]) -> None:
+        """API 경유 TP 갱신 (round 5 §5.3). 성공 시에만 로컬 갱신."""
         pos = self._positions.get(symbol)
-        if pos: pos.take_profit = new_tp
+        if pos is None:
+            return
+        pos_idx = self._position_idx_for_side(pos.side)
+        try:
+            self._rest.set_trading_stop(
+                symbol=symbol, take_profit=new_tp, position_idx=pos_idx,
+            )
+            pos.take_profit = new_tp
+        except Exception as exc:
+            logger.warning(
+                "set_trading_stop(take_profit) failed for %s: %s "
+                "— local take_profit not updated",
+                symbol, exc,
+            )
+
+    def manual_update_tp(self, symbol: str, new_tp: float) -> None:
+        """Round 5: 로컬만 변경하던 기존 동작 → API 경유로 변경."""
+        self.update_tp(symbol, new_tp)
 
     def get_position(self, symbol: str) -> Optional[Position]:
         return self._positions.get(symbol)

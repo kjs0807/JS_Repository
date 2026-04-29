@@ -41,7 +41,8 @@ class PositionTracker:
         if pos:
             pos.stop_loss = new_stop
 
-    def update_tp(self, symbol: str, new_tp: float) -> None:
+    def update_tp(self, symbol: str, new_tp: Optional[float]) -> None:
+        """Optional[float] 허용 — None은 TP 제거 의미 (drop_tp / 운영자 manual close 등)."""
         pos = self._positions.get(symbol)
         if pos:
             pos.take_profit = new_tp

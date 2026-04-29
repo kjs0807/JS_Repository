@@ -66,3 +66,25 @@ def test_max_favorable_passed_to_trade_record_on_exit(broker):
     assert len(trades) == 1
     # max_favorable observed: bar1 high=108 (entry 100 → +8), bar2 high=112 (+12)
     assert trades[0].max_favorable == pytest.approx(12.0, rel=1e-6)
+
+
+def test_backtest_broker_update_tp(broker):
+    bar0 = _bar("BTCUSDT", 1, 100, 100, 100, 100)
+    broker.process_bar(bar0)
+    broker.buy("BTCUSDT", qty=0.1, stop_loss=90.0, take_profit=110.0)
+    bar1 = _bar("BTCUSDT", 2, 100, 105, 99, 102)
+    broker.process_bar(bar1)
+    broker.update_tp("BTCUSDT", 115.0)
+    pos = broker.get_position("BTCUSDT")
+    assert pos.take_profit == 115.0
+
+
+def test_backtest_broker_update_tp_to_none(broker):
+    bar0 = _bar("BTCUSDT", 1, 100, 100, 100, 100)
+    broker.process_bar(bar0)
+    broker.buy("BTCUSDT", qty=0.1, stop_loss=90.0, take_profit=110.0)
+    bar1 = _bar("BTCUSDT", 2, 100, 105, 99, 102)
+    broker.process_bar(bar1)
+    broker.update_tp("BTCUSDT", None)
+    pos = broker.get_position("BTCUSDT")
+    assert pos.take_profit is None
