@@ -1,4 +1,4 @@
-"""BBKC Exit Round 3 evaluation runner.
+"""BBKC Exit Round 4 evaluation runner.
 
 Sweeps 12 exit cells × BIGTHREE × 9 walk-forward windows.
 Reuses the existing HoldoutSpec/run_strategy_on_holdout pipeline; each
@@ -335,7 +335,7 @@ def build_report(
 ) -> None:
     """Generate human-readable Markdown report."""
     lines: List[str] = [
-        "# BBKC Exit Round 3 — Sweep Report",
+        "# BBKC Exit Round 4 — Sweep Report",
         "",
         f"Generated: {datetime.now(timezone.utc).isoformat()}",
         "",
