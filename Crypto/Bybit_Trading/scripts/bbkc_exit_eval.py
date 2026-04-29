@@ -44,6 +44,25 @@ OUTPUT_BASE = PROJECT_ROOT / "logs" / "research" / "bbkc_squeeze" / "exit_round"
 # also copied to OUTPUT_BASE/latest/ for convenience.
 OUTPUT_DIR = OUTPUT_BASE  # placeholder; overwritten in main()
 
+# ── Round 4 §7: reproducibility sanity ─────────────────────────────────────
+# `be30_st60_di30 × ETHUSDT` re-runs round 3's TF_early × ETH (same params,
+# same code path). Expected exact floats from
+# logs/research/bbkc_squeeze/exit_round/2026-04-28_T2104/summary.json.
+REPRODUCE_CELL_ID = "be30_st60_di30"
+REPRODUCE_SYMBOL = "ETHUSDT"
+EXPECTED_REPRODUCE = {
+    "wf_oos_positive": 6,
+    "mean_r_per_trade": 0.0635821965450038,
+    "trade_count": 154,
+    "max_dd": 0.11123736375303807,
+    "mean_oos_pnl": 325.6180389395652,
+}
+REPRODUCE_TOLERANCE = {
+    "wf_oos_positive_exact": 6,
+    "mean_r_per_trade_abs": 0.005,
+    "trade_count_abs": 2,
+}
+
 logger = logging.getLogger("bbkc_exit_eval")
 
 
@@ -141,6 +160,68 @@ def run_one_window(
     return run["trades"], run["per_symbol"][symbol]
 
 
+def format_reproducibility_block(
+    summary_judged: Dict[str, Dict[str, Dict[str, Any]]],
+) -> List[str]:
+    """Round 4 §7: Reproducibility sanity vs round 3 TF_early × ETH.
+
+    Compares summary_judged[REPRODUCE_CELL_ID][REPRODUCE_SYMBOL] against
+    EXPECTED_REPRODUCE within REPRODUCE_TOLERANCE. Always emits a block
+    (even if cell missing — uses fallback message).
+    """
+    lines: List[str] = [
+        f"## Reproducibility Sanity ({REPRODUCE_CELL_ID} × {REPRODUCE_SYMBOL} vs Round 3 TF_early)",
+        "",
+    ]
+    cell = summary_judged.get(REPRODUCE_CELL_ID, {})
+    actual = cell.get(REPRODUCE_SYMBOL)
+    if not actual:
+        lines.append(
+            f"❗ MATCH SKIPPED — `{REPRODUCE_CELL_ID} × {REPRODUCE_SYMBOL}` "
+            f"not in summary (partial run?)."
+        )
+        lines.append("")
+        return lines
+
+    diffs: List[str] = []
+    if actual["wf_oos_positive"] != REPRODUCE_TOLERANCE["wf_oos_positive_exact"]:
+        diffs.append(
+            f"wf {actual['wf_oos_positive']} != {REPRODUCE_TOLERANCE['wf_oos_positive_exact']}"
+        )
+    if abs(actual["mean_r_per_trade"] - EXPECTED_REPRODUCE["mean_r_per_trade"]) > REPRODUCE_TOLERANCE["mean_r_per_trade_abs"]:
+        diffs.append(
+            f"R {actual['mean_r_per_trade']:+.6f} vs "
+            f"{EXPECTED_REPRODUCE['mean_r_per_trade']:+.6f} "
+            f"(tol ±{REPRODUCE_TOLERANCE['mean_r_per_trade_abs']})"
+        )
+    if abs(actual["trade_count"] - EXPECTED_REPRODUCE["trade_count"]) > REPRODUCE_TOLERANCE["trade_count_abs"]:
+        diffs.append(
+            f"n {actual['trade_count']} vs {EXPECTED_REPRODUCE['trade_count']} "
+            f"(tol ±{REPRODUCE_TOLERANCE['trade_count_abs']})"
+        )
+
+    expected_str = (
+        f"  Round 3 TF_early ETH: wf {EXPECTED_REPRODUCE['wf_oos_positive']}/9, "
+        f"R/trade {EXPECTED_REPRODUCE['mean_r_per_trade']:+.4f}, "
+        f"n={EXPECTED_REPRODUCE['trade_count']}"
+    )
+    actual_str = (
+        f"  Round 4 reproduce:    wf {actual['wf_oos_positive']}/9, "
+        f"R/trade {actual['mean_r_per_trade']:+.4f}, "
+        f"n={actual['trade_count']}"
+    )
+    lines.append(expected_str)
+    lines.append(actual_str)
+    if not diffs:
+        lines.append("  Match: ✓")
+    else:
+        lines.append("  Match: ✗")
+        lines.append("  Diffs: " + "; ".join(diffs))
+        lines.append("  ⚠️  REPRODUCIBILITY MISMATCH — investigate before trusting other cells.")
+    lines.append("")
+    return lines
+
+
 def build_report(
     summary_judged: Dict[str, Dict[str, Dict[str, Any]]],
     auxiliary: Dict[str, Dict[str, Dict[str, Any]]],
@@ -152,9 +233,12 @@ def build_report(
         "",
         f"Generated: {datetime.now(timezone.utc).isoformat()}",
         "",
+    ]
+    lines.extend(format_reproducibility_block(summary_judged))
+    lines.extend([
         "## Per-Symbol Verdicts",
         "",
-    ]
+    ])
 
     # Sort cell IDs in our canonical grid order
     cell_order = [c["cell_id"] for c in STRATEGY_CONFIGS["BBKCSqueeze"]["exit_round_grid"]]
