@@ -222,6 +222,112 @@ def format_reproducibility_block(
     return lines
 
 
+def format_integrated_labels_block(
+    summary_judged: Dict[str, Dict[str, Dict[str, Any]]],
+    grid: List[Dict[str, Any]],
+) -> List[str]:
+    """Round 4 §8.2: Markdown table of (cell, label, ETH/BTC/AVAX verdict)."""
+    lines: List[str] = [
+        "## Per-Cell Integrated Labels",
+        "",
+        "| cell | label | ETH | BTC | AVAX |",
+        "|---|---|---|---|---|",
+    ]
+    for c in grid:
+        cell_id = c["cell_id"]
+        cell_entry = summary_judged.get(cell_id, {})
+        label = cell_entry.get("_cell", {}).get("integrated_label", "?")
+        eth_v = cell_entry.get("ETHUSDT", {}).get("verdict", "-")
+        btc_v = cell_entry.get("BTCUSDT", {}).get("verdict", "-")
+        avx_v = cell_entry.get("AVAXUSDT", {}).get("verdict", "-")
+        eth_w = " *" if cell_entry.get("ETHUSDT", {}).get("warning") else ""
+        btc_w = " *" if cell_entry.get("BTCUSDT", {}).get("warning") else ""
+        avx_w = " *" if cell_entry.get("AVAXUSDT", {}).get("warning") else ""
+        lines.append(
+            f"| {cell_id} | {label} | {eth_v}{eth_w} | {btc_v}{btc_w} | {avx_v}{avx_w} |"
+        )
+    lines.append("")
+    return lines
+
+
+def format_label_distribution_block(
+    summary_judged: Dict[str, Dict[str, Dict[str, Any]]],
+) -> List[str]:
+    """Round 4 §8.2: integrated label counter."""
+    counts: Dict[str, int] = {}
+    for cell_id, cell_entry in summary_judged.items():
+        label = cell_entry.get("_cell", {}).get("integrated_label", "?")
+        counts[label] = counts.get(label, 0) + 1
+    label_order = [
+        "ROBUST_PROMOTE", "ETH_ONLY_PROMOTE", "ETH_PROMOTE_MIXED",
+        "DAMAGING", "NO_SIGNAL", "BASELINE",
+    ]
+    lines: List[str] = ["## Label Distribution", ""]
+    for label in label_order:
+        n = counts.get(label, 0)
+        lines.append(f"- {label}: {n}")
+    for label, n in counts.items():
+        if label not in label_order:
+            lines.append(f"- {label}: {n}  (unexpected)")
+    lines.append("")
+    return lines
+
+
+_VERDICT_ABBREV = {
+    "STRONG_PROMOTE": "SP",
+    "PROMOTE": "P",
+    "NEUTRAL": "N",
+    "KILL": "K",
+    "BASELINE": "B",
+    "UNKNOWN": "U",
+}
+
+
+def _abbrev(per_sym_entry: Dict[str, Any]) -> str:
+    """Abbreviate per-symbol verdict; suffix '*' if warning=True."""
+    v = per_sym_entry.get("verdict", "?")
+    abbrev = _VERDICT_ABBREV.get(v, v[:2] if v else "?")
+    if per_sym_entry.get("warning"):
+        abbrev += "*"
+    return abbrev
+
+
+def format_heatmaps_block(
+    summary_judged: Dict[str, Dict[str, Dict[str, Any]]],
+) -> List[str]:
+    """Round 4 §8.2: 9 heatmaps (3 symbols × 3 dist), each 3×3 (be × start)."""
+    lines: List[str] = [
+        "## Per-Symbol × Distance Heatmaps (3×3 grid of be × start, per-symbol verdict per cell)",
+        "",
+    ]
+    be_values = (0.25, 0.30, 0.35)
+    st_values = (0.50, 0.60, 0.70)
+    di_values = (0.20, 0.30, 0.40)
+    symbols = ["ETHUSDT", "BTCUSDT", "AVAXUSDT"]   # ETH first (primary)
+
+    for sym in symbols:
+        for di in di_values:
+            lines.append(f"### {sym}, dist={di:.2f}")
+            lines.append("")
+            header = "|        | " + " | ".join(f"st={st:.2f}" for st in st_values) + " |"
+            sep = "|" + "|".join(["--------"] * (len(st_values) + 1)) + "|"
+            lines.append(header)
+            lines.append(sep)
+            for be in be_values:
+                row_cells = []
+                for st in st_values:
+                    cell_id = (
+                        f"be{int(round(be * 100)):02d}"
+                        f"_st{int(round(st * 100)):02d}"
+                        f"_di{int(round(di * 100)):02d}"
+                    )
+                    entry = summary_judged.get(cell_id, {}).get(sym, {})
+                    row_cells.append(_abbrev(entry) if entry else "-")
+                lines.append(f"| be={be:.2f} | " + " | ".join(row_cells) + " |")
+            lines.append("")
+    return lines
+
+
 def build_report(
     summary_judged: Dict[str, Dict[str, Dict[str, Any]]],
     auxiliary: Dict[str, Dict[str, Dict[str, Any]]],
@@ -235,6 +341,10 @@ def build_report(
         "",
     ]
     lines.extend(format_reproducibility_block(summary_judged))
+    grid = STRATEGY_CONFIGS["BBKCSqueeze"]["exit_round_grid"]
+    lines.extend(format_integrated_labels_block(summary_judged, grid))
+    lines.extend(format_label_distribution_block(summary_judged))
+    lines.extend(format_heatmaps_block(summary_judged))
     lines.extend([
         "## Per-Symbol Verdicts",
         "",
