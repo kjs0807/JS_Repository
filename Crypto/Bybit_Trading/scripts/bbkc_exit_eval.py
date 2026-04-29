@@ -12,7 +12,7 @@ Output dir: logs/research/bbkc_squeeze/exit_round/
 
 Usage:
     python -m scripts.bbkc_exit_eval --smoke         # 1 cell × 1 symbol × 1 window
-    python -m scripts.bbkc_exit_eval --full          # all 324 runs
+    python -m scripts.bbkc_exit_eval --full          # all 756 runs (28 cells × 3 sym × 9 wf)
     python -m scripts.bbkc_exit_eval --cell F0 --symbol BTCUSDT
 """
 from __future__ import annotations
@@ -83,7 +83,7 @@ class WindowResult:
 
 
 def make_strategy_factory(cell: Dict[str, Any]):
-    """Return a zero-arg factory that builds BBKCSqueeze with cell params (round 3 schema).
+    """Return a zero-arg factory that builds BBKCSqueeze with cell params (round 4 schema).
 
     fixed cells leave trail/be defaults untouched (no be_trail invariant check).
     be_trail cells supply the three TP-fraction params explicitly.
@@ -627,7 +627,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--smoke", action="store_true",
                    help="1 cell × 1 symbol × 1 window")
     p.add_argument("--full", action="store_true",
-                   help="all 12 cells × 3 symbols × 9 windows = 324 runs")
+                   help="all 28 cells × 3 symbols × 9 windows = 756 runs")
     p.add_argument("--cell", default=None, help="run only this cell_id (e.g. F0)")
     p.add_argument("--symbol", default=None, help="run only this symbol")
     return p.parse_args()
