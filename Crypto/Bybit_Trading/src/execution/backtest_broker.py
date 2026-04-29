@@ -64,6 +64,9 @@ class BacktestBroker:
     def update_stop(self, symbol: str, new_stop: float) -> None:
         self._positions.update_stop(symbol, new_stop)
 
+    def update_tp(self, symbol: str, new_tp: Optional[float]) -> None:
+        self._positions.update_tp(symbol, new_tp)
+
     # ── Manual orders ────────────────────────────────────────────────────────
 
     def manual_buy(self, symbol: str, qty: float, stop_loss: Optional[float] = None,

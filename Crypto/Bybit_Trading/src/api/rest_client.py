@@ -119,6 +119,33 @@ class BybitRestClient:
             return {"error": resp.get("retMsg", "unknown")}
         return resp.get("result", {})
 
+    def set_trading_stop(
+        self,
+        symbol: str,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
+        position_idx: int = 0,
+    ) -> Dict[str, Any]:
+        """Bybit /v5/position/trading-stop via pybit.
+
+        체결 후 또는 BE/trail 트리거 시 SL/TP를 갱신할 때 사용.
+        positionIdx: 0=OneWay, 1=Hedge Buy, 2=Hedge Sell.
+        Round 5 §5.1 참조. category="linear", tpslMode="Full" 고정.
+
+        Raises: pybit/HTTP 예외 — caller가 잡아 WARN 로그로 처리할 것.
+        """
+        params: Dict[str, Any] = {
+            "category": "linear",
+            "symbol": symbol,
+            "tpslMode": "Full",
+            "positionIdx": position_idx,
+        }
+        if stop_loss is not None:
+            params["stopLoss"] = str(stop_loss)
+        if take_profit is not None:
+            params["takeProfit"] = str(take_profit)
+        return self._session.set_trading_stop(**params)
+
     def cancel_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
         resp = self._session.cancel_order(
             category="linear", symbol=symbol, orderId=order_id

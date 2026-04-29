@@ -150,6 +150,7 @@ class _MockBroker:
         self.sells = []
         self.closes = []
         self.stop_updates = []
+        self.tp_updates = []
         self.positions = {}
 
     def buy(self, symbol, qty, stop_loss, take_profit=None, reason=""):
@@ -166,6 +167,9 @@ class _MockBroker:
 
     def update_stop(self, symbol, new_stop):
         self.stop_updates.append((symbol, new_stop))
+
+    def update_tp(self, symbol, new_tp):
+        self.tp_updates.append((symbol, new_tp))
 
     def get_position(self, symbol):
         return self.positions.get(symbol)

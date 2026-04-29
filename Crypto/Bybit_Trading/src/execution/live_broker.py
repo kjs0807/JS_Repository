@@ -23,6 +23,16 @@ class LiveBroker:
         self._equity: float = initial_capital
         self._sync_wallet()
 
+    def _position_idx_for_side(self, side: str) -> int:
+        """Hedge mode 가정: LONG=1, SHORT=2.
+
+        NOTE: 계정이 one-way mode이면 0을 반환해야 함. 현재 src 경로는
+        rest_client.place_order의 자동 도출 로직(side='Buy' → 1)과 동일하게
+        hedge를 가정. one-way 전환 시 이 헬퍼 + place_order 모두 수정 필요.
+        Round 5 §5.2 참조.
+        """
+        return 1 if side == "LONG" else 2
+
     def buy(self, symbol: str, qty: float, stop_loss: float,
             take_profit: Optional[float] = None, reason: str = "") -> str:
         return self._execute_order(symbol, "Buy", qty, stop_loss, take_profit, "STRATEGY", reason)
@@ -41,8 +51,22 @@ class LiveBroker:
         return order_id
 
     def update_stop(self, symbol: str, new_stop: float) -> None:
+        """API 경유 SL 갱신 (round 5 §5.2). 성공 시에만 로컬 갱신."""
         pos = self._positions.get(symbol)
-        if pos: pos.stop_loss = new_stop
+        if pos is None:
+            return
+        pos_idx = self._position_idx_for_side(pos.side)
+        try:
+            self._rest.set_trading_stop(
+                symbol=symbol, stop_loss=new_stop, position_idx=pos_idx,
+            )
+            pos.stop_loss = new_stop   # 성공 시에만 (서버 ↔ 로컬 일치)
+        except Exception as exc:
+            logger.warning(
+                "set_trading_stop(stop_loss) failed for %s: %s "
+                "— local stop_loss not updated to keep server/local consistent",
+                symbol, exc,
+            )
 
     def manual_buy(self, symbol: str, qty: float, stop_loss: Optional[float] = None,
                    take_profit: Optional[float] = None, reason: str = "") -> str:
@@ -61,9 +85,27 @@ class LiveBroker:
     def manual_update_stop(self, symbol: str, new_stop: float) -> None:
         self.update_stop(symbol, new_stop)
 
-    def manual_update_tp(self, symbol: str, new_tp: float) -> None:
+    def update_tp(self, symbol: str, new_tp: Optional[float]) -> None:
+        """API 경유 TP 갱신 (round 5 §5.3). 성공 시에만 로컬 갱신."""
         pos = self._positions.get(symbol)
-        if pos: pos.take_profit = new_tp
+        if pos is None:
+            return
+        pos_idx = self._position_idx_for_side(pos.side)
+        try:
+            self._rest.set_trading_stop(
+                symbol=symbol, take_profit=new_tp, position_idx=pos_idx,
+            )
+            pos.take_profit = new_tp
+        except Exception as exc:
+            logger.warning(
+                "set_trading_stop(take_profit) failed for %s: %s "
+                "— local take_profit not updated",
+                symbol, exc,
+            )
+
+    def manual_update_tp(self, symbol: str, new_tp: float) -> None:
+        """Round 5: 로컬만 변경하던 기존 동작 → API 경유로 변경."""
+        self.update_tp(symbol, new_tp)
 
     def get_position(self, symbol: str) -> Optional[Position]:
         return self._positions.get(symbol)
@@ -83,17 +125,34 @@ class LiveBroker:
         return (self._equity * risk_pct) / stop_distance
 
     def sync_positions(self) -> None:
+        """Bybit get_positions 응답에서 SL/TP 파싱 (round 5 §5.4).
+
+        재시작 후 BE/trail로 이동된 stop_loss/take_profit을 잃지 않도록 함.
+        빈 문자열 / "0" / None은 해당 필드 미설정으로 취급.
+        """
         raw_positions = self._rest.get_positions()
         new_positions: Dict[str, Position] = {}
         for raw in raw_positions:
             size = float(raw.get("size", 0))
-            if size <= 0: continue
+            if size <= 0:
+                continue
             symbol = raw["symbol"]
             side = "LONG" if raw.get("side") == "Buy" else "SHORT"
-            new_positions[symbol] = Position(symbol=symbol, side=side, qty=size,
-                entry_price=float(raw.get("avgPrice", 0)), entry_time=0,
-                stop_loss=0.0, take_profit=None,
-                unrealized_pnl=float(raw.get("unrealisedPnl", 0)), strategy_name="SYNCED")
+
+            sl_raw = raw.get("stopLoss")
+            tp_raw = raw.get("takeProfit")
+            sl_value = float(sl_raw) if sl_raw not in (None, "", "0") else 0.0
+            tp_value = float(tp_raw) if tp_raw not in (None, "", "0") else None
+
+            new_positions[symbol] = Position(
+                symbol=symbol, side=side, qty=size,
+                entry_price=float(raw.get("avgPrice", 0)),
+                entry_time=0,
+                stop_loss=sl_value,
+                take_profit=tp_value,
+                unrealized_pnl=float(raw.get("unrealisedPnl", 0)),
+                strategy_name="SYNCED",
+            )
         self._positions = new_positions
 
     def _sync_wallet(self) -> None:

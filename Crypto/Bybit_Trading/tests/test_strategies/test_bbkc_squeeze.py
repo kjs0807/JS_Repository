@@ -20,6 +20,8 @@ class MockBroker:
         return "mock_sell"
     def close(self, symbol, reason=""):
         return "mock_close"
+    def update_tp(self, symbol, new_tp):
+        pass
     def get_position(self, symbol):
         return self.positions.get(symbol)
     def calc_qty(self, symbol, risk_pct, stop_distance):

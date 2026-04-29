@@ -68,7 +68,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.api.rest_client import BybitRestClient
 from src.api.ws_client import BybitWebSocketClient
 from src.core.alert import AlertManager
-from src.core.config import RiskConfig, load_config
+from src.core.config import BBKCExitConfig, RiskConfig, load_config
 from src.core.types import Bar
 from src.data_manager.db import DBManager
 from src.data_manager.feed import HistoricalDataFeed
@@ -103,6 +103,7 @@ class BbkcLiveTradeRunner:
         universe: List[str],
         warmup_days: int,
         stop_at_ms: int,
+        exit_cfg: Optional[BBKCExitConfig] = None,
     ) -> None:
         self._broker = broker
         self._db = db
@@ -112,6 +113,18 @@ class BbkcLiveTradeRunner:
         self._stopped = False
         self._ws: Optional[BybitWebSocketClient] = None
         self._bars_seen = 0
+        # Round 5 §7.1: config-derived BBKC exit profile (be_trail by default)
+        self._exit_cfg = exit_cfg or BBKCExitConfig()
+        logger.info(
+            "[runner] BBKC exit profile: mode=%s be=%.2f start=%.2f dist=%.2f "
+            "drop_tp=%s time_stop_bars=%d",
+            self._exit_cfg.mode,
+            self._exit_cfg.trail_be_at_tp_frac,
+            self._exit_cfg.trail_start_at_tp_frac,
+            self._exit_cfg.trail_distance_tp_frac,
+            self._exit_cfg.drop_tp,
+            self._exit_cfg.time_stop_bars,
+        )
 
     def _install_signal_handler(self) -> None:
         def _handler(signum: int, frame: Any) -> None:
@@ -210,7 +223,17 @@ class BbkcLiveTradeRunner:
             db=self._db, symbols=[symbol], timeframe="1h",
         )
         full = feed.get_full_series(symbol)
-        strat = BBKCSqueeze()
+        # Round 5 §7.1: config-derived exit profile injected per dispatch.
+        # `_pos_meta` lazy init (Round 3) recovers from broker.get_position(),
+        # so per-bar instantiation is fine — no state file needed.
+        strat = BBKCSqueeze(
+            exit_mode=self._exit_cfg.mode,
+            trail_be_at_tp_frac=self._exit_cfg.trail_be_at_tp_frac,
+            trail_start_at_tp_frac=self._exit_cfg.trail_start_at_tp_frac,
+            trail_distance_tp_frac=self._exit_cfg.trail_distance_tp_frac,
+            drop_tp=self._exit_cfg.drop_tp,
+            time_stop_bars=self._exit_cfg.time_stop_bars,
+        )
         cache = strat.prepare(full)
         i = len(full.bars) - 1
         try:
@@ -354,6 +377,17 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # Round 5 §2.3: 자동 종료 금지 강제 가드 (BBKC_ROUND5_MODE=true).
+    # forward 운영 시 운영자가 BBKC_ROUND5_MODE=true로 시작하면
+    # --stop-at/--stop-in-minutes는 시작 거부됨. smoke 테스트는 가드 미설정으로.
+    if os.getenv("BBKC_ROUND5_MODE", "").lower() == "true":
+        if args.stop_at or args.stop_in_minutes is not None:
+            parser.error(
+                "BBKC_ROUND5_MODE=true: --stop-at/--stop-in-minutes are forbidden "
+                "in Round 5 forward operations (per round 5 design §2.3). "
+                "Unset BBKC_ROUND5_MODE for smoke tests."
+            )
+
     cfg = load_config(str(PROJECT_ROOT / "config.yaml"))
 
     # --- safety gate: ensure we are on demo unless explicitly overridden
@@ -430,6 +464,7 @@ def main() -> int:
         universe=BIGTHREE,
         warmup_days=args.warmup_days,
         stop_at_ms=stop_ms,
+        exit_cfg=cfg.bbkc_exit,
     )
     runner.run()
     return 0

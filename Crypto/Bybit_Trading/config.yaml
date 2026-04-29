@@ -29,3 +29,12 @@ alert:
   alert_on_trade: true
   alert_on_error: true
   alert_on_daily_summary: true
+
+# Round 5: BBKC be_trail 청산 운영 정책 (round 4 ROBUST_PROMOTE 1순위 후보)
+bbkc_exit:
+  mode: be_trail        # be_trail | fixed (env BBKC_EXIT_MODE로 override 가능)
+  trail_be_at_tp_frac: 0.25
+  trail_start_at_tp_frac: 0.60
+  trail_distance_tp_frac: 0.30
+  drop_tp: false
+  time_stop_bars: 0

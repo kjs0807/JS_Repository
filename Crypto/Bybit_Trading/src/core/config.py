@@ -84,12 +84,28 @@ class AlertConfig:
 
 
 @dataclass
+class BBKCExitConfig:
+    """Round 5 BBKC 청산 운영 정책. config.yaml의 ``bbkc_exit`` 섹션 + env var.
+
+    env BBKC_EXIT_MODE 설정 시 yaml의 mode를 override (kill switch).
+    Defaults: round 4 ROBUST_PROMOTE 1순위 후보 be25_st60_di30.
+    """
+    mode: str = "be_trail"
+    trail_be_at_tp_frac: float = 0.25
+    trail_start_at_tp_frac: float = 0.60
+    trail_distance_tp_frac: float = 0.30
+    drop_tp: bool = False
+    time_stop_bars: int = 0
+
+
+@dataclass
 class AppConfig:
     app: AppSettings = field(default_factory=AppSettings)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     data: DataConfig = field(default_factory=DataConfig)
     alert: AlertConfig = field(default_factory=AlertConfig)
+    bbkc_exit: BBKCExitConfig = field(default_factory=BBKCExitConfig)
 
 
 def _merge_dataclass(instance: object, overrides: dict) -> None:
@@ -107,6 +123,7 @@ def load_config(config_path: str = "config.yaml") -> AppConfig:
         section_map = {
             "app": config.app, "backtest": config.backtest,
             "risk": config.risk, "data": config.data, "alert": config.alert,
+            "bbkc_exit": config.bbkc_exit,
         }
         for section_name, instance in section_map.items():
             if section_name in raw and isinstance(raw[section_name], dict):
@@ -117,10 +134,20 @@ def load_config(config_path: str = "config.yaml") -> AppConfig:
     env_chat = os.getenv("TELEGRAM_CHAT_ID")
     if env_chat:
         config.alert.telegram_chat_id = env_chat
+    # Round 5 §7.1: BBKC_EXIT_MODE env override (kill switch path)
+    env_bbkc_mode = os.getenv("BBKC_EXIT_MODE")
+    if env_bbkc_mode:
+        import logging
+        logging.getLogger(__name__).warning(
+            "BBKC_EXIT_MODE env override active: mode=%s "
+            "(kill-switch path; check rollback procedure in runbook §7.2)",
+            env_bbkc_mode,
+        )
+        config.bbkc_exit.mode = env_bbkc_mode
     return config
 
 
 __all__ = [
     "AppConfig", "AppSettings", "BacktestConfig", "RiskConfig",
-    "DataConfig", "AlertConfig", "load_config",
+    "DataConfig", "AlertConfig", "BBKCExitConfig", "load_config",
 ]

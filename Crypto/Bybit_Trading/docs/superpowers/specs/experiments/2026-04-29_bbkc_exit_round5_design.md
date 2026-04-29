@@ -620,30 +620,67 @@ forward 3개월 데이터를 단일 OOS 윈도우 취급하여 비교:
 
 ---
 
-## 14. Round 5 Results (라운드 종료 후 채울 placeholder)
+## 14. Round 5 Results (코드 머지 + 운영 정책 확정 시점)
 
-**Status**: TBD
+**Status**: 코드/정책 완료 (2026-04-29). forward 모니터링은 라운드 외부 관찰 기간으로 분리.
 
 ### 14.1 Audit 결과 (A/B/C 결정)
 
-(src 경로 audit 비교표 요약 + 채택안)
+산출물: `docs/operations/src_vs_legacy_audit.md` (commit `e9ce814`).
+
+17개 항목 비교. 채택안: **A (src 충분)**.
+
+근거 5가지:
+1. Round 5 핵심 질문 (`set_trading_stop` 실거래소 SL 이동) 이 정확히 src `LiveBroker`에 매핑됨.
+2. be_trail + integrate_label + 28-cell grid 가 `src/strategies/bbkc_squeeze.py`에 구축됨 (Round 3-4 결과). legacy 포팅 시 DRY 위반.
+3. 15m → 1h 합성 vs 1h direct 는 Round 5 검증과 직교 (be_trail 은 1h boundary, SL은 서버측 enforcement).
+4. 운영 안전성: BIGTHREE universe 가드 + `--force-live` mainnet 거부 + lot-step 자동 + orders.jsonl audit. src가 더 강함.
+5. B (legacy 포팅) = DRY 위반 / C (parallel demo) = positionIdx 충돌 위험.
+
+Critical 격차 1건 (`set_trading_stop` API 미구현) → Phase B Tasks 2-6 으로 정확히 보완. Non-blocking 격차 4건은 OUT (trade_log DB / 15m 합성 / manual_close CLI / restart 시 `_pos_meta`).
 
 ### 14.2 코드 변경 완료 사항
 
-(set_trading_stop, update_stop API 연동, update_tp, sync_positions, helper 등 — 머지된 파일/커밋 목록)
+| 파일 | 변경 | Commit |
+|---|---|---|
+| `src/api/rest_client.py` | `set_trading_stop` wrapper 추가 (pybit 경유) | `da0fc67` |
+| `src/execution/live_broker.py` | `_position_idx_for_side` helper | `65355a2` |
+| `src/execution/live_broker.py` | `update_stop` API 연동, 실패 시 로컬 미갱신 | `43962da` |
+| `src/execution/broker.py` Protocol + `backtest_broker.py` + `live_broker.py` + `position_tracker.py` + 모든 mock | `update_tp` (`Optional[float]`) 추가, `manual_update_tp` API 경유 | `344626c` |
+| `src/execution/live_broker.py:sync_positions` | Bybit `stopLoss`/`takeProfit` 파싱 (재시작 후 SL/TP 보존) | `30500c5` |
+| `config.yaml` + `src/core/config.py` | `bbkc_exit:` 섹션 + `BBKCExitConfig` + `BBKC_EXIT_MODE` env override | `2a32990` |
+| `scripts/run_bbkc_live_trade.py` | `BBKC_ROUND5_MODE=true` 가드 (--stop-at/--stop-in-minutes 거부) + config-derived `BBKCSqueeze` | `f4c96c3` |
+| `scripts/check_15m_to_1h_parity.py` | 신규 — parity check 도구 (운영자 1주 1회 수동) | `f3dad7d` |
+| `docs/operations/bbkc_exit_round5_runbook.md` | 신규 — Round 5 운영 체크리스트 | `bbac52e` |
+
+테스트: 387 passed (Round 5 신규 ≈ 30건 + 기존 357 회귀 무사).
+
+머지 커밋 범위: `e9ce814..bbac52e` (audit + 9 코드/문서 커밋).
 
 ### 14.3 운영 정책 확정 사항
 
-(config.yaml 적용된 값, kill switch 절차, 기존 포지션 처리 방침)
+- **config.yaml `bbkc_exit:`**: be_trail / be=0.25 / start=0.60 / dist=0.30 / drop_tp=false / time_stop_bars=0 (Round 4 ROBUST_PROMOTE 1순위 후보 be25_st60_di30).
+- **Kill switch**: `BBKC_EXIT_MODE=fixed` env (신규 진입만 fixed 롤백). config.yaml 은 그대로.
+- **기존 포지션 처리**: 자동 rollback 없음. 운영자 REPL `broker.manual_close` / `manual_update_stop` / `manual_update_tp(symbol, None)` 으로 처리 (runbook §2.2 표).
+- **자동 종료 금지**: `BBKC_ROUND5_MODE=true` 가드가 `--stop-at`/`--stop-in-minutes`를 코드 차원에서 거부 (parser.error).
+- **Hedge mode 가정**: LONG=positionIdx 1, SHORT=2. one-way 전환 시 `_position_idx_for_side` + `place_order` 둘 다 수정 필요.
 
 ### 14.4 Forward 시작 신호
 
-(forward 시작 일시, 첫 진입 트랜잭션, 초기 ETH/BTC/AVAX 포지션 상태)
+(forward 시작 일시, 첫 진입 트랜잭션 — 운영자가 실제 시작 후 기록)
 
 ### 14.5 Round 6 후보
 
-(forward 1개월 mid-review 후 결정. Round 5 시점에서는 enumerate만)
+- forward 1개월 mid-review 결과 → 기술 검증 / 시그널 환경 평가
+- forward 3개월 final-review 결과 → PASS/STRONG/WATCH/FAIL 분기
+- `BBKC_DISABLE_NEW_ENTRY=true` 가드 (긴급 신규 진입 차단)
+- One-way mode 전환 지원
+- 15m → 1h parity 자동 fallback (drift 발견 시)
+- 13코인 일반화 (BIGTHREE → 더 넓은 universe)
+- trade_log DB 테이블 (orders.jsonl + heartbeat log 보강)
+- manual_close CLI (REPL 의존 제거)
+- ETH time_stop 정밀화 (Round 4에서 OUT 처리됐던 후보)
 
 ### 14.6 한 줄 요약
 
-(라운드 5 결론 + forward 모니터링 시작 + Round 6 입력 예고)
+라운드 5는 be25_st60_di30 운영을 위한 코드/정책 인프라를 완료했다. forward는 라운드 외부 관찰 기간으로 시작하며, Round 6 입력은 1개월/3개월 review 결과로부터 도출한다.
