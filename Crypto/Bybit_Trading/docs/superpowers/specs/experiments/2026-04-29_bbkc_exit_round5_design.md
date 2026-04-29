@@ -90,8 +90,8 @@ def update_stop(self, symbol: str, new_stop: float) -> None:
 - **이유**: Forward는 사용자가 수동으로 중지하거나 kill switch(`BBKC_EXIT_MODE=fixed`)를 켤 때까지 무기한 실행되어야 함. `--stop-at`은 정확히 §2.3이 금지하는 캘린더 기반 자동 중단 동작.
 - **운영 절차**: Round 5 runbook(`docs/operations/bbkc_exit_round5_runbook.md`)에 다음 명시:
   > Round 5 forward 시작 시 `python -m scripts.run_bbkc_live_trade --run-id <id>` 만 사용. `--stop-at`/`--stop-in-minutes`는 절대 붙이지 않는다. 종료는 SIGINT(Ctrl+C) 또는 kill switch만.
-- **권장 강제 (옵션)**: `scripts/run_bbkc_live_trade.py`에 환경변수 가드 추가 검토 — `BBKC_ROUND5_MODE=true`일 때 `--stop-at`/`--stop-in-minutes`가 입력되면 ValueError로 거부. 이번 라운드 IN으로 포함 (구현 비용 낮음, 사고 방지 가치 높음).
-- **smoke 테스트는 예외**: `--stop-in-minutes 2` 같은 짧은 smoke는 `BBKC_ROUND5_MODE=true` 미설정 상태에서 사용 가능. 실제 forward 진입 시에만 `BBKC_ROUND5_MODE=true` 설정.
+- **강제 가드 (Round 5 IN, 필수 구현)**: `scripts/run_bbkc_live_trade.py`에 환경변수 가드 추가 — `BBKC_ROUND5_MODE=true`일 때 `--stop-at`/`--stop-in-minutes`가 입력되면 시작 거부 (ValueError 또는 `parser.error`). 옵션이 아닌 Round 5 코드 변경의 일부. 구현 비용 낮음, 과거 사고 재발 방지 가치 높음.
+- **smoke 테스트는 예외**: `--stop-in-minutes 2` 같은 짧은 smoke는 `BBKC_ROUND5_MODE` 미설정(또는 `false`) 상태에서 사용 가능. 실제 forward 진입 시 운영자가 `export BBKC_ROUND5_MODE=true` 설정 후 데모 시작.
 
 **1개월/3개월 review = 사람의 점검 일정**. 시스템은 사용자가 수동 중지하거나 kill switch를 켤 때까지 계속 실행.
 
@@ -429,7 +429,7 @@ def load_bbkc_exit_config() -> Dict[str, Any]:
 **시나리오 1: 신규 진입 fixed 롤백**
 ```
 $ export BBKC_EXIT_MODE=fixed
-$ python -m scripts.run_bbkc_paper_live   # 또는 데모 재시작
+$ python -m scripts.run_bbkc_live_trade --run-id <id>   # 또는 데모 재시작
 ```
 다음 전략 인스턴스 생성 시 fixed 모드. 신규 진입은 fixed SL/TP로 들어감.
 
