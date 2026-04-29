@@ -63,18 +63,30 @@ STRATEGY_CONFIGS: Dict[str, Dict[str, Any]] = {
             "tp_pct": [0.04, 0.06, 0.08],
             "sl_pct": [0.05, 0.07],
         },
-        # 2026-04-28 round 3: TP-fraction trailing thresholds (round 2 R-unit dead path).
-        # 8 hand-picked archetypes. time_stop=0 across all (round 4 deferred).
-        # Indicator params FIXED at 2026-03-30 winner values during the exit round.
+        # 2026-04-29 round 4: 3×3×3 fine sweep around ETH × TF_early (round 3 STRONG_PROMOTE).
+        # Replaces round 3's 8 archetypes — round 3 archetypes preserved only in
+        # design doc §15 + result files (logs/research/.../2026-04-28_T2104/).
+        # Policy: this key always points to the LATEST round's fine sweep matrix.
         "exit_round_grid": [
-            {"cell_id": "F0",           "exit_mode": "fixed",    "trail_be_at_tp_frac": None, "trail_start_at_tp_frac": None, "trail_distance_tp_frac": None, "drop_tp": False, "time_stop_bars": 0},
-            {"cell_id": "TF_default",   "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.50, "trail_start_at_tp_frac": 0.80, "trail_distance_tp_frac": 0.30, "drop_tp": False, "time_stop_bars": 0},
-            {"cell_id": "TF_wide",      "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.50, "trail_start_at_tp_frac": 0.80, "trail_distance_tp_frac": 0.50, "drop_tp": False, "time_stop_bars": 0},
-            {"cell_id": "TF_early",     "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.30, "trail_start_at_tp_frac": 0.60, "trail_distance_tp_frac": 0.30, "drop_tp": False, "time_stop_bars": 0},
-            {"cell_id": "TF_late",      "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.70, "trail_start_at_tp_frac": 0.90, "trail_distance_tp_frac": 0.30, "drop_tp": False, "time_stop_bars": 0},
-            {"cell_id": "TF_immediate", "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.49, "trail_start_at_tp_frac": 0.50, "trail_distance_tp_frac": 0.30, "drop_tp": False, "time_stop_bars": 0},
-            {"cell_id": "TR_default",   "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.50, "trail_start_at_tp_frac": 0.80, "trail_distance_tp_frac": 0.30, "drop_tp": True,  "time_stop_bars": 0},
-            {"cell_id": "TR_immediate", "exit_mode": "be_trail", "trail_be_at_tp_frac": 0.49, "trail_start_at_tp_frac": 0.50, "trail_distance_tp_frac": 0.30, "drop_tp": True,  "time_stop_bars": 0},
+            # Baseline
+            {"cell_id": "F0",
+             "exit_mode": "fixed",
+             "trail_be_at_tp_frac": None, "trail_start_at_tp_frac": None,
+             "trail_distance_tp_frac": None,
+             "drop_tp": False, "time_stop_bars": 0},
+        ] + [
+            {
+                "cell_id": f"be{int(round(be * 100)):02d}_st{int(round(st * 100)):02d}_di{int(round(di * 100)):02d}",
+                "exit_mode": "be_trail",
+                "trail_be_at_tp_frac": be,
+                "trail_start_at_tp_frac": st,
+                "trail_distance_tp_frac": di,
+                "drop_tp": False,
+                "time_stop_bars": 0,
+            }
+            for be in (0.25, 0.30, 0.35)
+            for st in (0.50, 0.60, 0.70)
+            for di in (0.20, 0.30, 0.40)
         ],
         "symbols": SYMBOLS_DEFAULT,
         "timeframes": TIMEFRAMES_DEFAULT,
