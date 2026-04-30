@@ -20,6 +20,11 @@ CLI 사용 예 (Bybit_Trading DB)::
         --start 2026-03-01 --end 2026-04-29
 
 ``--start``/``--end``는 선택. 생략 시 해당 symbol의 모든 봉을 export.
+
+**Date-only 입력의 의미**: ``YYYY-MM-DD`` 형식만 적으면 ``YYYY-MM-DD T00:00:00+00:00``
+으로 해석된다 (UTC tz-aware). 따라서 ``--end 2026-04-29``는 **2026-04-29 00:00 (UTC) inclusive
+까지만** export 하며, 해당 날짜 전체를 받으려면 ``--end 2026-04-30`` 또는 ``--end
+2026-04-29T23:00:00+00:00``처럼 명시한다.
 """
 
 from __future__ import annotations
@@ -187,13 +192,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "--start",
         type=_parse_iso,
         default=None,
-        help="Optional inclusive start (YYYY-MM-DD or ISO8601, UTC).",
+        help=(
+            "Optional inclusive start (YYYY-MM-DD or ISO8601, UTC). "
+            "Date-only is parsed as 00:00:00 UTC."
+        ),
     )
     parser.add_argument(
         "--end",
         type=_parse_iso,
         default=None,
-        help="Optional inclusive end (YYYY-MM-DD or ISO8601, UTC).",
+        help=(
+            "Optional inclusive end (YYYY-MM-DD or ISO8601, UTC). "
+            "Date-only is parsed as 00:00:00 UTC: only the bar at midnight "
+            "of that day is included. Use the next day or an explicit time "
+            "(e.g. '2026-04-29T23:00:00+00:00') to include the whole day."
+        ),
     )
     return parser
 

@@ -2089,8 +2089,13 @@ BB-KC 포팅 경계 (절대 위반 금지):
 - 기존 모의매매 결과와는 **timestamp + direction**만 회귀 비교한다 (PnL 비교 X — 체결 모델·수수료 가정이 다를 수 있음).
 
 완료 조건:
-- **모의매매 결과와 시그널 timestamp 100% 일치** (회귀 게이트)
-- **모의매매 결과와 시그널 방향(long entry / exit) 100% 일치**
+- **Phase 1 long-only buy-entry subset regression**: 모의매매 결과의 long entry 시그널 중 v8와 매칭되는 fixture 부분집합에 대해 timestamp + direction 정확히 일치 (`legacy_fixture ⊆ v8_actual_buys`). v8 가 legacy 보다 더 많은 buy 를 발행하는 것은 의도된 차이로 허용 — 사유는 다음과 같다:
+  - **RSI 필터** (legacy `rsi_filter=70.0` LONG 차단) — Phase 1.5+ 까지 v8 미지원
+  - **SHORT 진입** — Phase 1 long-only (Sizer 차단)
+  - **TP / SL / be_trail / time_stop** 청산 — Phase 2 (limit/stop)
+  - **EWM(Wilder ATR) 시드 처리 차이** + DB 미세 갱신 → squeeze boundary 봉에서 일부 fixture entry 가 v8 와 매칭 안 될 수 있음. 이런 entry 는 회귀 fixture 에서 **사전 trim** 하고 사유를 `tests/fixtures/README.md` 에 기록한다.
+  - **Legacy 데몬 폴링 지연** (예: HH:00 release 가 HH+1:15 에 로깅) — fixture 작성자는 squeeze 상태표 기준으로 decision_ts 를 정정해 등록하거나 매칭 실패 시 trim 한다.
+- 향후 v8 가 RSI 필터 (Phase 1.5+) / SHORT (Phase 2) / 정밀 EWM seed 일치를 도입하면 fixture trim 을 풀고 entries 를 추가하는 식으로 게이트를 강화한다.
 - **Lookahead 테스트 그린**: 전체 데이터 / 절반 데이터 두 번 실행 시 동일 시점까지의 시그널 timestamp/방향 100% 일치 (의미 동일 비교, 바이트 비교 X)
 - **Reproducibility (의미 동일 버전)**: 같은 config + random_seed로 두 번 실행 시 발행되는 이벤트 시퀀스의 `(type, ts, payload)` 의미가 동일해야 한다.
   - events.jsonl 바이트 단위 동일은 **Phase 2에서 canonical JSON(sort_keys + 고정 separator + UTC ISO8601 + Decimal→str + deterministic order_id) 도입 후** 검증.

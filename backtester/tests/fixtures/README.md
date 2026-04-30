@@ -46,6 +46,10 @@ OHLCV: ``tools/export_db_to_parquet.py``로 SQLite DB에서 export. 예::
         --output-dir tests/fixtures \
         --start 2026-03-01 --end 2026-04-29
 
+**Date-only ``--end`` 의미**: ``--end 2026-04-29``는 ``2026-04-29 T00:00:00+00:00``
+inclusive 까지 (= 그 날 자정 봉 1개만 포함). 해당 날짜 전체 (00:00~23:00) 를 원하면
+``--end 2026-04-30`` 또는 ``--end 2026-04-29T23:00:00+00:00``으로 지정.
+
 시그널: ``signal_log`` (legacy forward demon)에서 ``BBKCSqueeze`` strategy + 대상
 symbol/direction 조회 → ``timestamp`` 컬럼을 봉 마감 (= ``HH:00:00``)으로 정규화.
 
