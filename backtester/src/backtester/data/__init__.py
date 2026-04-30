@@ -13,14 +13,22 @@ from backtester.data.base import (
     sanitize_symbol,
     validate_ohlcv_schema,
 )
+from backtester.data.bybit_source import (
+    BybitDataSource,
+    BybitKlineRow,
+    KlineFetcher,
+)
 from backtester.data.csv_source import CSVDataSource
 from backtester.data.parquet_source import ParquetDataSource
 
 __all__ = [
     "OHLCV_SCHEMA",
+    "BybitDataSource",
+    "BybitKlineRow",
     "CSVDataSource",
     "DataSource",
     "GapReport",
+    "KlineFetcher",
     "ParquetDataSource",
     "parse_timeframe",
     "sanitize_symbol",

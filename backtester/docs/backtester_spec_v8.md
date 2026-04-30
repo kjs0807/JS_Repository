@@ -2140,6 +2140,15 @@ BB-KC 포팅 경계 (절대 위반 금지):
 
 **PR 13 — 멀티 timeframe**
 **PR 14 — BybitDataSource + 캐싱**
+- ``data/bybit_source.py`` — ``BybitDataSource(cache_dir, *, category, fetcher)``. 로컬 parquet cache 가 단일 진실 소스 (``{cache_dir}/{symbol}_{timeframe}.parquet``). ``fetch(symbol, tf, start, end)`` 흐름:
+    - cache hit (요청 범위 ⊆ cache) → fetcher 미호출, slice 반환
+    - 헤드 갭 (``start < cache_min``) → ``fetcher(start, cache_min)``
+    - 테일 갭 (``cache_max < end``) → ``fetcher(cache_max, end)``
+    - 머지 + dedup + sort + 영속화
+- ``KlineFetcher`` Protocol — ``(symbol, interval_code, start, end, category) → list[BybitKlineRow]``. 외부 의존성 없이 stdlib ``urllib`` 으로 ``GET /v5/market/kline`` 단발 호출 (default fetcher). 테스트는 mock fetcher 주입.
+- 지원 timeframe: ``1m / 3m / 5m / 15m / 30m / 1h / 2h / 4h / 6h / 12h / 1d``. 그 외 입력 → ``DataError``.
+- ``DataSourceConfig.type`` += ``"bybit"`` + ``__post_init__`` 검증. Engine ``_build_data_source`` bybit 분기.
+- 회귀 테스트: cache miss / hit / 헤드 갭 / 테일 갭 / 중복 dedup / strictly increasing / Bybit descending → ascending 정렬 / Engine 통합 (pre-populated cache로 네트워크 미사용 smoke).
 **PR 15 — 슬리피지 모델**
 **PR 16 — FRAMA + stateful**
 **PR 17 — Walk-forward**
