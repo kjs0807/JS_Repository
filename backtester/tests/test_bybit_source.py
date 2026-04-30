@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -20,6 +21,7 @@ from backtester.data.bybit_source import (
     BybitDataSource,
     BybitKlineRow,
     KlineFetcher,
+    _paginate_klines,
 )
 from backtester.instruments.base import FeeModel, Instrument
 from backtester.strategies.bbkc_squeeze import BBKCSqueezeStrategy
@@ -302,6 +304,133 @@ def test_fetcher_returns_empty_yields_empty_df(tmp_path: Path) -> None:
     df, gap = src.fetch("BTCUSDT", "1h", start=base, end=base + timedelta(hours=2))
     assert df.height == 0
     assert gap.symbol == "BTCUSDT"
+
+
+# ---------- 페이지네이션 (default fetcher 의 1000-봉/콜 제약 우회) ----------
+
+
+def _make_paged_single(
+    rows: list[BybitKlineRow], page_limit: int
+) -> tuple[
+    Callable[[datetime, datetime], list[BybitKlineRow]],
+    list[tuple[datetime, datetime]],
+]:
+    """Bybit v5 단일 페이지 호출 시뮬레이션 — 한 번에 ``page_limit`` 봉까지만 반환.
+
+    cursor 가 진행해야 다음 페이지를 뽑을 수 있으므로 페이지네이션 검증에 적합.
+    호출 인자를 ``calls`` 리스트로 기록.
+    """
+    calls: list[tuple[datetime, datetime]] = []
+
+    def _single(start: datetime, end: datetime) -> list[BybitKlineRow]:
+        calls.append((start, end))
+        s_ms = int(start.timestamp() * 1000)
+        e_ms = int(end.timestamp() * 1000)
+        in_range = sorted(
+            (r for r in rows if s_ms <= r.open_time_ms <= e_ms),
+            key=lambda r: r.open_time_ms,
+        )
+        return in_range[:page_limit]
+
+    return _single, calls
+
+
+def test_paginate_klines_walks_through_pages_when_data_exceeds_limit() -> None:
+    """page_limit=1000 일 때 2500 봉 요청 → 3 회 호출, 모두 ascending dedup 으로 반환."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    rows = _generate_rows(base, n=2500)
+    single, calls = _make_paged_single(rows, page_limit=1000)
+    out = _paginate_klines(
+        single, start=base, end=base + timedelta(hours=2499)
+    )
+    assert len(out) == 2500
+    # ascending sorted, no duplicates
+    ts = [r.open_time_ms for r in out]
+    assert ts == sorted(ts)
+    assert len(set(ts)) == 2500
+    # 3 회 호출 (1000 + 1000 + 500)
+    assert len(calls) == 3
+    # cursor 가 진행하는지 — 두 번째 호출의 start 가 첫 호출 start 보다 미래
+    assert calls[1][0] > calls[0][0]
+    assert calls[2][0] > calls[1][0]
+
+
+def test_paginate_klines_terminates_on_empty_response() -> None:
+    """빈 페이지 응답 → 즉시 종료 (Bybit 가 데이터 없는 범위 회신)."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    single, calls = _make_paged_single([], page_limit=1000)
+    out = _paginate_klines(
+        single, start=base, end=base + timedelta(hours=10)
+    )
+    assert out == []
+    assert len(calls) == 1
+
+
+def test_paginate_klines_terminates_on_no_progress() -> None:
+    """모든 응답 봉이 이미 본 봉 → progress 0 → 즉시 종료. 무한 루프 방어."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    rows = _generate_rows(base, n=5)
+
+    state = {"call_count": 0}
+
+    def _single(start: datetime, end: datetime) -> list[BybitKlineRow]:
+        state["call_count"] += 1
+        return rows  # 매번 같은 5 봉을 반환 → 두 번째 호출은 progress 0
+
+    out = _paginate_klines(
+        _single, start=base, end=base + timedelta(hours=4)
+    )
+    # 두 번째 호출의 5 봉은 모두 이미 본 봉 → 진척 없어 종료
+    assert len(out) == 5
+
+
+def test_paginate_klines_max_iter_safety() -> None:
+    """``max_iter`` 초과 시 ``DataError`` (오작동 방어)."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+
+    counter = [0]
+
+    def _single(start: datetime, end: datetime) -> list[BybitKlineRow]:
+        # 항상 1 개의 새 봉만 반환 → cursor 가 ms 단위로만 진행
+        counter[0] += 1
+        return [
+            BybitKlineRow(
+                open_time_ms=int(start.timestamp() * 1000),
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.5,
+                volume=1.0,
+            )
+        ]
+
+    with pytest.raises(DataError, match="max_iter"):
+        _paginate_klines(
+            _single, start=base, end=base + timedelta(days=365), max_iter=5
+        )
+
+
+def test_default_fetcher_uses_pagination_when_range_exceeds_1000_bars(
+    tmp_path: Path,
+) -> None:
+    """``BybitDataSource`` 가 ``_default_kline_fetcher`` 대신 paginating fetcher 를 받아도
+    동일 인터페이스로 작동 — full miss 시 fetcher 한 번 호출. 페이지네이션 자체의 검증은
+    위 ``_paginate_klines`` 단위 테스트가 담당."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    rows = _generate_rows(base, n=2500)
+
+    # BybitDataSource 의 fetcher 인터페이스 (KlineFetcher) 는 페이지네이션이 끝난
+    # 모든 봉을 반환한다는 계약이므로 mock 도 in_range 전체 반환.
+    fetcher, calls = _make_recording_fetcher(rows)
+    src = BybitDataSource(tmp_path / "cache", fetcher=fetcher)
+    df, _ = src.fetch(
+        "BTCUSDT", "1h", start=base, end=base + timedelta(hours=2499)
+    )
+    assert df.height == 2500
+    assert len(calls) == 1
+
+
+# ---------- dedup ----------------------------------------------------------
 
 
 def test_overlapping_fetcher_response_dedups(tmp_path: Path) -> None:

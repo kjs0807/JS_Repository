@@ -76,18 +76,69 @@ def _to_epoch_ms(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
 
-def _default_kline_fetcher(
+# 페이지네이션 안전 한계 — 1000 page * max_iter 가 받을 수 있는 봉 수의 상한.
+# 100 → 최대 100k 봉 (1m 기준 ~70 일, 1h 기준 ~11 년) 까지 안전.
+_PAGINATION_MAX_ITER = 100
+
+
+# Bybit v5 단발 호출 추상화. ``_paginate_klines`` 가 이 시그니처를 page 단위로 호출한다.
+SinglePageFetcher = Callable[[datetime, datetime], list[BybitKlineRow]]
+
+
+def _paginate_klines(
+    single_page: SinglePageFetcher,
+    *,
+    start: datetime,
+    end: datetime,
+    max_iter: int = _PAGINATION_MAX_ITER,
+) -> list[BybitKlineRow]:
+    """Bybit v5 kline 1000-봉/콜 제약을 우회하는 페이지네이터.
+
+    cursor 를 ``start`` 부터 받은 마지막 봉 +1ms 로 진행. 빈 응답 / 진척 없음 / 끝 도달 시
+    종료. ``max_iter`` 초과 시 ``DataError`` (무한 루프 방어).
+
+    출력은 dedup + ascending sort.
+    """
+    out: list[BybitKlineRow] = []
+    seen_ts: set[int] = set()
+    cursor = start
+    end_ms = _to_epoch_ms(end)
+    for _ in range(max_iter):
+        if cursor > end:
+            break
+        page = single_page(cursor, end)
+        if not page:
+            break
+        new_rows = [r for r in page if r.open_time_ms not in seen_ts]
+        if not new_rows:
+            # 전부 이미 본 봉 → 진척 없음 (overlapping 응답) → 종료
+            break
+        for r in new_rows:
+            seen_ts.add(r.open_time_ms)
+        out.extend(new_rows)
+        last_ts_ms = max(r.open_time_ms for r in new_rows)
+        if last_ts_ms >= end_ms:
+            break
+        cursor = datetime.fromtimestamp(
+            (last_ts_ms + 1) / 1000, tz=timezone.utc
+        )
+    else:
+        raise DataError(
+            f"_paginate_klines exceeded max_iter={max_iter} for "
+            f"[{start.isoformat()}, {end.isoformat()}] — possible loop"
+        )
+    out.sort(key=lambda r: r.open_time_ms)
+    return out
+
+
+def _bybit_single_page(
     symbol: str,
     interval_code: str,
     start: datetime,
     end: datetime,
     category: str,
 ) -> list[BybitKlineRow]:
-    """Bybit v5 REST ``GET /v5/market/kline`` 단발 호출.
-
-    한 번에 최대 1000 봉. 더 긴 범위가 필요하면 caller 가 페이지네이션 책임 (PR 14 범위 외).
-    네트워크 / JSON / Bybit retCode 오류는 ``DataError`` 로 wrap.
-    """
+    """Bybit v5 REST ``GET /v5/market/kline`` 단일 페이지 호출 (≤ 1000 봉)."""
     params = {
         "category": category,
         "symbol": symbol,
@@ -129,9 +180,27 @@ def _default_kline_fetcher(
                 volume=float(entry[5]),
             )
         )
-    # Bybit 응답은 최신 → 과거 순서. 사용처가 오름차순 기대 → 역정렬.
     rows.sort(key=lambda r: r.open_time_ms)
     return rows
+
+
+def _default_kline_fetcher(
+    symbol: str,
+    interval_code: str,
+    start: datetime,
+    end: datetime,
+    category: str,
+) -> list[BybitKlineRow]:
+    """Bybit v5 kline 페이지네이션 래퍼 — ``_bybit_single_page`` 를 cursor 진행하며 호출.
+
+    1000 봉/콜 제약 자동 우회. 네트워크/JSON/retCode 오류는 ``_bybit_single_page`` 에서
+    ``DataError`` 로 wrap. ``_paginate_klines`` 는 무한 루프 방어 (max_iter=100).
+    """
+
+    def _page(s: datetime, e: datetime) -> list[BybitKlineRow]:
+        return _bybit_single_page(symbol, interval_code, s, e, category)
+
+    return _paginate_klines(_page, start=start, end=end)
 
 
 def _rows_to_dataframe(rows: list[BybitKlineRow]) -> pl.DataFrame:
