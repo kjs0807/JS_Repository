@@ -20,7 +20,10 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
 def build_strategy(name: str, params: dict[str, Any]) -> BaseStrategy:
     """``name`` 을 등록된 strategy 클래스로 lookup → ``cls(**params)``.
 
-    빈 ``name`` / 미등록 ``name`` → ``ConfigError``.
+    실패 케이스 → 모두 ``ConfigError`` (CLI 가 사용자 오류로 일관 처리):
+    - 빈 ``name``
+    - 미등록 ``name``
+    - 잘못된 ``params`` (TypeError: unexpected keyword 등) — strategy 생성자 시그니처 불일치
     """
     if not name:
         raise ConfigError(
@@ -33,4 +36,9 @@ def build_strategy(name: str, params: dict[str, Any]) -> BaseStrategy:
             f"{sorted(STRATEGY_REGISTRY)}"
         )
     cls = STRATEGY_REGISTRY[name]
-    return cls(**params)
+    try:
+        return cls(**params)
+    except TypeError as e:
+        raise ConfigError(
+            f"strategy_params for {name!r} do not match {cls.__name__} signature: {e}"
+        ) from e

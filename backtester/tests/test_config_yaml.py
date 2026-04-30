@@ -228,3 +228,29 @@ def test_yaml_naive_datetime_rejected(tmp_path: Path) -> None:
         yaml.safe_dump(d, fp)
     with pytest.raises(ConfigError, match="timezone-aware"):
         BacktestConfig.from_yaml(p)
+
+
+# ---------- DataSourceConfig.type 검증 (PR9 후속 정정) ---------------------
+
+
+def test_data_source_config_rejects_unknown_type(tmp_path: Path) -> None:
+    """Literal 은 런타임 강제 안 되지만 __post_init__ 가 ConfigError 로 차단."""
+    with pytest.raises(ConfigError, match="DataSourceConfig.type"):
+        DataSourceConfig(base_dir=tmp_path, type="sqlite")  # type: ignore[arg-type]
+
+
+def test_data_source_config_accepts_csv(tmp_path: Path) -> None:
+    ds = DataSourceConfig(base_dir=tmp_path, type="csv")
+    assert ds.type == "csv"
+
+
+def test_yaml_data_source_unknown_type_rejected(tmp_path: Path) -> None:
+    """YAML 에서 type='sqlite' 같은 값이 들어오면 from_yaml 시점에 ConfigError."""
+    cfg = _full_config(tmp_path)
+    d = cfg.to_dict()
+    d["data_source"]["type"] = "sqlite"
+    p = tmp_path / "bad.yaml"
+    with open(p, "w", encoding="utf-8") as fp:
+        yaml.safe_dump(d, fp)
+    with pytest.raises(ConfigError, match="DataSourceConfig.type"):
+        BacktestConfig.from_yaml(p)

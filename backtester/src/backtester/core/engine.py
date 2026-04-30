@@ -35,6 +35,7 @@ from backtester.core.result import BacktestResult
 from backtester.core.snapshot import MarketSnapshot
 from backtester.core.types import to_decimal
 from backtester.data.base import GapReport, parse_timeframe, sanitize_symbol
+from backtester.data.csv_source import CSVDataSource
 from backtester.data.parquet_source import ParquetDataSource
 from backtester.events.log import EventLog
 from backtester.events.serialize import serialize_event_payload
@@ -284,12 +285,14 @@ class BacktestEngine:
 
     # ---------- 빌더 -------------------------------------------------------
 
-    def _build_data_source(self) -> ParquetDataSource:
+    def _build_data_source(self) -> ParquetDataSource | CSVDataSource:
         ds = self.config.data_source
         if ds.type == "parquet":
             return ParquetDataSource(ds.base_dir)
-        raise NotImplementedError(  # pragma: no cover
-            f"DataSource type {ds.type!r} is Phase 1.5+"
+        if ds.type == "csv":
+            return CSVDataSource(ds.base_dir)
+        raise NotImplementedError(  # pragma: no cover — Config 검증이 차단
+            f"DataSource type {ds.type!r} is Phase 2+"
         )
 
     def _fetch_all_bars(

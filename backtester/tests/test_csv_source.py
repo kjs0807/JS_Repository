@@ -211,3 +211,48 @@ def test_csv_source_gap_detection(tmp_path: Path) -> None:
     src = CSVDataSource(tmp_path)
     _df, gap = src.fetch("BTCUSDT", "1h", start=base, end=base + timedelta(hours=5))
     assert gap.total_missing_bars == 1
+
+
+# ---------- Engine 통합 (DataSourceConfig type='csv') -----------------------
+
+
+def test_engine_run_with_csv_data_source(tmp_path: Path) -> None:
+    """``DataSourceConfig(type='csv')`` 로 BacktestEngine 이 정상 실행 (PR9 후속 정정)."""
+    from decimal import Decimal
+
+    from backtester.core.config import BacktestConfig, DataSourceConfig
+    from backtester.core.engine import BacktestEngine
+    from backtester.instruments.base import FeeModel, Instrument
+    from backtester.strategies.bbkc_squeeze import BBKCSqueezeStrategy
+
+    base = datetime(2026, 3, 1, tzinfo=UTC)
+    csv_path = tmp_path / "BTCUSDT_1h.csv"
+    _write_csv(csv_path, _generate_rows(60, base))
+
+    instrument = Instrument(
+        symbol="BTCUSDT",
+        asset_class="crypto_perp",
+        tick_size=Decimal("0.01"),
+        tick_value=Decimal("0.01"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        base_currency="BTC",
+        size_unit="base_asset",
+        fee_model=FeeModel(type="flat", taker=Decimal("0")),
+    )
+    cfg = BacktestConfig(
+        run_id="csv_engine_smoke",
+        data_source=DataSourceConfig(base_dir=tmp_path, type="csv"),
+        instruments=[instrument],
+        timeframes_per_symbol={"BTCUSDT": ["1h"]},
+        primary_symbol="BTCUSDT",
+        primary_timeframe="1h",
+        start=base,
+        end=base + timedelta(hours=60),
+        initial_equity=Decimal("100000"),
+        output_dir=tmp_path / "runs",
+    )
+    engine = BacktestEngine(cfg, BBKCSqueezeStrategy(), verbose=False)
+    result = engine.run()
+    assert (result.run_dir / "events.jsonl").exists()
+    assert (result.run_dir / "events.parquet").exists()

@@ -33,14 +33,23 @@ _VALID_GAP_POLICY: frozenset[str] = frozenset({"notify", "ffill"})
 _VALID_EXECUTION_MODEL: frozenset[str] = frozenset(
     {"next_bar_open", "slippage_bps", "atr_slippage"}
 )
+_VALID_DATA_SOURCE_TYPE: frozenset[str] = frozenset({"parquet", "csv"})
 
 
 @dataclass(frozen=True)
 class DataSourceConfig:
-    """Phase 1: parquet. Phase 1.5: + csv."""
+    """Phase 1: parquet. Phase 1.5: + csv. Phase 2: + bybit."""
 
     base_dir: Path
     type: Literal["parquet", "csv"] = "parquet"
+
+    def __post_init__(self) -> None:
+        # Literal 은 런타임에 강제되지 않으므로 ConfigError 로 명시 검증.
+        if self.type not in _VALID_DATA_SOURCE_TYPE:
+            raise ConfigError(
+                f"DataSourceConfig.type must be one of "
+                f"{sorted(_VALID_DATA_SOURCE_TYPE)}, got {self.type!r}"
+            )
 
 
 # YAML 로드 시 ``BacktestConfig`` 가 모르는 audit 필드 (Engine 이 영속화 단계에서 부착).

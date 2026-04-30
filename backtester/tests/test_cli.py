@@ -195,3 +195,50 @@ def test_main_dispatch_run(tmp_path: Path) -> None:
     )
     rc = main(["run", str(yaml_path), "--quiet"])
     assert rc == 0
+
+
+# ---------- build_strategy TypeError → ConfigError (PR9 후속 정정) ---------
+
+
+def test_build_strategy_wraps_typeerror_as_config_error() -> None:
+    """잘못된 strategy_params 키로 들어오면 TypeError 가 ConfigError 로 감싸진다."""
+    from backtester.core.errors import ConfigError
+    from backtester.strategies.registry import build_strategy
+
+    with pytest.raises(ConfigError, match="strategy_params"):
+        build_strategy("bbkc_squeeze", {"nonexistent_param": 42})
+
+
+def test_cmd_run_returns_2_on_invalid_strategy_params(tmp_path: Path) -> None:
+    """YAML 의 strategy_params 가 strategy 시그니처와 안 맞으면 cmd_run rc=2."""
+    data_dir = _setup_data(tmp_path)
+    yaml_path = tmp_path / "bad_params.yaml"
+    cfg = BacktestConfig(
+        run_id="bad_params",
+        data_source=DataSourceConfig(base_dir=data_dir, type="parquet"),
+        instruments=[
+            Instrument(
+                symbol="ETHUSDT",
+                asset_class="crypto_perp",
+                tick_size=Decimal("0.01"),
+                tick_value=Decimal("0.01"),
+                contract_multiplier=Decimal("1"),
+                quote_currency="USDT",
+                base_currency="ETH",
+                size_unit="base_asset",
+                fee_model=FeeModel(type="flat", taker=Decimal("0")),
+            )
+        ],
+        timeframes_per_symbol={"ETHUSDT": ["1h"]},
+        primary_symbol="ETHUSDT",
+        primary_timeframe="1h",
+        start=datetime(2026, 3, 1, tzinfo=UTC),
+        end=datetime(2026, 4, 29, tzinfo=UTC),
+        initial_equity=Decimal("100000"),
+        output_dir=tmp_path / "runs",
+        strategy_name="bbkc_squeeze",
+        strategy_params={"bogus_param": 1},
+    )
+    cfg.to_yaml(yaml_path)
+    rc = cmd_run(yaml_path, quiet=True)
+    assert rc == 2
