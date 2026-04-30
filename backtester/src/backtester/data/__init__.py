@@ -1,6 +1,8 @@
-"""Data sources (PR 2).
+"""Data sources (PR 2 + Phase 1.5 PR 9).
 
-Phase 1: ParquetDataSource only. CSV는 Phase 1.5, Bybit는 Phase 2.
+Phase 1: ParquetDataSource only.
+Phase 1.5: + CSVDataSource.
+Phase 2: + BybitDataSource.
 """
 
 from backtester.data.base import (
@@ -11,10 +13,12 @@ from backtester.data.base import (
     sanitize_symbol,
     validate_ohlcv_schema,
 )
+from backtester.data.csv_source import CSVDataSource
 from backtester.data.parquet_source import ParquetDataSource
 
 __all__ = [
     "OHLCV_SCHEMA",
+    "CSVDataSource",
     "DataSource",
     "GapReport",
     "ParquetDataSource",

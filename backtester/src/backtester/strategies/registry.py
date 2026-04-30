@@ -1,0 +1,36 @@
+"""Strategy registry — name → class 매핑 (Phase 1.5 PR 9).
+
+CLI 가 ``BacktestConfig.strategy_name`` 을 받아 strategy 인스턴스를 생성할 때 사용한다.
+새 strategy 를 추가할 때 이 dict 에 등록한다.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from backtester.core.errors import ConfigError
+from backtester.strategies.base import BaseStrategy
+from backtester.strategies.bbkc_squeeze import BBKCSqueezeStrategy
+
+STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
+    "bbkc_squeeze": BBKCSqueezeStrategy,
+}
+
+
+def build_strategy(name: str, params: dict[str, Any]) -> BaseStrategy:
+    """``name`` 을 등록된 strategy 클래스로 lookup → ``cls(**params)``.
+
+    빈 ``name`` / 미등록 ``name`` → ``ConfigError``.
+    """
+    if not name:
+        raise ConfigError(
+            "strategy_name is empty; CLI requires non-empty strategy_name "
+            "(set 'strategy_name' in config.yaml)"
+        )
+    if name not in STRATEGY_REGISTRY:
+        raise ConfigError(
+            f"unknown strategy_name {name!r}; available: "
+            f"{sorted(STRATEGY_REGISTRY)}"
+        )
+    cls = STRATEGY_REGISTRY[name]
+    return cls(**params)

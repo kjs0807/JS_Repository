@@ -269,6 +269,19 @@ class BacktestEngine:
         eq = self.ledger.equity_curve()
         eq.write_parquet(self.run_dir / "results" / "equity_curve.parquet")
 
+    def _export_events_parquet(self) -> None:
+        """Phase 1.5: events.jsonl → events.parquet (분석 편의용 캐시, spec §6.2).
+
+        events.jsonl 이 1차 원본이므로 변환 실패해도 백테스트 결과 자체는 영향 없음.
+        그러나 정상 백테스트라면 jsonl 이 무결하므로 단순 호출.
+        """
+        from backtester.events.parquet_export import events_jsonl_to_parquet
+
+        events_jsonl_to_parquet(
+            jsonl_path=self.run_dir / "events.jsonl",
+            parquet_path=self.run_dir / "events.parquet",
+        )
+
     # ---------- 빌더 -------------------------------------------------------
 
     def _build_data_source(self) -> ParquetDataSource:
@@ -339,6 +352,7 @@ class BacktestEngine:
         self._event_log = None
 
         self._persist_results()
+        self._export_events_parquet()
 
         return BacktestResult(
             requested_run_id=self.config.run_id,

@@ -59,7 +59,11 @@ class BBKCSqueezeStrategy(BaseStrategy):
             atr_period=kc_atr_period,
             use_ema=kc_use_ema,
         )
-        self._order_size: Decimal = order_size if order_size is not None else Decimal("1")
+        # YAML/CLI 경로에서는 ``order_size`` 가 str/int/float 으로 들어올 수 있어 Decimal
+        # 로 정규화. 코드에서 직접 ``Decimal("1")`` 로 주는 경우와도 양립.
+        self._order_size: Decimal = (
+            Decimal(str(order_size)) if order_size is not None else Decimal("1")
+        )
         self._has_position: bool = False
 
     def required_indicators(self) -> list[Indicator]:

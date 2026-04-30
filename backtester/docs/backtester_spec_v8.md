@@ -2107,11 +2107,11 @@ BB-KC 포팅 경계 (절대 위반 금지):
 ### Phase 1.5 (PR 9~12)
 
 **PR 9 — Funding + YAML + CLI 기본**
-- `execution/funding.py`
-- `core/config.py` YAML 직렬화 (resolved_run_id 포함)
-- `cli/main.py` (`run`, `--quiet`)
-- EventLog Parquet export
-- `data/csv_source.py`
+- `execution/funding.py` — `FundingModel` (interval_hours, rate_source) + `CashFlow` + `FundingProcessor.process(symbol, ts, instrument, position, market)`. Phase 1.5 PR 9 는 ``rate_source="constant"`` 만 지원, ``"from_data_source"`` 는 후속 PR 에서 wiring. Engine wiring (SETTLE 이벤트 + `Ledger.on_settle` 활성 + `ClockEvent.settlements` 주입) 도 후속 PR.
+- `core/config.py` YAML 양방향 round-trip — `BacktestConfig.to_yaml(path)` + `from_yaml(path)`. `strategy_name: str` + `strategy_params: dict` 필드 추가. Engine 영속화 시 `resolved_run_id` / `run_dir` audit 필드를 함께 쓰지만 read 시 무시. ``__post_init__`` 검증이 from_yaml 시점에 자동 실행 → 잘못된 값은 즉시 ConfigError.
+- `cli/main.py` — argparse 기반. ``backtester run config.yaml [--quiet]``. `STRATEGY_REGISTRY` (``strategies/registry.py``) 가 `name → BaseStrategy` 매핑 + `build_strategy(name, params)`. ``--quiet`` 는 INFO 알림 (Engine + CLI summary) 모두 차단.
+- EventLog Parquet export — `events.jsonl` → `events.parquet` (analytics cache, spec §6.2). 스키마: `schema_version Int64 / ts Datetime UTC / type String / payload String(JSON)`. payload 는 type 별 구조가 달라 평면 컬럼 대신 JSON 문자열로 보존, 분석 시 `pl.col("payload").str.json_decode(...)`.
+- `data/csv_source.py` — `CSVDataSource` (`ParquetDataSource` 와 동일 인터페이스). `{base_dir}/{symbol}_{timeframe}.csv`, ISO8601 UTC tz-aware timestamp, OHLCV Float64 캐스트, schema/sort/dup 검증.
 
 **PR 10 — EventLogReader + Equity 시리즈**
 - `events/reader.py` (type별 인덱스, by_snapshot_reason)
