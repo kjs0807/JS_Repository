@@ -19,9 +19,11 @@ class BacktestResult:
     `resolved_run_id`는 on_run_exists 정책 적용 후 실제 사용된 디렉토리명.
     auto_suffix 발생 시 둘이 다르며, 사용자 노출은 항상 resolved 기반.
 
-    `config_path`는 영속화된 config 파일 경로:
-    - Phase 1: `{run_dir}/config.json` (감사용 단방향)
-    - Phase 1.5+: `{run_dir}/config.yaml` (양방향 round-trip)
+    `config_path`는 영속화된 **canonical** config 파일 경로:
+    - Phase 1: `{run_dir}/config.json` (감사용 단방향).
+    - Phase 1.5+: `{run_dir}/config.yaml` (양방향 round-trip via ``BacktestConfig.from_yaml``).
+      Phase 1 audit json (`{run_dir}/config.json`) 도 동시에 영속화되며, 분석 도구는 yaml 우선
+      / json fallback 순서로 읽는다 (`viz.run_chart._load_run_config`).
     """
 
     requested_run_id: str

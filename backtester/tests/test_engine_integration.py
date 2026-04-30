@@ -118,21 +118,30 @@ def test_buy_and_hold_final_equity_reflects_holdings(tmp_path: Path) -> None:
 # ---------- 산출 파일 ------------------------------------------------------
 
 
-def test_buy_and_hold_creates_config_json(tmp_path: Path) -> None:
+def test_buy_and_hold_creates_config_files(tmp_path: Path) -> None:
+    """Phase 1.5+: result.config_path 는 config.yaml. config.json 도 audit 으로 유지."""
+    import yaml
+
     engine = BacktestEngine(_config(tmp_path), _BuyOnceHold(), verbose=False)
     result = engine.run()
 
-    assert result.config_path.name == "config.json"
+    # canonical (Phase 1.5+) = yaml
+    assert result.config_path.name == "config.yaml"
     assert result.config_path.exists()
+    cfg_yaml = yaml.safe_load(result.config_path.read_text(encoding="utf-8"))
+    assert cfg_yaml["run_id"] == "test_buy_hold"
+    assert cfg_yaml["resolved_run_id"] == "test_buy_hold"
+    assert cfg_yaml["primary_symbol"] == "BTCUSDT"
+    assert cfg_yaml["primary_timeframe"] == "1h"
+    assert "run_dir" in cfg_yaml
+    # initial_equity 는 Decimal → str
+    assert cfg_yaml["initial_equity"] == "100000"
 
-    cfg = json.loads(result.config_path.read_text(encoding="utf-8"))
-    assert cfg["run_id"] == "test_buy_hold"
-    assert cfg["resolved_run_id"] == "test_buy_hold"
-    assert cfg["primary_symbol"] == "BTCUSDT"
-    assert cfg["primary_timeframe"] == "1h"
-    assert "run_dir" in cfg
-    # initial_equity는 Decimal → str
-    assert cfg["initial_equity"] == "100000"
+    # Phase 1 audit (config.json) 도 동시에 기록
+    json_path = result.run_dir / "config.json"
+    assert json_path.exists()
+    cfg_json = json.loads(json_path.read_text(encoding="utf-8"))
+    assert cfg_json["run_id"] == "test_buy_hold"
 
 
 def test_buy_and_hold_creates_events_jsonl(tmp_path: Path) -> None:

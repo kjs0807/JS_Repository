@@ -259,13 +259,16 @@ class BacktestEngine:
     def _persist_config_yaml(self) -> None:
         """Phase 1.5+: config.yaml (양방향 round-trip + audit, spec §6.4).
 
-        ``BacktestConfig.to_dict()`` 결과 + ``resolved_run_id`` / ``run_dir`` audit 필드.
-        ``BacktestConfig.from_yaml`` 이 audit 필드를 무시하므로 ``run_chart`` 등 분석 도구는
-        직접 yaml dict 를 읽고, 재실행이 필요할 때는 ``from_yaml`` 로 BacktestConfig 복원.
+        ``BacktestConfig.to_dict()`` + ``requested_run_id`` / ``resolved_run_id`` /
+        ``run_dir`` audit 필드 (json 영속화와 동일 키). ``BacktestConfig.from_yaml`` 이
+        audit 필드를 무시하므로 분석 도구는 직접 yaml dict 를 읽고, 재실행 시
+        ``from_yaml`` 로 ``BacktestConfig`` 복원한다.
         """
         import yaml as _yaml
 
         data = self.config.to_dict()
+        # config.json 과 동일한 audit 필드 (test_run_directory acceptance 등)
+        data["requested_run_id"] = self.config.run_id
         data["resolved_run_id"] = self.resolved_run_id
         data["run_dir"] = str(self.run_dir.absolute())
         with open(self.run_dir / "config.yaml", "w", encoding="utf-8") as fp:
@@ -383,7 +386,9 @@ class BacktestEngine:
             - Decimal("1"),
             num_fills=self._fill_count,
             num_intents=self._intent_count,
-            config_path=self.run_dir / "config.json",
+            # Phase 1.5+: config.yaml 이 canonical (양방향 round-trip).
+            # config.json 은 Phase 1 audit 형식으로 추가 영속화 유지.
+            config_path=self.run_dir / "config.yaml",
             events_path=self.run_dir / "events.jsonl",
         )
 

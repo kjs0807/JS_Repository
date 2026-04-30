@@ -160,11 +160,14 @@ def test_run_dir_archive_moves_existing(tmp_path: Path) -> None:
     assert (archives[0] / "old.txt").exists()
 
 
-# ---------- resolved_run_id가 BacktestResult + config.json + 디렉토리 일치 -
+# ---------- resolved_run_id 가 BacktestResult + config + 디렉토리 일치 ----
 
 
 def test_resolved_run_id_propagated_to_result_and_config(tmp_path: Path) -> None:
-    """auto_suffix 시 resolved_run_id가 BacktestResult, config.json, dir name 모두 일치."""
+    """auto_suffix 시 resolved_run_id 가 BacktestResult / config.yaml / config.json /
+    dir name 모두 일치 (Phase 1.5+: config.yaml 이 canonical, config.json 은 audit)."""
+    import yaml
+
     (tmp_path / "runs" / "test_run").mkdir(parents=True)
     config = _config(tmp_path, on_run_exists="auto_suffix")
     engine = BacktestEngine(config, _NoOp(), verbose=False)
@@ -175,44 +178,60 @@ def test_resolved_run_id_propagated_to_result_and_config(tmp_path: Path) -> None
     assert result.resolved_run_id == "test_run_2"
     assert result.run_dir.name == "test_run_2"
 
-    # config.json
-    import json
+    # config.yaml (canonical)
+    assert result.config_path.name == "config.yaml"
+    cfg_yaml = yaml.safe_load(result.config_path.read_text(encoding="utf-8"))
+    assert cfg_yaml["run_id"] == "test_run"
+    assert cfg_yaml["requested_run_id"] == "test_run"  # 명시적 audit 필드
+    assert cfg_yaml["resolved_run_id"] == "test_run_2"
+    assert cfg_yaml["run_dir"].endswith("test_run_2")
 
-    config_data = json.loads(result.config_path.read_text(encoding="utf-8"))
-    assert config_data["run_id"] == "test_run"
-    assert config_data["requested_run_id"] == "test_run"  # 명시적 audit 필드
-    assert config_data["resolved_run_id"] == "test_run_2"
-    assert config_data["run_dir"].endswith("test_run_2")
+    # config.json (Phase 1 audit, 동시 기록)
+    import json as _json
+
+    cfg_json = _json.loads(
+        (result.run_dir / "config.json").read_text(encoding="utf-8")
+    )
+    assert cfg_json["resolved_run_id"] == "test_run_2"
 
 
-# ---------- config.json은 persist_run_data와 독립 ---------------------------
+# ---------- config 파일은 persist_run_data 와 독립 -------------------------
 
 
-def test_config_json_exists_even_with_persist_none(tmp_path: Path) -> None:
-    """persist_run_data='none'이어도 config.json은 항상 생성 (audit 산출물)."""
+def test_config_exists_even_with_persist_none(tmp_path: Path) -> None:
+    """persist_run_data='none' 이어도 config.yaml / config.json 은 항상 생성 (audit)."""
     config = _config(tmp_path, persist_run_data="none")
     engine = BacktestEngine(config, _NoOp(), verbose=False)
     result = engine.run()
 
     assert result.config_path.exists()
+    assert result.config_path.name == "config.yaml"
+    assert (result.run_dir / "config.json").exists()
     # bars/는 persist 안 됨
     bars_persisted = list((engine.run_dir / "bars").iterdir())
     assert bars_persisted == []
 
 
-def test_config_json_includes_requested_run_id_explicit_field(tmp_path: Path) -> None:
-    """spec §20 PR 7: requested_run_id 명시 필드 보장 (run_id와 구분되는 audit 키)."""
+def test_config_includes_requested_run_id_explicit_field(tmp_path: Path) -> None:
+    """spec §20 PR 7: requested_run_id 명시 필드 보장 (run_id와 구분되는 audit 키).
+    Phase 1.5+: yaml 과 json 양쪽에 모두 존재."""
+    import json as _json
+
+    import yaml
+
     config = _config(tmp_path)
     engine = BacktestEngine(config, _NoOp(), verbose=False)
     result = engine.run()
 
-    import json
-
-    cfg = json.loads(result.config_path.read_text(encoding="utf-8"))
-    assert "requested_run_id" in cfg
-    assert "resolved_run_id" in cfg
-    assert "run_dir" in cfg
-    assert cfg["requested_run_id"] == config.run_id
+    cfg_yaml = yaml.safe_load(result.config_path.read_text(encoding="utf-8"))
+    cfg_json = _json.loads(
+        (result.run_dir / "config.json").read_text(encoding="utf-8")
+    )
+    for cfg in (cfg_yaml, cfg_json):
+        assert "requested_run_id" in cfg
+        assert "resolved_run_id" in cfg
+        assert "run_dir" in cfg
+        assert cfg["requested_run_id"] == config.run_id
 
 
 # ---------- archive 정책 충돌 처리 ------------------------------------------

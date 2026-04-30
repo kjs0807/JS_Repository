@@ -141,7 +141,7 @@ def test_backtest_result_required_fields() -> None:
         total_return=Decimal("0.2345"),
         num_fills=10,
         num_intents=12,
-        config_path=Path("/tmp/runs/btc_test_2/config.json"),
+        config_path=Path("/tmp/runs/btc_test_2/config.yaml"),
         events_path=Path("/tmp/runs/btc_test_2/events.jsonl"),
     )
     # auto_suffix 시 requested != resolved
