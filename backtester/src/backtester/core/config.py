@@ -53,8 +53,12 @@ class DataSourceConfig:
 
 
 # YAML 로드 시 ``BacktestConfig`` 가 모르는 audit 필드 (Engine 이 영속화 단계에서 부착).
-# 사용자 작성 config 에는 없을 수 있고, Engine 이 쓴 config.yaml 에는 있을 수 있다.
-_AUDIT_FIELDS: frozenset[str] = frozenset({"resolved_run_id", "run_dir"})
+# 사용자 작성 config 에는 없고, Engine 이 쓴 config.yaml 에는 셋 모두 존재.
+# ``requested_run_id`` 는 ``run_id`` 와 의미상 같지만 (run_id == 사용자 명시 원본),
+# config.json/json 양쪽에 명시 audit 키로 기록되므로 round-trip 시 이 셋만 무시한다.
+_AUDIT_FIELDS: frozenset[str] = frozenset(
+    {"requested_run_id", "resolved_run_id", "run_dir"}
+)
 
 
 @dataclass(frozen=True, kw_only=True)

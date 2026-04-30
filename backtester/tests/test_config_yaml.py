@@ -254,3 +254,63 @@ def test_yaml_data_source_unknown_type_rejected(tmp_path: Path) -> None:
         yaml.safe_dump(d, fp)
     with pytest.raises(ConfigError, match="DataSourceConfig.type"):
         BacktestConfig.from_yaml(p)
+
+
+# ---------- Engine 산출 yaml 로 from_yaml round-trip (PR 11 후속 회귀) ----
+
+
+def test_engine_persisted_yaml_loads_via_from_yaml(tmp_path: Path) -> None:
+    """Engine 이 영속화한 config.yaml (requested_run_id / resolved_run_id / run_dir
+    audit 필드 포함) 을 ``BacktestConfig.from_yaml`` 이 unknown-key 에러 없이 읽어
+    BacktestConfig 를 복원하는지 확인. spec §6.4 Phase 1.5+ canonical round-trip."""
+    import polars as pl
+
+    from backtester.core.engine import BacktestEngine
+    from backtester.strategies.bbkc_squeeze import BBKCSqueezeStrategy
+
+    # 합성 OHLCV
+    base = datetime(2026, 3, 1, tzinfo=UTC)
+    rows = [
+        {
+            "timestamp": base.replace(hour=h),
+            "open": 100.0 + h,
+            "high": 101.0 + h,
+            "low": 99.0 + h,
+            "close": 100.5 + h,
+            "volume": 1.0,
+        }
+        for h in range(24)
+    ]
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    pl.DataFrame(rows).with_columns(
+        pl.col("timestamp").cast(pl.Datetime(time_unit="us", time_zone="UTC"))
+    ).write_parquet(data_dir / "BTCUSDT_1h.parquet")
+
+    cfg = BacktestConfig(
+        run_id="rt_smoke",
+        data_source=DataSourceConfig(base_dir=data_dir, type="parquet"),
+        instruments=[_btc_instrument()],
+        timeframes_per_symbol={"BTCUSDT": ["1h"]},
+        primary_symbol="BTCUSDT",
+        primary_timeframe="1h",
+        start=base,
+        end=base.replace(hour=23),
+        initial_equity=Decimal("100000"),
+        output_dir=tmp_path / "runs",
+    )
+    engine = BacktestEngine(cfg, BBKCSqueezeStrategy(), verbose=False)
+    result = engine.run()
+
+    # canonical = config.yaml. audit 필드 셋 모두 포함된 상태.
+    assert result.config_path.name == "config.yaml"
+    raw = yaml.safe_load(result.config_path.read_text(encoding="utf-8"))
+    assert "requested_run_id" in raw
+    assert "resolved_run_id" in raw
+    assert "run_dir" in raw
+
+    # from_yaml 이 audit 셋을 무시하고 정상 복원해야 한다.
+    cfg2 = BacktestConfig.from_yaml(result.config_path)
+    assert cfg2.run_id == cfg.run_id
+    assert cfg2.primary_symbol == cfg.primary_symbol
+    assert cfg2.initial_equity == cfg.initial_equity
