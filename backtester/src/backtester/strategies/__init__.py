@@ -1,5 +1,6 @@
-"""Strategy base classes (PR 4)."""
+"""Strategy base + 구현체."""
 
 from backtester.strategies.base import BaseStrategy
+from backtester.strategies.bbkc_squeeze import BBKCSqueezeStrategy
 
-__all__ = ["BaseStrategy"]
+__all__ = ["BBKCSqueezeStrategy", "BaseStrategy"]

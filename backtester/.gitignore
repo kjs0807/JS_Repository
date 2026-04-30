@@ -15,6 +15,10 @@ dist/
 .pytest_tmp/
 tmp*/
 
+# Local OHLCV cache (large parquet outputs, not for git)
+data_cache/
+runs/
+
 # Local virtualenvs
 .venv/
 venv/
