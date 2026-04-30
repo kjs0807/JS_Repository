@@ -2123,9 +2123,18 @@ BB-KC 포팅 경계 (절대 위반 금지):
 - CLI `backtester report runs/{run_id}/ [--quiet]` — `render_run_chart` 호출 + HTML 경로 출력. argparse `report` 서브커맨드 + `cmd_report`. 종료 코드 0/2.
 - 의존성: `plotly>=5.18` (runtime), mypy override `plotly.*: ignore_missing_imports` (plotly 미배포 stub).
 
-**PR 12 — 회귀 시각 검증**
-- BB-KC 결과 시각화
-- 외부 cache 지운 상태 동작 검증
+**PR 12 — 회귀 시각 검증 (Phase 1.5 종료 게이트)**
+- BB-KC 결과 시각 회귀: ``tests/fixtures/ETHUSDT_1h.parquet`` + ``bbkc_signals.csv`` 로 BacktestEngine 실행 → events.jsonl → ``build_run_chart`` → fixture buy entry timestamp 가 chart intent 마커 (subset gate, PR 8 정책 일관) + EventLogReader.``by_type(INTENT_CREATED)`` 양쪽에 모두 존재하는지 회귀.
+- 외부 cache 지운 상태 동작 검증: ``DataSource.base_dir`` 디렉토리 삭제 후에도 ``run_dir`` 만으로 ``build_run_chart`` / ``render_run_chart`` 가 동작 (spec §10.1). bars/indicators parquet 영속물 활용으로 BB/KC indicator scatter trace 가 그대로 그려지는지 검증.
+
+**Phase 1.5 종료 조건** (PR 9~12 머지 완료):
+- PR 9~12 모두 머지
+- BB-KC 회귀: subset gate (Phase 1) + 시각 회귀 (PR 12) 그린
+- ``cache-clean`` 자급: 외부 데이터 cache 삭제 후 chart 재현 가능
+- ``BacktestConfig.from_yaml(result.config_path)`` round-trip 통과 (Phase 1.5+ canonical config = config.yaml)
+- 기존 ``Crypto/Bybit_Trading/src/backtester/`` 변경 0건
+- pytest / ruff / mypy clean
+- Phase 2 시작 가능 (멀티 timeframe / BybitDataSource / slippage / FRAMA / walkforward / metrics-report 등)
 
 ### Phase 2 (PR 13~)
 
