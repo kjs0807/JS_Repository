@@ -25,7 +25,12 @@ from typing import Any
 
 import polars as pl
 
-from backtester.core.clock import ClockEvent, ClockHelper, SimpleClock
+from backtester.core.clock import (
+    ClockEvent,
+    ClockHelper,
+    MultiTimeframeClock,
+    SimpleClock,
+)
 from backtester.core.config import BacktestConfig
 from backtester.core.context import BarsView, StrategyContext
 from backtester.core.errors import RunDirectoryError
@@ -351,12 +356,26 @@ class BacktestEngine:
                 ts_lists[symbol][tf] = ts_list
         return idx, ts_lists
 
-    def _build_clock(self) -> SimpleClock:
+    def _build_clock(self) -> SimpleClock | MultiTimeframeClock:
+        """단일 TF 면 SimpleClock, 다중 TF (또는 다중 symbol) 이면 MultiTimeframeClock."""
         primary = self.config.primary_symbol
         primary_tf = self.config.primary_timeframe
-        bar_starts = self.timestamps[primary][primary_tf]
-        symbols = list(self.bars.keys())
-        return SimpleClock(symbols, primary_tf, bar_starts)
+
+        # 다중 TF 또는 다중 symbol 여부 판정
+        tf_pairs: list[tuple[str, str]] = []
+        for sym, tfs in self.config.timeframes_per_symbol.items():
+            for tf in tfs:
+                tf_pairs.append((sym, tf))
+
+        if len(tf_pairs) == 1:
+            # 단일 (symbol, tf) — Phase 1 호환 경로
+            bar_starts = self.timestamps[primary][primary_tf]
+            return SimpleClock([primary], primary_tf, bar_starts)
+
+        bar_timestamps: dict[tuple[str, str], list[datetime]] = {}
+        for sym, tf in tf_pairs:
+            bar_timestamps[(sym, tf)] = self.timestamps[sym][tf]
+        return MultiTimeframeClock(bar_timestamps)
 
     def _build_execution_model(self) -> NextBarOpenExecution:
         if self.config.execution_model == "next_bar_open":
@@ -437,7 +456,14 @@ class BacktestEngine:
             self._emit_snapshot(ts, "fill")  # implicit, 주기 무관
 
         # 6. 봉 마감 시 전략 + periodic SNAPSHOT
-        if event.bar_closes:
+        # multi-TF: primary TF 가 닫혔을 때만 strategy 호출 + bar_count 증가.
+        # 보조 TF 만 닫힌 ClockEvent (예: primary=4h 인데 1h 만 닫힌 시점) 에서는 mark-to-
+        # market 까지만 수행하고 strategy 는 건드리지 않는다 (lookahead 차단).
+        primary_sym = self.config.primary_symbol
+        primary_tf = self.config.primary_timeframe
+        primary_closed = primary_tf in event.bar_closes.get(primary_sym, [])
+
+        if primary_closed:
             self._bar_count += 1
             if self._bar_count > self.warmup_bars:
                 self._invoke_strategy(ts, snapshots)

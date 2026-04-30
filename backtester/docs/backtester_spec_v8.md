@@ -1285,8 +1285,8 @@ fig = build_run_chart(result.run_dir)
 ## 7. 멀티 타임프레임
 
 **Phase 1**: 단일 timeframe만, StrategyContext 인터페이스만 dict.
-**Phase 2**: pre-aggregation 활성화.
-**Lookahead 검출 테스트 필수**.
+**Phase 2 PR 13**: ``MultiTimeframeClock`` 활성. (symbol, tf) 별 bar_start 리스트들로부터 ``bar_start + interval`` 합집합을 시간 순으로 emit. 같은 ts 에 여러 TF 가 닫히면 한 ClockEvent 의 ``bar_closes`` dict 에 모두 담긴다. Strategy.on_bar 는 primary TF 가 닫힌 시점에만 호출 (``primary_tf in event.bar_closes.get(primary_symbol, [])``). 보조 TF 단독 마감 시점에서는 mark-to-market 만 수행. ``BarsView[symbol][tf]`` 는 last_closed 시점까지만 노출 (lookahead 차단). ``IndicatorEngine.precompute`` 가 (symbol, tf) 별로 indicators parquet 영속화.
+**Lookahead 검출 테스트 필수** — ``test_multitimeframe.test_engine_multitf_h4_view_no_lookahead``: primary 1h + secondary 4h 시나리오에서 ``now=02:00 / 03:00`` 시점에 4h view height = 0, ``now=04:00`` 에서 4h 첫 봉 마감 후 height = 1, 이후 ``05:00 ~ 07:00`` 까지 그대로 1, ``now=08:00`` 에서 4h 두 번째 봉 마감 후 height = 2.
 
 ---
 
