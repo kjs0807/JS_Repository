@@ -1,35 +1,40 @@
-"""SQLite DB → Parquet export 스크립트 (PR 8 skeleton).
+"""SQLite OHLCV → Parquet export 도구.
 
-집 환경에서 backtester/data_cache/ 등으로 OHLCV parquet을 생성하기 위한 CLI 골격.
-실제 DB 연결 및 변환 로직은 집 환경(스키마 확정 후)에서 구현한다 — 본 파일은 시그니처와
-구조만 제공.
+Bybit_Trading 등 외부 SQLite DB의 OHLCV 테이블을 새 backtester가 소비할 수 있는 표준
+Parquet 포맷으로 변환한다. ``ParquetDataSource``의 schema/sort 검증을 통과해야 한다.
 
-출력 파일명 규약 (spec §6.5): `{output_dir}/{sanitize_symbol(symbol)}_{timeframe}.parquet`
+출력 파일명 (spec §6.5): ``{output_dir}/{sanitize_symbol(symbol)}_{timeframe}.parquet``
+
 출력 스키마 (spec §3.1):
     timestamp: pl.Datetime("us", time_zone="UTC")
     open / high / low / close / volume: pl.Float64
 
-CLI 사용 예 (구현 완료 후):
-    python scripts/export_db_to_parquet.py \\
-        --db /path/to/ohlcv.sqlite \\
+CLI 사용 예 (Bybit_Trading DB)::
+
+    python tools/export_db_to_parquet.py \\
+        --db ../Crypto/Bybit_Trading/db/bybit_data.db \\
         --table ohlcv_1h \\
         --symbol BTCUSDT \\
         --timeframe 1h \\
-        --output-dir backtester/data_cache/
+        --output-dir tests/fixtures \\
+        --start 2026-03-01 --end 2026-04-29
+
+``--start``/``--end``는 선택. 생략 시 해당 symbol의 모든 봉을 export.
 """
 
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
-# polars import는 실제 구현 시 활성. skeleton 단계에서는 미사용 import 경고를 피하기 위해
-# 함수 본문 안에서만 사용.
+import polars as pl
 
-# 컬럼 매핑은 DB 스키마에 따라 다를 수 있어 매개변수화 가능. skeleton 기본값.
+# DB 컬럼 -> 표준 OHLCV 컬럼 매핑. Bybit_Trading 스키마(``open_time`` epoch ms) 기본.
 DEFAULT_COLUMN_MAP: dict[str, str] = {
-    "ts": "timestamp",
+    "open_time": "timestamp",
     "open": "open",
     "high": "high",
     "low": "low",
@@ -43,6 +48,33 @@ def sanitize_symbol(symbol: str) -> str:
     return symbol.replace("/", "_").replace("\\", "_")
 
 
+def _detect_timestamp_unit(sample: int) -> str:
+    """epoch 정수의 단위(s/ms/us)를 휴리스틱으로 판별.
+
+    1e12 < ms < 1e13 (대략 2001-09 ~ 2286-11)
+    1e9  < s  < 1e10
+    1e15 < us < 1e16
+    """
+    if sample > 10**14:
+        return "us"
+    if sample > 10**11:
+        return "ms"
+    return "s"
+
+
+def _epoch_to_utc(values: list[int]) -> list[datetime]:
+    if not values:
+        return []
+    unit = _detect_timestamp_unit(values[0])
+    if unit == "ms":
+        scale = 1000.0
+    elif unit == "us":
+        scale = 1_000_000.0
+    else:
+        scale = 1.0
+    return [datetime.fromtimestamp(v / scale, tz=timezone.utc) for v in values]
+
+
 def export_one(
     *,
     db_path: Path,
@@ -50,34 +82,96 @@ def export_one(
     symbol: str,
     timeframe: str,
     output_dir: Path,
+    start: datetime | None = None,
+    end: datetime | None = None,
     column_map: dict[str, str] | None = None,
 ) -> Path:
-    """SQLite의 OHLCV 테이블을 1개 parquet으로 export. (skeleton)
+    """SQLite의 OHLCV 테이블에서 ``symbol`` 데이터를 1개 parquet으로 export."""
+    cmap = dict(column_map or DEFAULT_COLUMN_MAP)
+    ts_db_col = next((k for k, v in cmap.items() if v == "timestamp"), None)
+    if ts_db_col is None:
+        raise ValueError(
+            f"column_map must include a key mapping to 'timestamp', got {cmap!r}"
+        )
+    needed_db_cols = [
+        ts_db_col,
+        next(k for k, v in cmap.items() if v == "open"),
+        next(k for k, v in cmap.items() if v == "high"),
+        next(k for k, v in cmap.items() if v == "low"),
+        next(k for k, v in cmap.items() if v == "close"),
+        next(k for k, v in cmap.items() if v == "volume"),
+    ]
 
-    구현 시 단계 (집 환경):
-    1. sqlite3 또는 polars.read_database로 `db_path` 연결, `table`에서 SELECT.
-    2. WHERE symbol = ? AND timeframe = ? (테이블 스키마 따라).
-    3. `column_map`을 사용해 컬럼명을 OHLCV 표준으로 정규화.
-    4. timestamp를 `pl.Datetime("us", time_zone="UTC")`로 캐스트
-       (DB에 저장된 원본이 epoch millis인지 ISO 문자열인지 확인 후 변환 로직 분기).
-    5. open/high/low/close/volume을 `pl.Float64`로 캐스트.
-    6. timestamp 오름차순 정렬 + 중복 제거 검증 (data/parquet_source.py가 strictly
-       increasing을 강제하므로 export 단계에서 보장).
-    7. `{output_dir}/{sanitize_symbol(symbol)}_{timeframe}.parquet`로 write_parquet.
-    """
-    del db_path, table, column_map  # skeleton 인자 — 구현 시 활용
+    select_cols = ", ".join(needed_db_cols)
+    sql = (
+        f"SELECT {select_cols} FROM {table} WHERE symbol = ? "
+        f"ORDER BY {ts_db_col} ASC"
+    )
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(sql, (symbol,)).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        raise ValueError(f"No rows for symbol={symbol!r} in table={table!r}")
+
+    raw_ts = [int(r[0]) for r in rows]
+    timestamps = _epoch_to_utc(raw_ts)
+    df = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": [float(r[1]) for r in rows],
+            "high": [float(r[2]) for r in rows],
+            "low": [float(r[3]) for r in rows],
+            "close": [float(r[4]) for r in rows],
+            "volume": [float(r[5]) for r in rows],
+        }
+    ).with_columns(
+        pl.col("timestamp").cast(pl.Datetime(time_unit="us", time_zone="UTC")),
+        pl.col("open").cast(pl.Float64),
+        pl.col("high").cast(pl.Float64),
+        pl.col("low").cast(pl.Float64),
+        pl.col("close").cast(pl.Float64),
+        pl.col("volume").cast(pl.Float64),
+    )
+
+    # ParquetDataSource는 strictly increasing timestamp + duplicate 0건을 요구.
+    df = df.unique(subset=["timestamp"]).sort("timestamp")
+
+    if start is not None:
+        df = df.filter(pl.col("timestamp") >= start)
+    if end is not None:
+        df = df.filter(pl.col("timestamp") <= end)
+
+    if df.height == 0:
+        raise ValueError(
+            f"No rows after applying filters (symbol={symbol}, table={table}, "
+            f"start={start}, end={end})"
+        )
+
     output_dir.mkdir(parents=True, exist_ok=True)
     target = output_dir / f"{sanitize_symbol(symbol)}_{timeframe}.parquet"
-    raise NotImplementedError(
-        "export_db_to_parquet.export_one is a skeleton. "
-        "Implement DB read + schema cast in home environment "
-        f"(target path will be: {target})"
-    )
+    df.write_parquet(target)
+    return target
+
+
+def _parse_iso(value: str) -> datetime:
+    """``YYYY-MM-DD`` 또는 ISO8601 datetime 문자열을 UTC tz-aware datetime으로 변환."""
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(
+            f"Invalid datetime: {value!r} ({e})"
+        ) from e
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="SQLite OHLCV → Parquet export (Phase 1 skeleton).",
+        description="SQLite OHLCV → Parquet export.",
     )
     parser.add_argument("--db", type=Path, required=True, help="SQLite DB path")
     parser.add_argument("--table", required=True, help="OHLCV table name")
@@ -88,6 +182,18 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         help="Output directory (will be created if missing).",
+    )
+    parser.add_argument(
+        "--start",
+        type=_parse_iso,
+        default=None,
+        help="Optional inclusive start (YYYY-MM-DD or ISO8601, UTC).",
+    )
+    parser.add_argument(
+        "--end",
+        type=_parse_iso,
+        default=None,
+        help="Optional inclusive end (YYYY-MM-DD or ISO8601, UTC).",
     )
     return parser
 
@@ -101,9 +207,11 @@ def main(argv: list[str] | None = None) -> int:
             symbol=args.symbol,
             timeframe=args.timeframe,
             output_dir=args.output_dir,
+            start=args.start,
+            end=args.end,
         )
-    except NotImplementedError as e:
-        print(f"[skeleton] {e}", file=sys.stderr)
+    except (ValueError, sqlite3.Error) as e:
+        print(f"[error] {e}", file=sys.stderr)
         return 2
     print(f"Wrote {path}")
     return 0

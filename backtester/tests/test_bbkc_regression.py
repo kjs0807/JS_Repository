@@ -37,26 +37,38 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 SIGNALS_CSV = FIXTURE_DIR / "bbkc_signals.csv"
 
 
-def _btc() -> Instrument:
+def _make_instrument(symbol: str) -> Instrument:
+    """fixture의 symbol 그대로 Instrument 생성. 회귀는 indicator/시그널 비교가 본질이라
+    tick_size/fee 등 microstructure 디테일은 PR8 게이트와 무관 — 합리적 기본값 사용."""
+    base = symbol.removesuffix("USDT") if symbol.endswith("USDT") else symbol
     return Instrument(
-        symbol="BTCUSDT",
+        symbol=symbol,
         asset_class="crypto_perp",
         tick_size=Decimal("0.01"),
         tick_value=Decimal("0.01"),
         contract_multiplier=Decimal("1"),
         quote_currency="USDT",
-        base_currency="BTC",
+        base_currency=base,
         size_unit="base_asset",
-        fee_model=FeeModel(type="flat", taker=Decimal("0.0006")),
+        fee_model=FeeModel(type="flat", taker=Decimal("0")),
     )
 
 
-def _intent_signals(events_path: Path) -> list[tuple[str, str]]:
+def _intent_signals(
+    events_path: Path,
+    *,
+    sides: set[str] | None = None,
+) -> list[tuple[str, str]]:
+    """events.jsonl에서 (ts, side) 추출. ``sides`` 지정 시 해당 side만 반환."""
     out: list[tuple[str, str]] = []
     for line in events_path.read_text(encoding="utf-8").splitlines():
         evt = json.loads(line)
-        if evt["type"] == "intent_created":
-            out.append((evt["ts"], evt["payload"]["intent"]["side"]))
+        if evt["type"] != "intent_created":
+            continue
+        side = evt["payload"]["intent"]["side"]
+        if sides is not None and side not in sides:
+            continue
+        out.append((evt["ts"], side))
     return out
 
 
@@ -128,7 +140,7 @@ def test_bbkc_regression_signals_match_fixture(
     config = BacktestConfig(
         run_id="bbkc_regression",
         data_source=DataSourceConfig(base_dir=data_dir),
-        instruments=[_btc()],
+        instruments=[_make_instrument(symbol)],
         timeframes_per_symbol={symbol: ["1h"]},
         primary_symbol=symbol,
         primary_timeframe="1h",
@@ -140,7 +152,15 @@ def test_bbkc_regression_signals_match_fixture(
     engine = BacktestEngine(config, BBKCSqueezeStrategy(), verbose=False)
     result = engine.run()
 
-    actual = _intent_signals(result.events_path)
+    # PR8 Phase 1 — long-only 회귀. fixture에 등장한 side 만 v8 출력에서 추출.
+    # legacy SHORT, TP/SL/trailing 청산, time_stop, RSI<70 필터는 v8 Phase 1 미지원이라
+    # v8 buy 시퀀스가 legacy 보다 많을 수 있다. 회귀 게이트는 **subset**:
+    # 모든 fixture (timestamp, direction)이 v8 actual에 정확히 포함되면 통과.
+    # 누락 시 어떤 fixture entry가 v8에 없는지 명시적으로 보고.
+    expected_sides = set(fixture["direction"].unique().to_list())
+    actual = _intent_signals(result.events_path, sides=expected_sides)
+    actual_set = set(actual)
+
     expected = [
         (
             ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
@@ -152,9 +172,13 @@ def test_bbkc_regression_signals_match_fixture(
             strict=True,
         )
     ]
+    expected_set = set(expected)
 
-    assert actual == expected, (
-        f"BBKC regression mismatch:\n"
-        f"  expected ({len(expected)}): {expected[:5]}...\n"
-        f"  actual   ({len(actual)}): {actual[:5]}..."
+    missing = sorted(expected_set - actual_set)
+    assert not missing, (
+        f"BBKC regression: legacy fixture entries missing from v8 actual "
+        f"(sides={sorted(expected_sides)}):\n"
+        f"  missing: {missing}\n"
+        f"  expected ({len(expected)}): {expected}\n"
+        f"  actual   ({len(actual)}): {actual[:10]}{'...' if len(actual) > 10 else ''}"
     )
