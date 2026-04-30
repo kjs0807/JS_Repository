@@ -176,7 +176,7 @@ def _parse_iso(value: str) -> datetime:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="SQLite OHLCV → Parquet export.",
+        description="SQLite OHLCV to Parquet export.",
     )
     parser.add_argument("--db", type=Path, required=True, help="SQLite DB path")
     parser.add_argument("--table", required=True, help="OHLCV table name")
