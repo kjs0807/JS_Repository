@@ -1,6 +1,8 @@
 """api/ws_client.py 단위 테스트 (mock 기반)."""
 import json
+import threading
 import pytest
+import src.api.ws_client as ws_client_module
 from src.api.ws_client import BybitWebSocketClient
 
 class TestBybitWebSocketClient:
@@ -52,3 +54,51 @@ class TestBybitWebSocketClient:
              "high":"65200","low":"64900","volume":"500","turnover":"32550000","confirm":False}]}
         ws._handle_message(json.dumps(msg))
         assert len(calls) == 0
+
+    def test_start_reconnects_after_run_forever_returns(self, monkeypatch):
+        opened_twice = threading.Event()
+        apps = []
+
+        class FakeWebSocketApp:
+            def __init__(self, url, on_open, on_message, on_error, on_close):
+                self.url = url
+                self.on_open = on_open
+                self.on_close = on_close
+                apps.append(self)
+
+            def send(self, payload):
+                self.payload = payload
+
+            def close(self):
+                pass
+
+            def run_forever(self, **kwargs):
+                self.kwargs = kwargs
+                self.on_open(self)
+                self.on_close(self, 1006, "test close")
+                if len(apps) >= 2:
+                    opened_twice.set()
+
+        monkeypatch.setattr(ws_client_module.websocket, "WebSocketApp", FakeWebSocketApp)
+
+        ws = BybitWebSocketClient(reconnect_delay=0.01)
+        ws.start(["BTCUSDT"], ["60"])
+        assert opened_twice.wait(timeout=1.0)
+        ws.stop()
+
+        assert len(apps) >= 2
+        assert apps[0].payload == json.dumps({"op": "subscribe", "args": ["kline.60.BTCUSDT"]})
+        assert apps[0].kwargs["ping_interval"] == 20
+        assert apps[0].kwargs["ping_timeout"] == 10
+
+    def test_get_stats_exposes_connection_state(self):
+        ws = BybitWebSocketClient(ws_url="wss://example.test", reconnect_delay=1.0)
+        ws._subscriptions = ["kline.60.BTCUSDT"]
+        ws._running = True
+        ws._connected = True
+
+        stats = ws.get_stats()
+
+        assert stats["connected"] is True
+        assert stats["subscriptions"] == ["kline.60.BTCUSDT"]
+        assert stats["ws_url"] == "wss://example.test"

@@ -299,10 +299,12 @@ class BbkcLivePaperRunner:
                 time.sleep(5.0)
                 if _now_ms() - last_heartbeat >= 60_000:
                     state = self._broker.load_state() or {}
+                    ws_state = "up" if ws.is_connected else "down"
                     logger.info(
-                        "[heartbeat] bars_seen=%d equity=%.2f "
+                        "[heartbeat] bars_seen=%d ws=%s equity=%.2f "
                         "realized_pnl=%.2f positions=%d trades=%d",
                         self._bars_seen,
+                        ws_state,
                         float(state.get("equity_incl_unrealized", 0.0)),
                         float(state.get("realized_pnl", 0.0)),
                         int(state.get("n_open_positions", 0)),

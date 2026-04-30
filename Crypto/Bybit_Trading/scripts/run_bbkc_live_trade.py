@@ -318,10 +318,12 @@ class BbkcLiveTradeRunner:
                             f"uPnL={p.unrealized_pnl:+.2f}"
                             for p in portfolio.positions
                         ) or "(none)"
+                        ws_state = "up" if ws.is_connected else "down"
                         logger.info(
-                            "[heartbeat] bars_seen=%d equity=%.2f "
+                            "[heartbeat] bars_seen=%d ws=%s equity=%.2f "
                             "daily_pnl=%+.2f positions=%d [%s]",
                             self._bars_seen,
+                            ws_state,
                             portfolio.equity,
                             portfolio.daily_pnl,
                             len(portfolio.positions),
