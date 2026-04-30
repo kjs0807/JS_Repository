@@ -25,11 +25,18 @@ def test_fee_model_negative_notional_uses_abs() -> None:
     assert fee == Decimal("10.000")
 
 
-def test_fee_model_phase1_ignores_is_maker() -> None:
-    """Phase 1은 is_maker 인자를 무시하고 항상 taker로 계산."""
+def test_fee_model_uses_taker_when_not_maker() -> None:
+    """Phase 2 PR 15a: is_maker=False (default) → taker rate."""
     fm = FeeModel(type="flat", taker=Decimal("0.001"), maker=Decimal("0.0005"))
     assert fm.compute_fee(Decimal("1000"), is_maker=False) == Decimal("1.000")
-    assert fm.compute_fee(Decimal("1000"), is_maker=True) == Decimal("1.000")
+    # default 는 is_maker=False
+    assert fm.compute_fee(Decimal("1000")) == Decimal("1.000")
+
+
+def test_fee_model_uses_maker_when_is_maker_true() -> None:
+    """Phase 2 PR 15a: is_maker=True → maker rate."""
+    fm = FeeModel(type="flat", taker=Decimal("0.001"), maker=Decimal("0.0005"))
+    assert fm.compute_fee(Decimal("1000"), is_maker=True) == Decimal("0.5000")
 
 
 # ---------- Instrument ------------------------------------------------------

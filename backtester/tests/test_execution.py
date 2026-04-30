@@ -165,7 +165,8 @@ def test_next_bar_open_rejects_non_market_order(order_type: str) -> None:
         sized_quantity=Decimal("1"),
         remaining=Decimal("1"),
     )
-    with pytest.raises(NotImplementedError, match="Phase 2"):
+    # Phase 2 PR 15a: market only. limit/stop/stop_limit 활성은 PR 15b.
+    with pytest.raises(NotImplementedError, match="PR 15b"):
         exec_model.try_fill(order, _snap(), _btc())
 
 

@@ -2138,6 +2138,25 @@ BB-KC 포팅 경계 (절대 위반 금지):
 
 ### Phase 2 (PR 13~)
 
+**PR 15a — Slippage + FeeModel maker/taker (Phase 2)**
+- ``execution/slippage_bps.py`` — ``apply_bps_slippage(price, side, bps)`` 헬퍼. buy → ``price × (1 + bps/10000)`` (불리), sell → 반대. ``bps == 0`` no-op, ``bps < 0`` ValueError.
+- ``execution/slippage_atr.py`` — ``AtrSlippageExecution(*, atr_multiplier, atr_provider)``. PR 15a minimum testable interface — ``atr_provider`` 외부 주입식 (IndicatorEngine 자동 wiring 은 후속). market only, limit/stop 은 PR 15b.
+- ``execution/next_bar.py`` — ``slippage_bps`` 파라미터 추가 (default 0 → Phase 1 호환). market = taker 명시.
+- ``instruments/base.py`` — ``FeeModel.compute_fee(notional, is_maker)`` maker/taker 분기 실제 활성. ``is_maker=True`` → ``maker`` rate, default → ``taker`` rate.
+- Engine ``_build_execution_model`` — ``execution_model='slippage_bps'`` 분기 추가 (``config.slippage_bps`` 를 NextBarOpen 에 주입). ``'atr_slippage'`` 는 명시적 NotImplementedError (atr_provider 주입이 필요해 자동 wiring 보류).
+- limit maker/taker 판단, ``StopLimit``, ``BarPathModel`` 4종 = PR 15b/15c 후속.
+
+**PR 15b — Limit / Stop / StopLimit 주문 (Phase 2)**
+- Phase 1 의 ``OrderBook.add`` market-only 가드 + ``NextBarOpenExecution`` market-only 가드 완화
+- next-bar OHLC 기반 limit/stop 체결 판정 (PESSIMISTIC default)
+- limit maker/taker 판단 (open 즉시 체결 vs limit 가격 체결)
+- TIF/expires_at 은 GTC 중심 유지, 만료 처리는 후속 PR
+
+**PR 15c — BarPathModel 4종 정책 (Phase 2)**
+- spec enum vs 코드 enum 정렬 확인 후 통일
+- 같은 봉 내 TP/SL 동시 도달 우선순위 정책별 명확화
+- random 정책은 random_seed 재현성 확보 시에만 도입
+
 **PR 13 — 멀티 timeframe**
 **PR 14 — BybitDataSource + 캐싱**
 - ``data/bybit_source.py`` — ``BybitDataSource(cache_dir, *, category, fetcher)``. 로컬 parquet cache 가 단일 진실 소스 (``{cache_dir}/{symbol}_{timeframe}.parquet``). ``fetch(symbol, tf, start, end)`` 흐름:

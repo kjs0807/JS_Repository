@@ -383,10 +383,24 @@ class BacktestEngine:
         return MultiTimeframeClock(bar_timestamps)
 
     def _build_execution_model(self) -> NextBarOpenExecution:
-        if self.config.execution_model == "next_bar_open":
+        em = self.config.execution_model
+        if em == "next_bar_open":
+            # Phase 1 호환 — slippage 0
             return NextBarOpenExecution()
+        if em == "slippage_bps":
+            # Phase 2 PR 15a — config.slippage_bps 를 NextBarOpen 에 주입
+            return NextBarOpenExecution(slippage_bps=self.config.slippage_bps)
+        if em == "atr_slippage":
+            # ATR slippage 는 atr_provider 주입이 필요해 Engine 자동 wiring 불가.
+            # 사용자가 명시적으로 ``AtrSlippageExecution`` 을 만들어 ``BacktestEngine`` 의
+            # 후속 패치 또는 strategy-level injection 으로 사용 (PR 15+ / PR 16).
+            raise NotImplementedError(
+                "execution_model='atr_slippage' requires explicit "
+                "AtrSlippageExecution construction with atr_provider injection; "
+                "Engine auto-wiring is deferred to subsequent PRs"
+            )
         raise NotImplementedError(  # pragma: no cover — Config 검증이 차단
-            f"execution_model {self.config.execution_model!r} is Phase 2"
+            f"execution_model {em!r} is Phase 2+"
         )
 
     # ---------- 메인 루프 --------------------------------------------------
