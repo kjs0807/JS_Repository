@@ -2114,8 +2114,8 @@ BB-KC 포팅 경계 (절대 위반 금지):
 - `data/csv_source.py` — `CSVDataSource` (`ParquetDataSource` 와 동일 인터페이스). `{base_dir}/{symbol}_{timeframe}.csv`, ISO8601 UTC tz-aware timestamp, OHLCV Float64 캐스트, schema/sort/dup 검증.
 
 **PR 10 — EventLogReader + Equity 시리즈**
-- `events/reader.py` (type별 인덱스, by_snapshot_reason)
-- `viz/equity.py` (group_by ts + last로 중복 처리)
+- `events/reader.py` — `EventLogReader(events_path, *, max_schema_version)`. JSONL 라인을 순서 보존하며 적재, type 별 인덱스 + `counts_by_type` / `by_type` / `by_snapshot_reason` / `to_dataframe(t)` 메서드. `schema_version > max` 면 `EventLogSchemaError`. malformed JSON 라인은 lineno 와 함께 `ValueError`. 빈 라인 skip.
+- `viz/equity.py` — `build_equity_series(reader, initial_equity)` → polars DataFrame. SNAPSHOT 이벤트 → `timestamp / equity / cash / realized_pnl / unrealized_pnl / position_size_{symbol}* / drawdown / drawdown_pct`. 같은 ts 의 중복 SNAPSHOT (FILL 직후 + periodic) 은 `group_by("timestamp", maintain_order=True).last()` 로 dedup. 빈 events → 스키마만 있는 빈 DataFrame.
 
 **PR 11 — Run Chart**
 - `viz/run_chart.py`

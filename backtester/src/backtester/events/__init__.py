@@ -1,4 +1,4 @@
-"""Events subsystem (PR 6 + Phase 1.5 PR 9).
+"""Events subsystem (PR 6 + Phase 1.5 PR 9 + PR 10).
 
 Phase 1:
 - types.py: EventType, Event, IntentCreatedPayload, SnapshotReason
@@ -7,11 +7,14 @@ Phase 1:
 
 Phase 1.5:
 - parquet_export.py: events.jsonl → events.parquet 변환 (cache 산출물)
-- (후속) reader.py (EventLogReader, by_snapshot_reason)
+- reader.py: EventLogReader (type별 인덱스, by_snapshot_reason, to_dataframe)
+
+Phase 2: replay.py.
 """
 
 from backtester.events.log import EVENT_SCHEMA_VERSION, EventLog
 from backtester.events.parquet_export import events_jsonl_to_parquet
+from backtester.events.reader import EventLogReader, EventLogSchemaError
 from backtester.events.serialize import serialize_event_payload
 from backtester.events.types import Event, EventType, IntentCreatedPayload, SnapshotReason
 
@@ -19,6 +22,8 @@ __all__ = [
     "EVENT_SCHEMA_VERSION",
     "Event",
     "EventLog",
+    "EventLogReader",
+    "EventLogSchemaError",
     "EventType",
     "IntentCreatedPayload",
     "SnapshotReason",
