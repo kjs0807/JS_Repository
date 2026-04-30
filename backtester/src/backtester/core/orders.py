@@ -1,0 +1,106 @@
+"""OrderIntent + SizeSpec 6종 (spec §3.7).
+
+SizeSpec은 6종 모두 정의하지만 Phase 1 Sizer는 TargetUnits / TargetNotional /
+ClosePosition 3종만 처리한다. 나머지(TargetWeight / FullPosition / ScaleIn)는
+Phase 2에서 활성화 — Sizer.resolve()가 NotImplementedError 발생.
+
+OrderIntent.type / tif도 모든 값을 정의하지만 Phase 1 OrderBook/ExecutionModel은
+type='market' + tif='GTC' + expires_at=None만 정상 처리한다.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+from typing import Literal
+
+# ---------- SizeSpec 변종 ---------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TargetWeight:
+    """포트폴리오 가중치 목표 (예: 0.5 = equity의 50%). Phase 2."""
+
+    weight: Decimal
+
+
+@dataclass(frozen=True)
+class TargetNotional:
+    """명목 금액 목표 (quote currency 단위). Phase 1."""
+
+    notional: Decimal
+
+
+@dataclass(frozen=True)
+class TargetUnits:
+    """단위 수 직접 지정 (size_unit 기준). Phase 1."""
+
+    units: Decimal
+
+
+@dataclass(frozen=True)
+class FullPosition:
+    """가용 마진/equity로 가능한 최대 포지션. Phase 2."""
+
+
+@dataclass(frozen=True)
+class ClosePosition:
+    """현재 포지션 전량 청산. Phase 1."""
+
+
+@dataclass(frozen=True)
+class ScaleIn:
+    """기존 포지션에 비례 추가. Phase 2."""
+
+    by: Decimal
+
+
+SizeSpec = TargetWeight | TargetNotional | TargetUnits | FullPosition | ClosePosition | ScaleIn
+"""Sizer.resolve()의 입력. Phase 1 지원: TargetUnits, TargetNotional, ClosePosition."""
+
+
+# ---------- OrderIntent ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class OrderIntent:
+    """전략이 발행하는 주문 의도 (spec §3.7).
+
+    Phase 1 정상 처리 범위:
+    - type: 'market'만
+    - tif: 'GTC'만, expires_at: None만
+    - size_spec: TargetUnits / TargetNotional / ClosePosition만 (Sizer가 강제)
+
+    그 외 입력은 OrderBook.add 또는 ExecutionModel/Sizer 단계에서
+    NotImplementedError("Phase 2") raise.
+    """
+
+    symbol: str
+    side: Literal["buy", "sell"]
+    type: Literal["market", "limit", "stop", "stop_limit"]
+    size_spec: SizeSpec
+    limit_price: Decimal | None = None
+    stop_price: Decimal | None = None
+    reason: str = ""
+    tif: Literal["GTC", "IOC", "FOK", "DAY"] = "GTC"
+    client_order_id: str | None = None
+    expires_at: datetime | None = None
+
+
+# ---------- OrderAction -----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class OrderAction:
+    """전략의 OrderBook 변경 요청 (spec §4.2).
+
+    Engine이 strategy.on_bar에서 받은 OrderIntent들을 `OrderAction(type='new', intent=...)`로
+    감싸고, 추가로 strategy.on_pending_orders가 반환한 cancel/modify 액션과 합쳐 처리한다.
+
+    Phase 1 지원: `type='new'`만 (intent 필수). `cancel`/`modify`는 Phase 2+.
+    """
+
+    type: Literal["new", "cancel", "modify"]
+    intent: OrderIntent | None = None  # type='new'에서 필수
+    order_id: str | None = None  # type='cancel'/'modify'에서 필수

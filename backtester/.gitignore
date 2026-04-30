@@ -1,0 +1,25 @@
+# Python build / cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Pytest tmp leftovers
+.pytest_tmp/
+tmp*/
+
+# Local virtualenvs
+.venv/
+venv/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
