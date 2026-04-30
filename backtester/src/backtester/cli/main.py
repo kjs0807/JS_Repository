@@ -21,6 +21,7 @@ from backtester.core.config import BacktestConfig
 from backtester.core.engine import BacktestEngine
 from backtester.core.errors import ConfigError, RunDirectoryError
 from backtester.strategies.registry import build_strategy
+from backtester.viz.run_chart import render_run_chart
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -45,6 +46,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--quiet",
         action="store_true",
         help="Suppress INFO output (Engine notifications + CLI summary).",
+    )
+
+    report = sub.add_parser(
+        "report",
+        help="Render run_chart.html for an existing run directory.",
+        description="Render run_chart.html for an existing run directory.",
+    )
+    report.add_argument(
+        "run_dir",
+        type=Path,
+        help="Path to runs/{run_id}/.",
+    )
+    report.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress INFO output (HTML output path).",
     )
 
     return parser
@@ -76,10 +94,33 @@ def cmd_run(config_path: Path, *, quiet: bool) -> int:
     return 0
 
 
+def cmd_report(run_dir: Path, *, quiet: bool) -> int:
+    """``backtester report`` 본체 — ``run_dir`` 의 run_chart.html 렌더링."""
+    if not run_dir.exists() or not run_dir.is_dir():
+        print(f"[error] run dir not found: {run_dir}", file=sys.stderr)
+        return 2
+    if not (run_dir / "events.jsonl").exists():
+        print(
+            f"[error] events.jsonl missing in {run_dir} — not a valid run directory",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        output = render_run_chart(run_dir)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"[error] render: {e}", file=sys.stderr)
+        return 2
+    if not quiet:
+        print(f"[INFO] Wrote {output}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.cmd == "run":
         return cmd_run(args.config_path, quiet=args.quiet)
+    if args.cmd == "report":
+        return cmd_report(args.run_dir, quiet=args.quiet)
     # argparse `required=True` 가 차단하지만 방어적으로
     print(f"[error] unknown command: {args.cmd!r}", file=sys.stderr)
     return 2

@@ -12,6 +12,7 @@ authors = [{ name = "kjs0807" }]
 dependencies = [
   "polars>=0.20",
   "pyyaml>=6.0",
+  "plotly>=5.18",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +40,12 @@ strict = true
 warn_unused_ignores = true
 warn_return_any = true
 files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+# plotly does not ship type stubs (no py.typed) as of v5.x. We import its public
+# APIs untyped — accept Any for plotly objects.
+module = ["plotly", "plotly.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

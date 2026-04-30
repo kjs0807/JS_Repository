@@ -82,11 +82,13 @@ class BacktestEngine:
         for inst in config.instruments:
             self.instrument_registry.register(inst)
 
-        # 4. Config 영속화 (Phase 1: config.json)
-        # `persist_run_data`는 bars/indicators 영속화 정책 — config.json은 audit 산출물로
-        # 항상 생성한다. resolved_run_id / run_dir 추적이 PR 7 acceptance 조건이며
-        # BacktestResult.config_path가 항상 실재 파일을 가리켜야 한다.
+        # 4. Config 영속화 (Phase 1: config.json + Phase 1.5: config.yaml).
+        # `persist_run_data`는 bars/indicators 영속화 정책 — config.{json,yaml}은
+        # audit 산출물로 항상 생성한다. resolved_run_id / run_dir 추적이 PR 7
+        # acceptance 조건이며 BacktestResult.config_path가 항상 실재 파일을 가리켜야 한다.
+        # config.yaml 은 Phase 1.5 PR 11 부터 run_chart 가 self-contained 로 읽기 위해 추가.
         self._persist_config()
+        self._persist_config_yaml()
 
         # 5. 데이터 소스 + fetch
         self.data_source = self._build_data_source()
@@ -253,6 +255,21 @@ class BacktestEngine:
         cfg_dict["run_dir"] = str(self.run_dir.absolute())
         with open(self.run_dir / "config.json", "w", encoding="utf-8") as fp:
             json.dump(cfg_dict, fp, indent=2)
+
+    def _persist_config_yaml(self) -> None:
+        """Phase 1.5+: config.yaml (양방향 round-trip + audit, spec §6.4).
+
+        ``BacktestConfig.to_dict()`` 결과 + ``resolved_run_id`` / ``run_dir`` audit 필드.
+        ``BacktestConfig.from_yaml`` 이 audit 필드를 무시하므로 ``run_chart`` 등 분석 도구는
+        직접 yaml dict 를 읽고, 재실행이 필요할 때는 ``from_yaml`` 로 BacktestConfig 복원.
+        """
+        import yaml as _yaml
+
+        data = self.config.to_dict()
+        data["resolved_run_id"] = self.resolved_run_id
+        data["run_dir"] = str(self.run_dir.absolute())
+        with open(self.run_dir / "config.yaml", "w", encoding="utf-8") as fp:
+            _yaml.safe_dump(data, fp, sort_keys=False, default_flow_style=False)
 
     def _persist_bars(self) -> None:
         """Phase 1: copy만 (symlink는 Windows 호환 이슈로 Phase 1.5+로 미룸)."""

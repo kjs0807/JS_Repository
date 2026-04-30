@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from backtester.cli.main import _build_parser, cmd_run, main
+from backtester.cli.main import _build_parser, cmd_report, cmd_run, main
 from backtester.core.config import BacktestConfig, DataSourceConfig
 from backtester.instruments.base import FeeModel, Instrument
 
@@ -207,6 +207,67 @@ def test_build_strategy_wraps_typeerror_as_config_error() -> None:
 
     with pytest.raises(ConfigError, match="strategy_params"):
         build_strategy("bbkc_squeeze", {"nonexistent_param": 42})
+
+
+# ---------- report 명령 (PR 11) --------------------------------------------
+
+
+def test_parser_report_requires_run_dir() -> None:
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["report"])
+
+
+def test_parser_report_parses_quiet_flag() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(["report", "runs/x", "--quiet"])
+    assert args.cmd == "report"
+    assert args.run_dir == Path("runs/x")
+    assert args.quiet is True
+
+
+def test_cmd_report_returns_2_when_run_dir_missing(tmp_path: Path) -> None:
+    rc = cmd_report(tmp_path / "nope", quiet=True)
+    assert rc == 2
+
+
+def test_cmd_report_returns_2_when_events_jsonl_missing(tmp_path: Path) -> None:
+    rd = tmp_path / "no_events"
+    rd.mkdir()
+    rc = cmd_report(rd, quiet=True)
+    assert rc == 2
+
+
+def test_cmd_report_renders_html_after_cmd_run(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """run 실행 후 같은 run_dir 에 report 실행 → run_chart.html 생성."""
+    data_dir = _setup_data(tmp_path)
+    yaml_path = tmp_path / "ok.yaml"
+    output_dir = tmp_path / "runs"
+    _write_minimal_yaml(yaml_path, data_dir=data_dir, output_dir=output_dir)
+    rc1 = cmd_run(yaml_path, quiet=True)
+    assert rc1 == 0
+    run_dir = output_dir / "cli_test"
+
+    capsys.readouterr()  # flush prior output
+    rc2 = cmd_report(run_dir, quiet=False)
+    assert rc2 == 0
+    captured = capsys.readouterr()
+    assert "run_chart.html" in captured.out
+    assert (run_dir / "charts" / "run_chart.html").exists()
+
+
+def test_main_dispatch_report(tmp_path: Path) -> None:
+    """``main(argv)`` 가 ``report`` 서브커맨드를 정상 dispatch."""
+    data_dir = _setup_data(tmp_path)
+    yaml_path = tmp_path / "ok.yaml"
+    output_dir = tmp_path / "runs"
+    _write_minimal_yaml(yaml_path, data_dir=data_dir, output_dir=output_dir)
+    main(["run", str(yaml_path), "--quiet"])
+    rc = main(["report", str(output_dir / "cli_test"), "--quiet"])
+    assert rc == 0
 
 
 def test_cmd_run_returns_2_on_invalid_strategy_params(tmp_path: Path) -> None:

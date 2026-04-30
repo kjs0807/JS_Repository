@@ -2118,8 +2118,10 @@ BB-KC 포팅 경계 (절대 위반 금지):
 - `viz/equity.py` — `build_equity_series(reader, initial_equity)` → polars DataFrame. SNAPSHOT 이벤트 → `timestamp / equity / cash / realized_pnl / unrealized_pnl / position_size_{symbol}* / drawdown / drawdown_pct`. 같은 ts 의 중복 SNAPSHOT (FILL 직후 + periodic) 은 `group_by("timestamp", maintain_order=True).last()` 로 dedup. 빈 events → 스키마만 있는 빈 DataFrame.
 
 **PR 11 — Run Chart**
-- `viz/run_chart.py`
-- CLI `report` 명령
+- `viz/run_chart.py` — `build_run_chart(run_dir)` → 4단 plotly Figure (캔들+지표 / 포지션 / equity / drawdown). `render_run_chart(run_dir)` → `run_dir/charts/run_chart.html` (CDN plotly include). `run_dir` 만 입력, 외부 cache 의존 없음 (cache-clean 회귀 테스트 포함).
+- Engine 영속화에 `config.yaml` 추가 — `BacktestConfig.to_dict()` + `resolved_run_id` / `run_dir` audit 필드. `config.json` (Phase 1 audit) 도 그대로 유지. `_load_run_config` 헬퍼는 yaml 우선, json fallback.
+- CLI `backtester report runs/{run_id}/ [--quiet]` — `render_run_chart` 호출 + HTML 경로 출력. argparse `report` 서브커맨드 + `cmd_report`. 종료 코드 0/2.
+- 의존성: `plotly>=5.18` (runtime), mypy override `plotly.*: ignore_missing_imports` (plotly 미배포 stub).
 
 **PR 12 — 회귀 시각 검증**
 - BB-KC 결과 시각화
