@@ -53,8 +53,18 @@ def serialize_event_payload(obj: Any) -> Any:
     # 컨테이너
     if isinstance(obj, dict):
         return {k: serialize_event_payload(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple, set, frozenset)):
+    if isinstance(obj, (list, tuple)):
         return [serialize_event_payload(x) for x in obj]
+    # set / frozenset: PR B 정정 — iteration 순서가 unspecified 라 byte-identical replay
+    # 게이트가 깨질 수 있다. 직렬화된 원소를 정렬해 deterministic 출력.
+    if isinstance(obj, (set, frozenset)):
+        items = [serialize_event_payload(x) for x in obj]
+        try:
+            items.sort()
+        except TypeError:
+            # 혼합 타입 set 은 비교 불가 — 그래도 deterministic 하려면 str 표현 정렬.
+            items.sort(key=repr)
+        return items
     raise TypeError(
         f"Cannot serialize {type(obj).__name__} for EventLog payload: {obj!r}"
     )

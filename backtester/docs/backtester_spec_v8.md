@@ -1868,8 +1868,9 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
   desync 해결 ✅
 - Walkforward `state_policy='carryover'|'reset'` 옵션. 현재는 carryover (train→test 상태
   이월) 단일 모드. 진짜 OOS 검증을 위한 reset 모드 후속 PR.
-- EventLog byte-identical replay 회귀 게이트 (§13.3 Phase 2). canonical JSON ✅, 남은
-  단계는 ``order_id`` deterministic sequence + dict iteration 순서 검증 회귀 추가.
+- ~~EventLog byte-identical replay 회귀 게이트~~ — PR B 완료 ✅. canonical JSON +
+  ``order_id`` deterministic sequence + ``serialize_event_payload`` set/frozenset
+  정렬 + 두 번 실행 byte-identical 검증 + rebuild_results 동일 equity_curve.
 
 ### Phase 3 — 자산군 확장 + 비교 시각화 (1-2주)
 

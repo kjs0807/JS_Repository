@@ -35,8 +35,8 @@ from backtester.core.config import BacktestConfig
 from backtester.core.context import (
     BarsView,
     IndicatorsView,
-    OrderView,
     OrdersView,
+    OrderView,
     PortfolioView,
     PositionView,
     StrategyContext,
