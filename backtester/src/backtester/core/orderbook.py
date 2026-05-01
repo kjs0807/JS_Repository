@@ -192,7 +192,7 @@ class OrderBook:
         limit_price: Decimal | None = None,
         stop_price: Decimal | None = None,
     ) -> bool:
-        """active 주문의 가격 필드를 변경 (PR D).
+        """active 주문의 가격 필드를 변경 (PR D + PR M ratchet).
 
         반환:
         - True: 변경 성공
@@ -201,6 +201,11 @@ class OrderBook:
         Raises:
         - ValueError: market 주문은 가격 필드가 없어 modify 불가. 또는 limit_price 가
           stop/market 에, stop_price 가 limit/market 에 잘못 적용된 경우.
+        - ValueError (PR M ratchet): ``reduce_only=True`` 인 stop / stop_limit 의
+          stop_price 변경이 ratchet invariant 를 위반하면 reject:
+          * intent.side='sell' (long 보호 stop) → new_stop > old_stop 필수.
+          * intent.side='buy' (short 보호 stop) → new_stop < old_stop 필수.
+          ``reduce_only=False`` 인 stop 은 ratchet 미적용 (자유 변경).
         """
         order = self._orders.get(order_id)
         if order is None or not order.is_active:
@@ -221,6 +226,28 @@ class OrderBook:
                 f"stop_price modify only valid for stop/stop_limit; got "
                 f"{order.intent.type!r}"
             )
+
+        # PR M ratchet — reduce_only stop 만 적용.
+        if (
+            stop_price is not None
+            and order.intent.reduce_only
+            and order.intent.type in ("stop", "stop_limit")
+            and order.intent.stop_price is not None
+        ):
+            old_stop = order.intent.stop_price
+            if order.intent.side == "sell":
+                if stop_price <= old_stop:
+                    raise ValueError(
+                        f"ratchet violation: long-protecting stop must move up; "
+                        f"old={old_stop}, new={stop_price} for {order.id}"
+                    )
+            else:  # buy — short 보호
+                if stop_price >= old_stop:
+                    raise ValueError(
+                        f"ratchet violation: short-protecting stop must move down; "
+                        f"old={old_stop}, new={stop_price} for {order.id}"
+                    )
+
         new_limit = (
             limit_price if limit_price is not None else order.intent.limit_price
         )
