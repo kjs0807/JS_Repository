@@ -734,6 +734,7 @@ class BacktestEngine:
                 avg_price=p.avg_price,
                 realized_pnl=p.realized_pnl,
                 unrealized_pnl=p.unrealized_pnl,
+                opened_at=p.opened_at,
             )
         return PortfolioView(
             equity=self.ledger.equity,

@@ -132,8 +132,10 @@ class Ledger:
             # Case 1: open from flat
             position.size = new_size
             position.avg_price = price
+            # PR N — 새 포지션 ts 기록.
+            position.opened_at = fill.timestamp
         elif (prev_size > 0 and delta > 0) or (prev_size < 0 and delta < 0):
-            # Case 2: same direction extend → 가중평균
+            # Case 2: same direction extend → 가중평균. opened_at 유지.
             position.avg_price = (
                 abs(prev_size) * prev_avg + abs(delta) * price
             ) / abs(new_size)
@@ -154,12 +156,15 @@ class Ledger:
                 position.size = new_size
                 if new_size == 0:
                     position.avg_price = Decimal("0")
+                    # opened_at 은 일부러 그대로 — 다음 open 이 덮어쓴다.
                 # else avg_price stays
             else:
                 # Case 5: flip. Sizer 는 allow_flip=False 면 여기 도달 안 시킴.
                 # 기존 포지션 전부 청산 + 잔여로 반대 방향 신규 개시.
                 position.size = new_size
                 position.avg_price = price  # 신규 포지션의 avg = fill price
+                # PR N — 새 (반대) 포지션 ts 기록.
+                position.opened_at = fill.timestamp
 
         # Cash 반영
         if fill.side == "buy":

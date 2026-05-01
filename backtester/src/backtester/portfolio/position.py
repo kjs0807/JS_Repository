@@ -17,7 +17,12 @@ from typing import Literal
 
 @dataclass
 class Position:
-    """심볼별 포지션 추적."""
+    """심볼별 포지션 추적.
+
+    PR N: ``opened_at`` 은 현재 활성 포지션이 열린 시각 (fill timestamp). flat → 새
+    포지션 또는 flip 시 갱신, 같은 방향 추가 시 유지. flat 으로 돌아갈 때는 일부러
+    리셋하지 않고 다음 open 이 덮어쓴다 (이전 값은 의미 없으므로).
+    """
 
     symbol: str
     size: Decimal = Decimal("0")
@@ -25,6 +30,7 @@ class Position:
     realized_pnl: Decimal = Decimal("0")
     unrealized_pnl: Decimal = Decimal("0")
     last_update: datetime | None = None
+    opened_at: datetime | None = None  # PR N — current 활성 포지션 entry ts
 
     @property
     def is_flat(self) -> bool:

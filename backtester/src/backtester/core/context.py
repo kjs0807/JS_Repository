@@ -197,7 +197,7 @@ def _empty_indicators_view() -> IndicatorsView:
 
 @dataclass(frozen=True)
 class PositionView:
-    """Read-only ``Position`` snapshot (PR A).
+    """Read-only ``Position`` snapshot (PR A + PR N opened_at).
 
     Engine 이 ``Ledger.positions[symbol]`` 의 mutable Position 으로부터 매 ``on_bar``
     호출 시점에 새로 만들어 주입한다. ``StrategyContext`` 가 frozen 이라 위치를
@@ -205,6 +205,10 @@ class PositionView:
 
     Phase 1 long-only 가정 (size >= 0) 이지만 Phase 2+ short 활성 시 size < 0 도 그대로
     노출된다 — ``direction`` 으로 long/short/flat 구분.
+
+    PR N: ``opened_at`` 은 현재 활성 포지션의 entry timestamp (fill ts). 같은 방향
+    추가는 유지, flat→새로 / flip 은 갱신. flat 일 때는 None 이 아닐 수 있지만
+    의미상 무시해야 한다 (``ctx.bars_held`` 가 flat 가드).
     """
 
     symbol: str
@@ -212,6 +216,7 @@ class PositionView:
     avg_price: Decimal
     realized_pnl: Decimal
     unrealized_pnl: Decimal
+    opened_at: datetime | None = None
 
     @property
     def is_flat(self) -> bool:
@@ -369,3 +374,27 @@ class StrategyContext:
 
     def open_orders(self, symbol: str | None = None) -> tuple[OrderView, ...]:
         return self.orders.open_orders(symbol)
+
+    # ---------- PR N: time stop helper -------------------------------------
+
+    def bars_held(self, symbol: str) -> int | None:
+        """현재 활성 포지션이 ``primary_timeframe`` 기준 몇 봉 동안 보유 중인지.
+
+        반환:
+        - flat → None
+        - opened_at 미설정 → None
+        - 그 외 → ``(now - opened_at) / primary_interval`` 정수.
+
+        주의: ``primary_timeframe`` 기준이라 다른 TF 의 봉 수와 다를 수 있다.
+        보통 strategy 가 단일 TF 만 쓰므로 충분.
+        """
+        from backtester.data.base import parse_timeframe
+
+        pos = self.position(symbol)
+        if pos is None or pos.is_flat or pos.opened_at is None:
+            return None
+        interval = parse_timeframe(self.primary_timeframe)
+        elapsed = self.now - pos.opened_at
+        if interval.total_seconds() <= 0:
+            return None
+        return int(elapsed.total_seconds() // interval.total_seconds())
