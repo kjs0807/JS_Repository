@@ -5,8 +5,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
-import pytest
-
 from backtester.core.orderbook import Order
 from backtester.core.orders import OrderIntent, TargetUnits
 from backtester.core.snapshot import MarketSnapshot
@@ -142,32 +140,9 @@ def test_next_bar_open_fee_zero_when_taker_zero() -> None:
     assert fill.fee == Decimal("0")
 
 
-# ---------- limit/stop/stop_limit → NotImplementedError ---------------------
-
-
-@pytest.mark.parametrize("order_type", ["limit", "stop", "stop_limit"])
-def test_next_bar_open_rejects_non_market_order(order_type: str) -> None:
-    """spec §20 PR 6: limit/stop/stop_limit은 Phase 2."""
-    exec_model = NextBarOpenExecution()
-    intent = OrderIntent(
-        symbol="BTCUSDT",
-        side="buy",
-        type=order_type,  # type: ignore[arg-type]
-        size_spec=TargetUnits(units=Decimal("1")),
-        limit_price=Decimal("50000") if "limit" in order_type else None,
-        stop_price=Decimal("50000") if "stop" in order_type else None,
-    )
-    order = Order(
-        id="ord_0",
-        intent=intent,
-        state="pending",
-        submitted_at=TS,
-        sized_quantity=Decimal("1"),
-        remaining=Decimal("1"),
-    )
-    # Phase 2 PR 15a: market only. limit/stop/stop_limit 활성은 PR 15b.
-    with pytest.raises(NotImplementedError, match="PR 15b"):
-        exec_model.try_fill(order, _snap(), _btc())
+# ---------- limit/stop/stop_limit 활성 (PR 15b) -----------------------------
+# limit/stop/stop_limit 의 OHLC 기반 체결 동작은 ``test_limit_stop_orders.py`` 에서
+# 종합 검증. 본 파일의 NextBarOpenExecution market 경로 회귀만 유지.
 
 
 # ---------- Fill 타입 검증 --------------------------------------------------

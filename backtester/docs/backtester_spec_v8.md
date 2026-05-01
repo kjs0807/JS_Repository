@@ -2146,11 +2146,28 @@ BB-KC 포팅 경계 (절대 위반 금지):
 - Engine ``_build_execution_model`` — ``execution_model='slippage_bps'`` 분기 추가 (``config.slippage_bps`` 를 NextBarOpen 에 주입). ``'atr_slippage'`` 는 명시적 NotImplementedError (atr_provider 주입이 필요해 자동 wiring 보류).
 - limit maker/taker 판단, ``StopLimit``, ``BarPathModel`` 4종 = PR 15b/15c 후속.
 
-**PR 15b — Limit / Stop / StopLimit 주문 (Phase 2)**
-- Phase 1 의 ``OrderBook.add`` market-only 가드 + ``NextBarOpenExecution`` market-only 가드 완화
-- next-bar OHLC 기반 limit/stop 체결 판정 (PESSIMISTIC default)
-- limit maker/taker 판단 (open 즉시 체결 vs limit 가격 체결)
-- TIF/expires_at 은 GTC 중심 유지, 만료 처리는 후속 PR
+**PR 15b — Limit / Stop / StopLimit 주문 (Phase 2 완료)**
+- ``OrderBook.add`` 가 ``intent.type ∈ {market, limit, stop, stop_limit}`` 모두 수용. 가격 필드 정합성 검증:
+  - ``market``: ``limit_price``/``stop_price`` 모두 None 강제
+  - ``limit``: ``limit_price`` 필수, ``stop_price`` 금지
+  - ``stop``: ``stop_price`` 필수, ``limit_price`` 금지
+  - ``stop_limit``: ``limit_price`` + ``stop_price`` 둘 다 필수
+- ``tif="GTC"`` + ``expires_at=None`` 가드 그대로 (만료/취소 lifecycle 후속 PR).
+- ``NextBarOpenExecution.try_fill`` PESSIMISTIC 분기 (spec §3.10):
+  - market: 기존 + bps slippage (PR 15a)
+  - limit BUY: ``open<=L`` → open(taker), ``low<=L`` → L(maker), else no fill
+  - limit SELL: ``open>=L`` → open(taker), ``high>=L`` → L(maker), else no fill
+  - stop BUY: ``open>=S`` → open(taker), ``high>=S`` → S(taker), else no fill
+  - stop SELL: ``open<=S`` → open(taker), ``low<=S`` → S(taker), else no fill
+  - stop_limit: stop trigger + 같은 봉 limit 체결 가능 시 fill. trigger 만 되고 limit 미도달이면 no fill.
+- maker/taker 분류: market/stop = taker, limit immediate-at-open = taker, limit-at-L = maker, stop_limit limit-leg-at-L = maker.
+- slippage_bps 는 market 에만 적용. limit/stop/stop_limit 은 OHLC 기반 정확 가격에 체결.
+- **PR 15b 한계 (문서화)**: stop_limit 의 stop trigger 상태가 다중 봉에 걸쳐 보존되지 않음. trigger 후 limit 미도달이면 다음 봉에서 stop 이 재평가됨. ``Order.triggered`` 상태 도입은 후속 PR.
+
+**PR 15c — BarPathModel 4종 정책 (Phase 2)**
+- spec enum (``BarPathModel.{PESSIMISTIC, OPTIMISTIC, OPEN_TO_CLOSE, OHLC_ORDER}``) vs 코드 enum 정렬
+- 같은 봉 내 TP/SL/limit/stop 동시 도달 시 정책별 우선순위 명확화
+- random 정책은 ``random_seed`` 재현성 확보 시에만 도입, 안 되면 명시 제외
 
 **PR 15c — BarPathModel 4종 정책 (Phase 2)**
 - spec enum vs 코드 enum 정렬 확인 후 통일

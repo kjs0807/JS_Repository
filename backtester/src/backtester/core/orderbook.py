@@ -10,6 +10,12 @@ Phase 1 OrderBook 범위 (spec §20 PR 4):
   - `expire_pending`: GTC + expires_at=None만 지원하므로 항상 빈 리스트 반환.
     실제 만료 케이스 테스트는 Phase 1.5+.
 
+Phase 2 PR 15b:
+- `add` 가 ``intent.type ∈ {market, limit, stop, stop_limit}`` 모두 허용.
+- limit/stop_limit 은 ``limit_price`` 필수, stop/stop_limit 은 ``stop_price`` 필수.
+- ``tif="GTC"`` + ``expires_at=None`` 가드는 그대로 (만료/취소 lifecycle 은 후속 PR).
+- ``modify`` / ``expire_pending`` 는 Phase 1 그대로 (TIF/expiry 도입 시 활성).
+
 Risk rejection으로 인한 'rejected' state 진입은 OrderBook이 아니라 Engine 책임.
 """
 
@@ -81,38 +87,66 @@ class OrderBook:
 
         Sizer가 SizeSpec을 실 단위로 변환한 결과(`sized_quantity`)를 받는다.
 
-        Phase 1 정상 처리 범위 (spec §17.1, §3.7):
-        - `intent.type == "market"`만 허용
-        - `intent.tif == "GTC"` + `intent.expires_at is None`만 허용
-        - `intent.limit_price`, `intent.stop_price`는 사용 안 됨 (None이어야 함)
-        - `sized_quantity > 0` (Sizer는 절대값을 반환)
+        Phase 2 PR 15b 정상 처리 범위:
+        - ``intent.type ∈ {"market", "limit", "stop", "stop_limit"}``
+        - ``intent.tif == "GTC"`` + ``intent.expires_at is None`` (TIF/만료는 후속 PR)
+        - 가격 필드 정합성:
+            - market: ``limit_price``/``stop_price`` 모두 None 이어야 함
+            - limit: ``limit_price`` 필수
+            - stop: ``stop_price`` 필수
+            - stop_limit: ``limit_price`` + ``stop_price`` 둘 다 필수
+        - ``sized_quantity > 0`` (Sizer 가 절대값을 반환)
 
-        그 외 입력은 NotImplementedError("Phase 2") 또는 ValueError로 차단된다.
-        특히 expire_pending이 항상 []를 반환하므로 expires_at이 있는 주문이 통과되면
-        영원히 active로 남는 버그가 된다 — 입구에서 막는다.
+        그 외 입력은 NotImplementedError 또는 ValueError 로 차단. 특히 ``expire_pending``
+        이 항상 []를 반환하므로 ``expires_at`` 이 있는 주문이 통과되면 영원히 active 로
+        남는 버그가 된다 — 입구에서 막는다.
         """
-        # Phase 1 주문 타입 제한
-        if intent.type != "market":
+        if intent.type not in ("market", "limit", "stop", "stop_limit"):
             raise NotImplementedError(
-                f"OrderIntent.type={intent.type!r} is Phase 2 "
-                f"(Phase 1 supports 'market' only)"
+                f"OrderIntent.type={intent.type!r} is not supported "
+                f"(Phase 2 PR 15b supports market / limit / stop / stop_limit)"
             )
         if intent.tif != "GTC":
             raise NotImplementedError(
-                f"OrderIntent.tif={intent.tif!r} is Phase 2 "
-                f"(Phase 1 supports 'GTC' only)"
+                f"OrderIntent.tif={intent.tif!r} is not supported "
+                f"(Phase 1.5+ supports 'GTC' only; IOC/FOK/DAY 후속 PR)"
             )
         if intent.expires_at is not None:
             raise NotImplementedError(
-                f"OrderIntent.expires_at={intent.expires_at!r} is Phase 1.5+ "
-                f"(Phase 1 supports expires_at=None only)"
+                f"OrderIntent.expires_at={intent.expires_at!r} is not supported "
+                f"(만료 처리는 후속 PR)"
             )
-        if intent.limit_price is not None or intent.stop_price is not None:
-            raise NotImplementedError(
-                f"limit_price/stop_price are Phase 2 (got "
-                f"limit_price={intent.limit_price!r}, stop_price={intent.stop_price!r})"
-            )
-        # 사이즈 검증
+
+        # 가격 필드 정합성
+        if intent.type == "market":
+            if intent.limit_price is not None or intent.stop_price is not None:
+                raise ValueError(
+                    "market order must not have limit_price or stop_price; got "
+                    f"limit_price={intent.limit_price!r}, stop_price={intent.stop_price!r}"
+                )
+        elif intent.type == "limit":
+            if intent.limit_price is None:
+                raise ValueError("limit order requires limit_price")
+            if intent.stop_price is not None:
+                raise ValueError(
+                    "limit order must not have stop_price; got "
+                    f"stop_price={intent.stop_price!r}"
+                )
+        elif intent.type == "stop":
+            if intent.stop_price is None:
+                raise ValueError("stop order requires stop_price")
+            if intent.limit_price is not None:
+                raise ValueError(
+                    "stop order must not have limit_price; got "
+                    f"limit_price={intent.limit_price!r}"
+                )
+        else:  # stop_limit
+            if intent.limit_price is None or intent.stop_price is None:
+                raise ValueError(
+                    "stop_limit order requires both limit_price and stop_price; got "
+                    f"limit_price={intent.limit_price!r}, stop_price={intent.stop_price!r}"
+                )
+
         if sized_quantity <= 0:
             raise ValueError(
                 f"sized_quantity must be > 0 (Sizer returns absolute size); "

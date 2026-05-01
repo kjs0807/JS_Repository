@@ -60,28 +60,45 @@ def test_orderbook_add_assigns_unique_ids() -> None:
     assert len(ob) == 2
 
 
-# ---------- Phase 1 주문 제한 강제 ------------------------------------------
+# ---------- 주문 타입별 정상 진입 (PR 15b) ----------------------------------
 
 
-@pytest.mark.parametrize("order_type", ["limit", "stop", "stop_limit"])
-def test_orderbook_add_rejects_non_market_type(order_type: str) -> None:
-    """Phase 1: type='market'만 허용."""
+@pytest.mark.parametrize(
+    "order_type, limit_price, stop_price",
+    [
+        ("limit", Decimal("50000"), None),
+        ("stop", None, Decimal("50000")),
+        ("stop_limit", Decimal("50000"), Decimal("49500")),
+    ],
+)
+def test_orderbook_add_accepts_limit_stop_variants(
+    order_type: str,
+    limit_price: Decimal | None,
+    stop_price: Decimal | None,
+) -> None:
+    """PR 15b: limit / stop / stop_limit 정상 진입 + price 필드 보존."""
     ob = OrderBook()
     intent = OrderIntent(
         symbol="BTCUSDT",
         side="buy",
         type=order_type,  # type: ignore[arg-type]
         size_spec=TargetUnits(units=Decimal("1")),
-        limit_price=Decimal("50000") if "limit" in order_type else None,
-        stop_price=Decimal("50000") if "stop" in order_type else None,
+        limit_price=limit_price,
+        stop_price=stop_price,
     )
-    with pytest.raises(NotImplementedError, match="Phase 2"):
-        ob.add(intent, Decimal("1"), TS)
+    order = ob.add(intent, Decimal("1"), TS)
+    assert order.state == "pending"
+    assert order.intent.type == order_type
+    assert order.intent.limit_price == limit_price
+    assert order.intent.stop_price == stop_price
+
+
+# ---------- TIF / expires_at / price 정합성 가드 ----------------------------
 
 
 @pytest.mark.parametrize("tif", ["IOC", "FOK", "DAY"])
 def test_orderbook_add_rejects_non_gtc_tif(tif: str) -> None:
-    """Phase 1: tif='GTC'만 허용."""
+    """PR 15b 까지는 tif='GTC'만 허용. IOC/FOK/DAY 는 후속 PR."""
     ob = OrderBook()
     intent = OrderIntent(
         symbol="BTCUSDT",
@@ -90,12 +107,12 @@ def test_orderbook_add_rejects_non_gtc_tif(tif: str) -> None:
         size_spec=TargetUnits(units=Decimal("1")),
         tif=tif,  # type: ignore[arg-type]
     )
-    with pytest.raises(NotImplementedError, match="Phase 2"):
+    with pytest.raises(NotImplementedError, match="GTC"):
         ob.add(intent, Decimal("1"), TS)
 
 
 def test_orderbook_add_rejects_expires_at() -> None:
-    """expires_at이 있으면 expire_pending이 [] 반환이라 영원히 active로 남음 → 차단."""
+    """expires_at 이 있으면 expire_pending 이 [] 반환이라 영원히 active 로 남음 → 차단."""
     ob = OrderBook()
     intent = OrderIntent(
         symbol="BTCUSDT",
@@ -104,11 +121,12 @@ def test_orderbook_add_rejects_expires_at() -> None:
         size_spec=TargetUnits(units=Decimal("1")),
         expires_at=TS + timedelta(days=1),
     )
-    with pytest.raises(NotImplementedError, match="Phase 1.5"):
+    with pytest.raises(NotImplementedError, match="expires_at"):
         ob.add(intent, Decimal("1"), TS)
 
 
 def test_orderbook_add_rejects_limit_price_on_market() -> None:
+    """market 은 limit_price/stop_price 가 None 이어야 한다."""
     ob = OrderBook()
     intent = OrderIntent(
         symbol="BTCUSDT",
@@ -117,7 +135,72 @@ def test_orderbook_add_rejects_limit_price_on_market() -> None:
         size_spec=TargetUnits(units=Decimal("1")),
         limit_price=Decimal("50000"),
     )
-    with pytest.raises(NotImplementedError, match="Phase 2"):
+    with pytest.raises(ValueError, match="market order must not have"):
+        ob.add(intent, Decimal("1"), TS)
+
+
+def test_orderbook_add_rejects_limit_without_limit_price() -> None:
+    ob = OrderBook()
+    intent = OrderIntent(
+        symbol="BTCUSDT",
+        side="buy",
+        type="limit",
+        size_spec=TargetUnits(units=Decimal("1")),
+        limit_price=None,
+    )
+    with pytest.raises(ValueError, match="limit order requires limit_price"):
+        ob.add(intent, Decimal("1"), TS)
+
+
+def test_orderbook_add_rejects_stop_without_stop_price() -> None:
+    ob = OrderBook()
+    intent = OrderIntent(
+        symbol="BTCUSDT",
+        side="buy",
+        type="stop",
+        size_spec=TargetUnits(units=Decimal("1")),
+        stop_price=None,
+    )
+    with pytest.raises(ValueError, match="stop order requires stop_price"):
+        ob.add(intent, Decimal("1"), TS)
+
+
+def test_orderbook_add_rejects_stop_limit_missing_either_price() -> None:
+    ob = OrderBook()
+    intent_only_limit = OrderIntent(
+        symbol="BTCUSDT",
+        side="buy",
+        type="stop_limit",
+        size_spec=TargetUnits(units=Decimal("1")),
+        limit_price=Decimal("50000"),
+        stop_price=None,
+    )
+    with pytest.raises(ValueError, match="stop_limit"):
+        ob.add(intent_only_limit, Decimal("1"), TS)
+    intent_only_stop = OrderIntent(
+        symbol="BTCUSDT",
+        side="buy",
+        type="stop_limit",
+        size_spec=TargetUnits(units=Decimal("1")),
+        limit_price=None,
+        stop_price=Decimal("49500"),
+    )
+    with pytest.raises(ValueError, match="stop_limit"):
+        ob.add(intent_only_stop, Decimal("1"), TS)
+
+
+def test_orderbook_add_rejects_limit_with_stop_price_set() -> None:
+    """limit 은 stop_price 가 None 이어야 한다 (stop_limit 와 구분)."""
+    ob = OrderBook()
+    intent = OrderIntent(
+        symbol="BTCUSDT",
+        side="buy",
+        type="limit",
+        size_spec=TargetUnits(units=Decimal("1")),
+        limit_price=Decimal("50000"),
+        stop_price=Decimal("49500"),
+    )
+    with pytest.raises(ValueError, match="limit order must not have stop_price"):
         ob.add(intent, Decimal("1"), TS)
 
 
