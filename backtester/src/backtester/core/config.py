@@ -430,6 +430,23 @@ def _exchange_rule_from_dict(data: dict[str, Any]) -> Any:
     )
 
 
+def _margin_model_to_dict(model: Any) -> dict[str, Any]:
+    """PR margin-yaml: liquidation 재현성을 위해 MarginModel 도 영속화."""
+    return {
+        "maintenance_margin_rate": str(model.maintenance_margin_rate),
+        "liquidation_fee_rate": str(model.liquidation_fee_rate),
+    }
+
+
+def _margin_model_from_dict(data: dict[str, Any]) -> Any:
+    from backtester.instruments.base import MarginModel
+
+    return MarginModel(
+        maintenance_margin_rate=Decimal(data["maintenance_margin_rate"]),
+        liquidation_fee_rate=Decimal(data.get("liquidation_fee_rate", "0")),
+    )
+
+
 def _instrument_to_dict(inst: Instrument) -> dict[str, Any]:
     out: dict[str, Any] = {
         "symbol": inst.symbol,
@@ -444,11 +461,14 @@ def _instrument_to_dict(inst: Instrument) -> dict[str, Any]:
     }
     if inst.exchange_rule is not None:
         out["exchange_rule"] = _exchange_rule_to_dict(inst.exchange_rule)
+    if inst.margin_model is not None:
+        out["margin_model"] = _margin_model_to_dict(inst.margin_model)
     return out
 
 
 def _instrument_from_dict(data: dict[str, Any]) -> Instrument:
     rule_data = data.get("exchange_rule")
+    margin_data = data.get("margin_model")
     return Instrument(
         symbol=data["symbol"],
         asset_class=data["asset_class"],
@@ -461,6 +481,9 @@ def _instrument_from_dict(data: dict[str, Any]) -> Instrument:
         fee_model=_fee_model_from_dict(data["fee_model"]),
         exchange_rule=(
             _exchange_rule_from_dict(rule_data) if rule_data is not None else None
+        ),
+        margin_model=(
+            _margin_model_from_dict(margin_data) if margin_data is not None else None
         ),
     )
 

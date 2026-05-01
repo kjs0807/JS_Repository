@@ -126,12 +126,19 @@ def test_factory_yaml_round_trip(tmp_path: Path) -> None:
     text = yaml_path.read_text(encoding="utf-8")
     assert "BTCUSDT" in text
     assert "exchange_rule" in text
-    assert "margin_model" not in text  # 직렬화 안 함 (instrument helper 미지원 — 후속 PR)
+    # PR margin-yaml: liquidation 재현성 — margin_model 도 영속화 + restore.
+    assert "margin_model" in text
+    assert "maintenance_margin_rate" in text
     restored = BacktestConfig.from_yaml(yaml_path)
     assert restored.initial_equity == Decimal("50000")
     assert restored.allow_short is True
     assert restored.strategy_name == "bbkc_legacy_compat"
     assert restored.strategy_params["leverage"] == "3"
+    # margin_model 정확히 round-trip
+    inst = restored.instruments[0]
+    assert inst.margin_model is not None
+    assert inst.margin_model.maintenance_margin_rate == Decimal("0.005")
+    assert inst.margin_model.liquidation_fee_rate == Decimal("0.0006")
 
 
 # ---------- 4. funding_model 주입 ------------------------------------------
