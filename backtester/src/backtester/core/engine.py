@@ -159,12 +159,26 @@ class BacktestEngine:
         self.risk = RiskManager(config.risk_limits)
         self.execution = self._build_execution_model()
 
-        # PR E: FundingProcessor (config.funding_models 비어있으면 None — funding 미적용).
+        # PR E + PR Q: FundingProcessor (config.funding_models 비어있으면 None).
+        # ``funding_source_dir`` 가 설정돼 있으면 ``ParquetFundingRateSource`` 를 만들어
+        # FundingProcessor 에 주입 — ``rate_source="from_data_source"`` 모델 활성.
+        funding_rate_source = None
+        if config.funding_source_dir is not None:
+            from backtester.data.funding_source import ParquetFundingRateSource
+
+            funding_rate_source = ParquetFundingRateSource(config.funding_source_dir)
         self.funding_processor: FundingProcessor | None = (
-            FundingProcessor(config.funding_models)
+            FundingProcessor(config.funding_models, rate_source=funding_rate_source)
             if config.funding_models
             else None
         )
+
+        # PR Q — funding parquet 을 run_dir/funding/ 으로 self-contained 복사 (있을 때만).
+        if (
+            config.funding_source_dir is not None
+            and config.persist_run_data != "none"
+        ):
+            self._persist_funding_artifacts()
 
         self.current_snapshots: dict[str, MarketSnapshot] = {}
         self._bar_count = 0
@@ -323,6 +337,22 @@ class BacktestEngine:
             for tf, df in tfs.items():
                 target = bars_dir / f"{sanitize_symbol(symbol)}_{tf}.parquet"
                 df.write_parquet(target)
+
+    def _persist_funding_artifacts(self) -> None:
+        """PR Q: funding parquet 을 run_dir/funding/ 으로 복사 — rebuild/walkforward 가
+        외부 cache 없이 funding 을 재현할 수 있도록 self-contained.
+        """
+        from backtester.data.base import sanitize_symbol
+
+        src_dir = self.config.funding_source_dir
+        if src_dir is None or not src_dir.exists():
+            return
+        target_dir = self.run_dir / "funding"
+        target_dir.mkdir(exist_ok=True)
+        for symbol in self.config.timeframes_per_symbol:
+            src = src_dir / f"funding_{sanitize_symbol(symbol)}.parquet"
+            if src.exists():
+                shutil.copy2(src, target_dir / src.name)
 
     def _persist_results(self) -> None:
         """results/는 EventLog 캐시 (spec §6.3). Phase 1: equity_curve.parquet만."""

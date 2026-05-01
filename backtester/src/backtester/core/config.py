@@ -145,6 +145,11 @@ class BacktestConfig:
     # PR E — 심볼별 funding 모델 (perp 등). 비어있으면 funding 미적용.
     funding_models: dict[str, FundingModel] = field(default_factory=dict)
 
+    # PR Q — ``FundingModel(rate_source="from_data_source")`` 사용 시 funding rate
+    # 시계열 base directory. ``{dir}/funding_{symbol}.parquet`` 파일들을 읽는다.
+    # ``None`` 이면 from_data_source 모드는 DataError 로 차단.
+    funding_source_dir: Path | None = None
+
     def __post_init__(self) -> None:
         # 숫자 한도
         if self.snapshot_every_bars < 1:
@@ -248,6 +253,11 @@ class BacktestConfig:
             },
             "allow_short": bool(self.allow_short),
             "allow_flip": bool(self.allow_flip),
+            "funding_source_dir": (
+                str(self.funding_source_dir)
+                if self.funding_source_dir is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -310,6 +320,8 @@ class BacktestConfig:
             kwargs["allow_short"] = bool(data["allow_short"])
         if "allow_flip" in data:
             kwargs["allow_flip"] = bool(data["allow_flip"])
+        if "funding_source_dir" in data and data["funding_source_dir"] is not None:
+            kwargs["funding_source_dir"] = Path(data["funding_source_dir"])
         return cls(**kwargs)
 
     def to_yaml(self, path: Path) -> None:

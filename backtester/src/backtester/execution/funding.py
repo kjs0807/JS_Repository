@@ -23,11 +23,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from backtester.core.snapshot import MarketSnapshot
 from backtester.instruments.base import Instrument
 from backtester.portfolio.position import Position
+
+if TYPE_CHECKING:
+    from backtester.data.funding_source import FundingRateSource
 
 CashFlowKind = Literal["funding", "settlement"]
 RateSource = Literal["constant", "from_data_source"]
@@ -104,8 +107,15 @@ class FundingProcessor:
     wiring 시점에 ``data_source`` 인자를 통해 주입.
     """
 
-    def __init__(self, models: dict[str, FundingModel]) -> None:
+    def __init__(
+        self,
+        models: dict[str, FundingModel],
+        rate_source: FundingRateSource | None = None,
+    ) -> None:
         self.models = dict(models)
+        # PR Q — ``rate_source="from_data_source"`` 활성용. None 이면 from_data_source
+        # 모드는 DataError 로 차단 (strict 미구현).
+        self.rate_source = rate_source
 
     def process(
         self,
@@ -119,7 +129,13 @@ class FundingProcessor:
 
         ``None`` 반환 케이스:
         - 모델 미등록 / interval 경계 아님 / position flat
+
+        PR Q: ``rate_source="from_data_source"`` 일 때 ``self.rate_source`` 가
+        설정돼 있어야 한다. ``get_rate(symbol, ts)`` 가 None 이면 ``DataError``
+        (strict reject 정책). ffill 등 보정은 후속 PR.
         """
+        from backtester.core.errors import DataError
+
         del instrument  # 현 phase 에서는 instrument 메타데이터 미사용
 
         model = self.models.get(symbol)
@@ -133,9 +149,22 @@ class FundingProcessor:
         if model.rate_source == "constant":
             assert model.constant_rate is not None  # __post_init__ 검증
             rate = model.constant_rate
+        elif model.rate_source == "from_data_source":
+            if self.rate_source is None:
+                raise DataError(
+                    f"FundingModel(rate_source='from_data_source') for {symbol!r} "
+                    f"requires a FundingRateSource — none configured"
+                )
+            looked = self.rate_source.get_rate(symbol, ts)
+            if looked is None:
+                raise DataError(
+                    f"funding rate missing at {ts.isoformat()} for {symbol!r} "
+                    f"(strict reject — no funding_gap_policy='ffill' configured)"
+                )
+            rate = looked
         else:
             raise NotImplementedError(
-                "rate_source='from_data_source' is wired in subsequent Phase 1.5 PRs"
+                f"unknown rate_source: {model.rate_source!r}"
             )
 
         # mark price 우선, 없으면 close

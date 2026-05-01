@@ -207,11 +207,15 @@ def test_processor_uses_mark_price_when_available() -> None:
     assert cf.amount == Decimal("-5.0100")
 
 
-def test_processor_from_data_source_raises_until_wired() -> None:
-    """rate_source='from_data_source' 는 후속 PR 에서 wiring 예정이므로 명시적 NIE."""
+def test_processor_from_data_source_without_source_raises_data_error() -> None:
+    """PR Q: rate_source='from_data_source' 가 활성. ``FundingRateSource`` 미설정
+    시 ``DataError`` (이전엔 NotImplementedError 였지만 이제 wiring 활성화).
+    """
+    from backtester.core.errors import DataError
+
     m = FundingModel(interval_hours=8, rate_source="from_data_source")
     proc = FundingProcessor(models={"BTCUSDT": m})
-    with pytest.raises(NotImplementedError, match="from_data_source"):
+    with pytest.raises(DataError, match="requires a FundingRateSource"):
         proc.process(
             symbol="BTCUSDT",
             ts=datetime(2026, 3, 1, 8, 0, tzinfo=UTC),
