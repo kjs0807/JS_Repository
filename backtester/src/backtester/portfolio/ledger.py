@@ -117,7 +117,6 @@ class Ledger:
         - sell: cash += size * price - fee.
         (short open/close 도 동일 부호 — sell 은 cash 들어옴, buy 는 cash 나감.)
         """
-        del instrument  # contract_multiplier 등 활성은 후속 PR (PR I leverage)
         size = to_decimal(fill.size)
         price = to_decimal(fill.price)
         fee = to_decimal(fill.fee)
@@ -128,12 +127,19 @@ class Ledger:
         prev_avg = position.avg_price
         new_size = prev_size + delta
 
+        # PR P — open from flat / flip 시 liquidation_price 계산용 equity (pre-fill).
+        equity_before = self.equity
+
         if prev_size == 0:
             # Case 1: open from flat
             position.size = new_size
             position.avg_price = price
             # PR N — 새 포지션 ts 기록.
             position.opened_at = fill.timestamp
+            # PR P — liquidation_price 계산 (instrument.margin_model 있을 때만).
+            position.liquidation_price = self._compute_liquidation_price(
+                instrument, new_size, price, equity_before
+            )
         elif (prev_size > 0 and delta > 0) or (prev_size < 0 and delta < 0):
             # Case 2: same direction extend → 가중평균. opened_at 유지.
             position.avg_price = (
@@ -156,8 +162,10 @@ class Ledger:
                 position.size = new_size
                 if new_size == 0:
                     position.avg_price = Decimal("0")
+                    position.liquidation_price = None  # PR P
                     # opened_at 은 일부러 그대로 — 다음 open 이 덮어쓴다.
-                # else avg_price stays
+                # else avg_price stays (liquidation_price 도 부분 reduce 시 이론상 갱신
+                # 가능하지만, 1차에서는 entry 시점 가격 유지 — 보수적 방향).
             else:
                 # Case 5: flip. Sizer 는 allow_flip=False 면 여기 도달 안 시킴.
                 # 기존 포지션 전부 청산 + 잔여로 반대 방향 신규 개시.
@@ -165,6 +173,10 @@ class Ledger:
                 position.avg_price = price  # 신규 포지션의 avg = fill price
                 # PR N — 새 (반대) 포지션 ts 기록.
                 position.opened_at = fill.timestamp
+                # PR P — 새 포지션 liquidation_price 갱신.
+                position.liquidation_price = self._compute_liquidation_price(
+                    instrument, new_size, price, equity_before
+                )
 
         # Cash 반영
         if fill.side == "buy":
@@ -179,6 +191,39 @@ class Ledger:
             position.unrealized_pnl = Decimal("0")
 
         position.last_update = fill.timestamp
+
+    @staticmethod
+    def _compute_liquidation_price(
+        instrument: Instrument,
+        new_size: Decimal,
+        avg_price: Decimal,
+        equity_before: Decimal,
+    ) -> Decimal | None:
+        """PR P: isolated-margin 근사 liquidation_price.
+
+        ``new_size`` 는 signed (long > 0, short < 0). leverage L = notional /
+        equity_at_open. mmr = margin_model.maintenance_margin_rate.
+        long  liq = avg * (1 - 1/L + mmr)
+        short liq = avg * (1 + 1/L - mmr)
+        equity_before <= 0 또는 margin_model 미설정 → None.
+        """
+        if instrument.margin_model is None:
+            return None
+        if equity_before <= 0 or new_size == 0 or avg_price <= 0:
+            return None
+        notional = abs(new_size) * avg_price
+        leverage = notional / equity_before
+        if leverage <= 0:
+            return None
+        mmr = instrument.margin_model.maintenance_margin_rate
+        if new_size > 0:
+            liq = avg_price * (Decimal("1") - Decimal("1") / leverage + mmr)
+        else:
+            liq = avg_price * (Decimal("1") + Decimal("1") / leverage - mmr)
+        # 음수 가격은 의미 없음
+        if liq < 0:
+            return Decimal("0")
+        return liq
 
     def on_market(self, snapshots: dict[str, MarketSnapshot]) -> None:
         """mark-to-market — unrealized_pnl 갱신 + equity_curve에 (ts, equity) 적재.

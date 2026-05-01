@@ -87,6 +87,38 @@ class ExchangeRule:
 
 
 @dataclass(frozen=True)
+class MarginModel:
+    """Isolated-margin 근사 모델 (PR P).
+
+    Bybit 같은 crypto perp 의 cross/isolated 전체 매트릭스를 완전 재현하지 않고, 단일
+    symbol isolated 근사로 liquidation 계산을 활성한다.
+
+    공식 (isolated, mark price 기준):
+    - long liq_price = avg * (1 - 1/L + mmr)
+    - short liq_price = avg * (1 + 1/L - mmr)
+    여기서 L = abs(size) * avg / equity_at_open, mmr = maintenance_margin_rate.
+
+    L <= 1 (no leverage) 이면 liq_price ≈ avg * mmr (long) 또는 avg * (2 - mmr) (short)
+    — 사실상 도달하기 어렵다. 누락 효과 없음.
+    """
+
+    maintenance_margin_rate: Decimal
+    liquidation_fee_rate: Decimal = Decimal("0")
+
+    def __post_init__(self) -> None:
+        if self.maintenance_margin_rate < 0 or self.maintenance_margin_rate >= 1:
+            raise ValueError(
+                f"maintenance_margin_rate must be in [0, 1), got "
+                f"{self.maintenance_margin_rate}"
+            )
+        if self.liquidation_fee_rate < 0 or self.liquidation_fee_rate >= 1:
+            raise ValueError(
+                f"liquidation_fee_rate must be in [0, 1), got "
+                f"{self.liquidation_fee_rate}"
+            )
+
+
+@dataclass(frozen=True)
 class Instrument:
     """거래 대상 명세.
 
@@ -113,3 +145,4 @@ class Instrument:
     size_unit: Literal["base_asset", "contracts", "quote_notional"]
     fee_model: FeeModel
     exchange_rule: ExchangeRule | None = None
+    margin_model: MarginModel | None = None  # PR P — liquidation 활성

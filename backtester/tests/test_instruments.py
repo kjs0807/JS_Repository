@@ -71,13 +71,17 @@ def test_instrument_is_frozen() -> None:
         inst.symbol = "ETHUSDT"  # type: ignore[misc]
 
 
-def test_instrument_phase1_no_funding_field() -> None:
-    """Phase 1 Instrument는 funding_model/margin_model/trading_hours 필드를 갖지 않는다."""
+def test_instrument_phase2_5_optional_fields_present() -> None:
+    """PR O / PR P 활성: ``exchange_rule`` / ``margin_model`` 은 Optional 필드로 추가.
+    ``funding_model`` / ``trading_hours`` 는 여전히 Instrument 외부 (BacktestConfig
+    .funding_models / 별도 trading session) 에 둔다.
+    """
     import dataclasses
 
     field_names = {f.name for f in dataclasses.fields(Instrument)}
-    assert "funding_model" not in field_names
-    assert "margin_model" not in field_names
+    assert "exchange_rule" in field_names  # PR O
+    assert "margin_model" in field_names  # PR P
+    assert "funding_model" not in field_names  # config.funding_models 로 분리
     assert "trading_hours" not in field_names
 
 

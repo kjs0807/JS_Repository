@@ -31,6 +31,9 @@ class Position:
     unrealized_pnl: Decimal = Decimal("0")
     last_update: datetime | None = None
     opened_at: datetime | None = None  # PR N — current 활성 포지션 entry ts
+    # PR P — isolated-margin 근사 liquidation_price. 비-leverage 또는 margin_model
+    # 미설정 시 None. flat → 새 포지션 / flip 시 갱신 (Ledger.on_fill).
+    liquidation_price: Decimal | None = None
 
     @property
     def is_flat(self) -> bool:

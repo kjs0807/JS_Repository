@@ -599,6 +599,11 @@ class BacktestEngine:
         # 4. mark-to-market — post-fill 포지션을 봉 close 로 mark + equity_history 적재.
         self.ledger.on_market(snapshots)
 
+        # 4.5 PR P — Liquidation check. on_market 직후, funding 전. position 의
+        # liquidation_price 가 설정돼 있고 봉의 high/low 가 도달했으면 강제 close +
+        # LIQUIDATION 이벤트 + bracket child cancel + SNAPSHOT(reason='liquidation').
+        self._process_liquidations(ts, snapshots)
+
         # 5. PR E + PR G: Funding/Settlement — post-fill, post-mark 포지션으로 계산.
         # funding_processor 가 있으면 봉 마감 시각이 funding boundary 인지 검사.
         # CashFlow → Ledger.on_settle (cash 반영) + SETTLE 이벤트 +
@@ -883,6 +888,107 @@ class BacktestEngine:
                 },
             )
         )
+
+    # ---------- PR P: Liquidation -----------------------------------------
+
+    def _process_liquidations(
+        self,
+        ts: datetime,
+        snapshots: dict[str, MarketSnapshot],
+    ) -> None:
+        """on_market 직후 호출 — 각 non-flat 포지션의 liquidation_price 도달 검사.
+
+        검출:
+        - long (size > 0) + low <= liq_price → 강제 close at liq_price
+        - short (size < 0) + high >= liq_price → 강제 close at liq_price
+
+        처리 (도달 시):
+        1. 강제 close Fill 생성 (price=liq_price, side=close).
+        2. ``Ledger.on_fill`` 으로 cash 반영 + realized PnL.
+        3. ``MarginModel.liquidation_fee_rate`` 적용 — notional × rate 차감.
+        4. LIQUIDATION 이벤트 발행 (symbol, liq_price, size, fee).
+        5. 같은 symbol 의 active bracket child 모두 cancel (reason="liquidation").
+        6. SNAPSHOT(reason='liquidation').
+        """
+        from backtester.core.types import Fill
+
+        assert self._event_log is not None
+
+        for symbol, position in list(self.ledger.positions.items()):
+            if position.is_flat or position.liquidation_price is None:
+                continue
+            snap = snapshots.get(symbol)
+            if snap is None:
+                continue
+            liq = position.liquidation_price
+            triggered = False
+            if position.size > 0 and snap.low <= liq:
+                triggered = True
+            elif position.size < 0 and snap.high >= liq:
+                triggered = True
+            if not triggered:
+                continue
+
+            instrument = self.instrument_registry.get(symbol)
+            close_size = abs(position.size)
+            close_side: Literal["buy", "sell"] = (
+                "sell" if position.size > 0 else "buy"
+            )
+            # Liquidation fee
+            fee_rate = (
+                instrument.margin_model.liquidation_fee_rate
+                if instrument.margin_model is not None
+                else Decimal("0")
+            )
+            notional = close_size * liq
+            fee = notional * fee_rate
+
+            forced_fill = Fill(
+                timestamp=snap.timestamp,
+                symbol=symbol,
+                price=liq,
+                size=close_size,
+                side=close_side,
+                fee=fee,
+                fee_currency=instrument.quote_currency,
+                order_id="liquidation",
+                intent_reason="liquidation",
+            )
+            self.ledger.on_fill(forced_fill, instrument)
+            self._fill_count += 1
+            self._event_log.append(
+                Event(ts=ts, type=EventType.FILL, payload=forced_fill)
+            )
+            self._event_log.append(
+                Event(
+                    ts=ts,
+                    type=EventType.LIQUIDATION,
+                    payload={
+                        "symbol": symbol,
+                        "liquidation_price": str(liq),
+                        "size": str(close_size),
+                        "side": close_side,
+                        "fee": str(fee),
+                    },
+                )
+            )
+            # Cancel active bracket children for this symbol
+            for sibling in list(self.orderbook.get_active()):
+                if sibling.intent.symbol != symbol:
+                    continue
+                cancelled = self.orderbook.cancel(sibling.id, ts)
+                if cancelled:
+                    self._event_log.append(
+                        Event(
+                            ts=ts,
+                            type=EventType.ORDER_CANCELLED,
+                            payload={
+                                "order_id": sibling.id,
+                                "reason": "liquidation",
+                            },
+                        )
+                    )
+            self._emit_snapshot(ts, "liquidation")
 
     # ---------- PR L: OCO + Same-Bar Path 우선순위 -------------------------
 

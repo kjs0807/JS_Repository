@@ -31,10 +31,11 @@ class EventType(str, Enum):
     ORDER_REJECTED = "order_rejected"
     FILL = "fill"
     SETTLE = "settle"
+    LIQUIDATION = "liquidation"  # PR P
     SNAPSHOT = "snapshot"
 
 
-SnapshotReason = Literal["fill", "settlement", "expire", "periodic"]
+SnapshotReason = Literal["fill", "settlement", "expire", "periodic", "liquidation"]
 """SNAPSHOT 이벤트 발행 사유 (spec §3.15).
 
 Phase 1 활성: fill, periodic, expire(만료 케이스 자체가 안 발생하지만 ref).
