@@ -355,9 +355,16 @@ class BacktestEngine:
                 shutil.copy2(src, target_dir / src.name)
 
     def _persist_results(self) -> None:
-        """results/는 EventLog 캐시 (spec §6.3). Phase 1: equity_curve.parquet만."""
-        eq = self.ledger.equity_curve()
-        eq.write_parquet(self.run_dir / "results" / "equity_curve.parquet")
+        """results/는 EventLog 캐시 (spec §6.3). PR U: rebuild_equity_curve 사용 —
+        ``Ledger.equity_curve()`` 는 ``on_market`` 시점만 적재해서 같은 ts 의 funding /
+        liquidation 처리 결과가 누락된다. ``rebuild_equity_curve`` 는 EventLog SNAPSHOT
+        이벤트 (post-fill / post-funding / post-liquidation 모두 포함) 에서 추출하므로
+        cache 와 1차 원본이 항상 일치한다.
+        """
+        from backtester.analysis.rebuild import rebuild_equity_curve
+
+        # rebuild_equity_curve 가 results/ 디렉토리에 직접 write.
+        rebuild_equity_curve(self.run_dir)
 
     def _export_events_parquet(self) -> None:
         """Phase 1.5: events.jsonl → events.parquet (분석 편의용 캐시, spec §6.2).
@@ -597,6 +604,7 @@ class BacktestEngine:
         active_at_start = self._order_oco_aware_active_list(
             self.orderbook.get_active()
         )
+        spawned_in_iteration: list[Order] = []
         for order in active_at_start:
             if not order.is_active:
                 continue  # PR L: sibling fill 이 이 주문을 cancel 했을 수 있음
@@ -624,7 +632,36 @@ class BacktestEngine:
                 and order.intent.bracket is not None
                 and order.intent.bracket.has_any()
             ):
-                self._spawn_bracket_children(order, fill, ts)
+                children = self._spawn_bracket_children(order, fill, ts)
+                spawned_in_iteration.extend(children)
+
+        # PR U: 같은 봉 entry-bar bracket child 체결 시도. 진입 봉의 high/low 가
+        # TP/SL 에 도달하면 같은 봉에서 체결 가능하도록 — crypto 급변 봉에서 SL 보다
+        # 다음 봉까지 살아남는 갭을 차단. OCO + BarPathModel 로 같은 봉 양쪽 도달 시
+        # 우선순위 결정 (PR L 정책 동일).
+        if spawned_in_iteration:
+            children_ordered = self._order_oco_aware_active_list(
+                [c for c in spawned_in_iteration if c.is_active]
+            )
+            for order in children_ordered:
+                if not order.is_active:
+                    continue  # OCO sibling cancel 로 비활성화 가능
+                snap = snapshots.get(order.intent.symbol)
+                if snap is None:
+                    continue
+                instrument = self.instrument_registry.get(order.intent.symbol)
+                fill = self.execution.try_fill(order, snap, instrument)
+                if fill is None:
+                    continue
+                self.orderbook.fill(order.id, fill)
+                self.ledger.on_fill(fill, instrument)
+                self._fill_count += 1
+                self._event_log.append(
+                    Event(ts=ts, type=EventType.FILL, payload=fill)
+                )
+                self._emit_snapshot(ts, "fill")
+                if order.oco_group_id is not None:
+                    self._cancel_oco_siblings(order, ts)
 
         # 4. mark-to-market — post-fill 포지션을 봉 close 로 mark + equity_history 적재.
         self.ledger.on_market(snapshots)
@@ -1089,7 +1126,7 @@ class BacktestEngine:
         parent_order: Order,
         parent_fill: Any,
         ts: datetime,
-    ) -> None:
+    ) -> list[Order]:
         """PR K: entry fill 직후 reduce-only TP/SL child 생성.
 
         - long entry (buy fill): TP = sell limit, SL = sell stop. 둘 다 reduce_only=True.
@@ -1110,6 +1147,7 @@ class BacktestEngine:
         )
         qty = abs(parent_fill.size)
         oco_group_id = f"oco_{parent_order.id}"
+        spawned: list[Order] = []
 
         if bracket.take_profit_price is not None:
             tp_intent = OrderIntent(
@@ -1129,6 +1167,7 @@ class BacktestEngine:
                 oco_group_id=oco_group_id,
             )
             self._emit_order_added(tp_order, qty, ts)
+            spawned.append(tp_order)
 
         if bracket.stop_loss_price is not None:
             sl_intent = OrderIntent(
@@ -1148,6 +1187,9 @@ class BacktestEngine:
                 oco_group_id=oco_group_id,
             )
             self._emit_order_added(sl_order, qty, ts)
+            spawned.append(sl_order)
+
+        return spawned
 
     def _handle_action(self, action: OrderAction, ts: datetime) -> None:
         """PR D: cancel / modify / new 모두 활성. cancel/modify 는 EventLog 에 기록."""

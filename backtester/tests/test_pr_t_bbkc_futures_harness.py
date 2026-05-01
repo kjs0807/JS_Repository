@@ -172,7 +172,8 @@ def test_bbkc_legacy_compat_long_entry_with_bracket(tmp_path: Path) -> None:
             sl_pct=Decimal("0.07"),
             leverage=Decimal("3"),
             margin_pct=Decimal("0.05"),
-            exit_mode="bracket",
+            exit_mode="fixed",
+            rsi_filter=100.0,  # PR U: disable RSI filter for fixture-driven entry
         )
 
     result = BacktestEngine(cfg, factory(), verbose=False).run()
@@ -199,6 +200,7 @@ def test_bbkc_legacy_compat_drop_tp_only_sl_child(tmp_path: Path) -> None:
             tp_pct=Decimal("0.06"),
             leverage=Decimal("3"),
             margin_pct=Decimal("0.05"),
+            rsi_filter=100.0,  # PR U: disable RSI filter
         )
 
     result = BacktestEngine(cfg, factory(), verbose=False).run()
@@ -230,7 +232,8 @@ def _harness_spec(
             sl_pct=Decimal("0.07"),
             leverage=Decimal("3"),
             margin_pct=Decimal("0.05"),
-            exit_mode="bracket",
+            exit_mode="fixed",
+            rsi_filter=100.0,  # PR U: disable RSI filter for fixture-driven entry
         )
 
     return HarnessSpec(
