@@ -1,5 +1,7 @@
-"""Core types and interfaces (PR 1)."""
+"""Core types + config + factory (Phase 2.5+)."""
 
+from backtester.core.config import BacktestConfig, DataSourceConfig
+from backtester.core.config_factory import crypto_perp_backtest_config
 from backtester.core.errors import (
     BacktestError,
     ConfigError,
@@ -10,12 +12,17 @@ from backtester.core.errors import (
     RunDirectoryError,
 )
 from backtester.core.orders import (
+    BracketSpec,
     ClosePosition,
+    FullEquityNotional,
     FullPosition,
+    OrderAction,
     OrderIntent,
     ScaleIn,
     SizeSpec,
+    TargetMarginPct,
     TargetNotional,
+    TargetNotionalPct,
     TargetUnits,
     TargetWeight,
 )
@@ -24,6 +31,10 @@ from backtester.core.snapshot import MarketSnapshot
 from backtester.core.types import BarPathModel, Fill
 
 __all__ = [
+    # config
+    "BacktestConfig",
+    "DataSourceConfig",
+    "crypto_perp_backtest_config",
     # errors
     "BacktestError",
     "ConfigError",
@@ -33,12 +44,17 @@ __all__ = [
     "RiskError",
     "RunDirectoryError",
     # orders
+    "BracketSpec",
     "ClosePosition",
+    "FullEquityNotional",
     "FullPosition",
+    "OrderAction",
     "OrderIntent",
     "ScaleIn",
     "SizeSpec",
+    "TargetMarginPct",
     "TargetNotional",
+    "TargetNotionalPct",
     "TargetUnits",
     "TargetWeight",
     # snapshot

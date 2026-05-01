@@ -2633,6 +2633,27 @@ BB-KC 포팅 경계 (절대 위반 금지):
 
 ---
 
+### Phase 2.5 후속 — Config Preset Layer (✅ 완료)
+
+매번 ``BacktestConfig`` / ``Instrument`` 를 손으로 채우지 않도록 Bybit linear perpetual
+상위 10여 개 심볼의 conservative preset 과 ``crypto_perp_backtest_config()`` factory
+를 도입.
+
+- 기본 자본금 **50,000 USDT**.
+- Preset 심볼: BTCUSDT / ETHUSDT / SOLUSDT / XRPUSDT / BNBUSDT / DOGEUSDT / ADAUSDT /
+  AVAXUSDT / LINKUSDT / TONUSDT.
+- Preset 값 출처: ``Crypto/Bybit_Trading/db/bybit_data.db`` 의 ``products_master`` 테이블
+  (Bybit instruments-info 캐시). TONUSDT 는 DB 미수록으로 LINKUSDT 패턴 보수 추정.
+  실거래 / 정밀 리서치 전에는 Bybit instruments-info 로 다시 fetch 권장.
+- ``crypto_perp_backtest_config(symbol, timeframe, ...)`` 한 번에 fee + exchange_rule
+  + margin_model + 보수 default risk_limits + slippage_bps=2 + allow_short=True 등이
+  모두 채워진 ``BacktestConfig`` 반환. preset / risk_limits / instrument 모두 override 가능.
+- preset 값은 실행 시 ``run_dir/config.yaml`` 에 영속화 — 재현 가능.
+- 후속 PR 후보:
+  * ``BybitInstrumentSpecFetcher`` — REST API 로 preset table 자동 갱신.
+  * Tier 별 maintenance margin / fee tier (현재 단일 default).
+  * ``preset: crypto_perp`` short YAML loader (현재는 Python factory 만).
+
 ### Phase 2.5 (PR H~T) — Crypto Futures Core + Strategy Parity
 
 이 블록은 §3.16 / §13.11 / §17 Phase 2.5를 구현 단위로 쪼갠 것이다. 목표는
