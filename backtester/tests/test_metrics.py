@@ -102,10 +102,11 @@ def test_compute_core_metrics_max_drawdown_basic() -> None:
 def test_compute_core_metrics_calmar_uses_cagr_not_raw_total_return() -> None:
     """Calmar = CAGR / |MDD|, not total_return / |MDD|.
 
-    365 봉, 1000 → 900 monotone, periods_per_year=365 → years=1, CAGR = -0.1.
-    MDD = -0.1 → calmar = -1.0.
+    366 봉 = 365 returns, 1000 → 900 monotone, periods_per_year=365 → years=1,
+    CAGR = -0.1. MDD = -0.1 → calmar = -1.0. ``n-1`` returns 기반이라 봉 수는
+    ``periods_per_year + 1`` 로 잡아야 정확히 1 년에 해당.
     """
-    n = 365
+    n = 366  # 365 returns
     values = [1000.0 - 100.0 * (i / (n - 1)) for i in range(n)]
     df = _equity_df(values)
     m = compute_core_metrics(df, periods_per_year=365)
@@ -116,14 +117,14 @@ def test_compute_core_metrics_calmar_uses_cagr_not_raw_total_return() -> None:
 
 def test_compute_core_metrics_calmar_scales_with_periods_per_year() -> None:
     """같은 시리즈에서 periods_per_year 가 작아지면 years 가 커져 CAGR 가 작아짐 →
-    calmar 절대값도 작아짐. (n=2 봉, 큰 periods_per_year 면 years 가 매우 작음 → CAGR
-    가 폭발적으로 작아짐.)"""
-    df = _equity_df([1000.0, 900.0])
-    m_short = compute_core_metrics(df, periods_per_year=2)  # years=1, CAGR=-0.1
-    m_long = compute_core_metrics(df, periods_per_year=365)  # years≈0.0055, CAGR≈-1
+    calmar 절대값도 작아짐. (n=2 봉 = 1 return, 큰 periods_per_year 면 years 가 매우
+    작아 CAGR 가 폭발적으로 커짐.)"""
+    df = _equity_df([1000.0, 900.0])  # n=2 → returns 1개
+    m_short = compute_core_metrics(df, periods_per_year=1)  # years=1, CAGR=-0.1
+    m_long = compute_core_metrics(df, periods_per_year=365)  # years≈0.00274, CAGR≈-1
     # |calmar_long| > |calmar_short| (annualization 효과)
     assert abs(m_long["calmar_ratio"]) > abs(m_short["calmar_ratio"])
-    # 짧은 periods_per_year 에서는 calmar ≈ -1.0 (cagr=-0.1, MDD=-0.1)
+    # periods_per_year=1 에서는 1 return = 1 year → calmar = -0.1 / 0.1 = -1.0
     assert m_short["calmar_ratio"] == pytest.approx(-1.0, abs=1e-6)
 
 

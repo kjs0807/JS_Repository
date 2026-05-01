@@ -22,8 +22,10 @@
 음수 초과수익을 제곱·평균·제곱근. 단순히 음수 수익률 부분집합의 std 가 아님 (그
 방식은 손실폭이 일정하면 분산 ≈ 0 으로 sortino 가 비정상적으로 커짐).
 
-**Calmar 정의**: CAGR / |MDD|. CAGR = (eq_last/eq_first)^(periods_per_year/n_periods) − 1.
-``periods_per_year`` 를 명시적으로 사용해 기간 표준화.
+**Calmar 정의**: CAGR / |MDD|. CAGR = ``(eq_last/eq_first)^(1/years) − 1`` 에서
+``years = (n_periods − 1) / periods_per_year``. ``n_periods − 1`` 은 ``pct_change`` 가
+실제로 만드는 return 구간 수 — Sharpe/Sortino/Vol 가 같은 ``n−1`` returns 위에서
+``sqrt(periods_per_year)`` 로 연환산하는 정의와 정렬된다.
 
 quantstats 의존성을 추가하지 않는다 — polars + stdlib 만 사용. 더 풍부한 메트릭은 추후
 PR 또는 별도 통합 레이어에서 도입.
@@ -137,7 +139,8 @@ def compute_core_metrics(
         mdd_pct = 0.0
         mdd_duration = 0
 
-    # Calmar = CAGR / |MDD|. CAGR = (eq_last/eq_first)^(periods_per_year/n) - 1.
+    # Calmar = CAGR / |MDD|. CAGR 는 returns 구간 수 (n - 1) 로 환산해 Sharpe/
+    # Vol 와 동일한 시간 기반을 쓴다 (pct_change 는 n - 1 개 return 을 만든다).
     # eq_first <= 0 은 BacktestConfig 가 차단 (initial_equity > 0). eq_last <= 0
     # (catastrophic loss) 은 power 가 정의되지 않아 nan 처리.
     if (
@@ -146,7 +149,7 @@ def compute_core_metrics(
         and eq_last > 0
         and periods_per_year > 0
     ):
-        years = n / periods_per_year
+        years = (n - 1) / periods_per_year
         cagr = (eq_last / eq_first) ** (1.0 / years) - 1.0
     else:
         cagr = float("nan")
