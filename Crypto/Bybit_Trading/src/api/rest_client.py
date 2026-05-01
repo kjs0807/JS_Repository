@@ -166,6 +166,20 @@ class BybitRestClient:
         if not accounts:
             return {"equity": 0.0, "available": 0.0}
         acct = accounts[0]
+        usdt = next(
+            (coin for coin in acct.get("coin", []) if coin.get("coin") == "USDT"),
+            {},
+        )
+        if usdt:
+            wallet_balance = float(usdt.get("walletBalance", 0) or 0)
+            available_raw = (
+                usdt.get("availableToWithdraw")
+                or usdt.get("equity")
+                or usdt.get("walletBalance")
+                or 0
+            )
+            available = float(available_raw or 0)
+            return {"equity": wallet_balance, "available": available}
         return {
             "equity": float(acct.get("totalEquity", 0)),
             "available": float(acct.get("totalAvailableBalance", 0)),

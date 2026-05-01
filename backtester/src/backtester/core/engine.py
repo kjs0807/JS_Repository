@@ -365,7 +365,7 @@ class BacktestEngine:
         if ds.type == "csv":
             return CSVDataSource(ds.base_dir)
         if ds.type == "bybit":
-            return BybitDataSource(ds.base_dir)
+            return BybitDataSource(ds.base_dir, category=ds.bybit_category)
         raise NotImplementedError(  # pragma: no cover — Config 검증이 차단
             f"DataSource type {ds.type!r} is Phase 2+"
         )
@@ -439,17 +439,12 @@ class BacktestEngine:
                 slippage_bps=self.config.slippage_bps,
                 bar_path_model=bpm,
             )
-        if em == "atr_slippage":
-            # ATR slippage 는 atr_provider 주입이 필요해 Engine 자동 wiring 불가.
-            # 사용자가 명시적으로 ``AtrSlippageExecution`` 을 만들어 ``BacktestEngine`` 의
-            # 후속 패치 또는 strategy-level injection 으로 사용 (PR 15+ / PR 16).
-            raise NotImplementedError(
-                "execution_model='atr_slippage' requires explicit "
-                "AtrSlippageExecution construction with atr_provider injection; "
-                "Engine auto-wiring is deferred to subsequent PRs"
-            )
+        # ``atr_slippage`` 는 PR 16 prep 2차 에서 config-level 로 차단 (ConfigError) —
+        # atr_provider 주입은 코드 레벨 작업이며, config 표현 방식이 결정되기 전까지
+        # ``BacktestConfig`` 만으로는 해당 모델을 활성화하지 않는다.
         raise NotImplementedError(  # pragma: no cover — Config 검증이 차단
-            f"execution_model {em!r} is Phase 2+"
+            f"execution_model {em!r} is not config-supported "
+            f"(use direct AtrSlippageExecution injection or future PR config schema)"
         )
 
     # ---------- 메인 루프 --------------------------------------------------

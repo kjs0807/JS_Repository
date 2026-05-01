@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 
 import polars as pl
 
@@ -68,10 +69,12 @@ class IndicatorEngine:
     def has(self, symbol: str, timeframe: str) -> bool:
         return (symbol, timeframe) in self._cache
 
-    def snapshot(self) -> dict[tuple[str, str], pl.DataFrame]:
-        """Return the underlying ``(symbol, tf) → DataFrame`` cache.
+    def snapshot(self) -> Mapping[tuple[str, str], pl.DataFrame]:
+        """Return a read-only view over the ``(symbol, tf) → DataFrame`` cache.
 
-        Engine 이 ``IndicatorsView`` 를 만들 때 cache 를 통째로 넘기는 용도.
-        반환되는 dict 는 내부 dict 그대로 — 호출 측은 mutate 하지 말 것.
+        Engine 이 ``IndicatorsView`` 를 만들 때 cache 를 통째로 넘기는 용도. PR 16 prep
+        2차에서 ``MappingProxyType`` 으로 read-only Mapping 을 반환 — 호출 측에서 cache 에
+        write 하면 ``TypeError``. DataFrame 자체는 polars 의 immutable lazy/eager 모델이라
+        mutate 가 본질적으로 어려우므로 dict 레벨에서만 보호하면 충분.
         """
-        return self._cache
+        return MappingProxyType(self._cache)

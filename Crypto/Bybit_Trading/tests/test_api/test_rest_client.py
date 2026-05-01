@@ -72,6 +72,30 @@ class TestBybitRestClient:
         mock_session = MagicMock()
         mock_http_cls.return_value = mock_session
         mock_session.get_wallet_balance.return_value = {"retCode": 0, "result": {"list": [
+            {"totalEquity": "177000.0", "totalAvailableBalance": "48000.0",
+             "coin": [{"coin": "USDT", "walletBalance": "50500.0",
+                       "availableToWithdraw": "48000.0"}]}]}}
+        balance = BybitRestClient("k","s","https://api-demo.bybit.com").get_wallet_balance()
+        assert balance["equity"] == 50500.0
+        assert balance["available"] == 48000.0
+
+    @patch("src.api.rest_client.HTTP")
+    def test_get_wallet_balance_available_uses_usdt_coin_when_withdraw_empty(self, mock_http_cls):
+        mock_session = MagicMock()
+        mock_http_cls.return_value = mock_session
+        mock_session.get_wallet_balance.return_value = {"retCode": 0, "result": {"list": [
+            {"totalEquity": "177000.0", "totalAvailableBalance": "98482.0",
+             "coin": [{"coin": "USDT", "walletBalance": "48517.0",
+                       "equity": "48517.0", "availableToWithdraw": ""}]}]}}
+        balance = BybitRestClient("k","s","https://api-demo.bybit.com").get_wallet_balance()
+        assert balance["equity"] == 48517.0
+        assert balance["available"] == 48517.0
+
+    @patch("src.api.rest_client.HTTP")
+    def test_get_wallet_balance_falls_back_to_total_equity(self, mock_http_cls):
+        mock_session = MagicMock()
+        mock_http_cls.return_value = mock_session
+        mock_session.get_wallet_balance.return_value = {"retCode": 0, "result": {"list": [
             {"totalEquity": "50500.0", "totalAvailableBalance": "48000.0"}]}}
         balance = BybitRestClient("k","s","https://api-demo.bybit.com").get_wallet_balance()
         assert balance["equity"] == 50500.0

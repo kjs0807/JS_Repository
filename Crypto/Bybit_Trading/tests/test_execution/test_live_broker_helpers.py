@@ -30,6 +30,8 @@ def test_position_idx_for_short_returns_2():
 import logging
 
 from src.execution.broker import Position
+from src.core.config import RiskConfig
+from src.execution.bbkc_demo_broker import BbkcDemoBroker
 
 
 def _make_broker_with_long_pos() -> LiveBroker:
@@ -161,3 +163,17 @@ def test_sync_positions_handles_zero_stop_loss():
     assert pos.stop_loss == 0.0
     assert pos.take_profit is None
     assert pos.side == "SHORT"
+
+
+def test_bbkc_demo_legacy_notional_qty_uses_max_position_pct_and_leverage():
+    broker = BbkcDemoBroker.__new__(BbkcDemoBroker)
+    broker._equity = 50_000.0
+    broker._leverage = 3
+    broker._risk = MagicMock()
+    broker._risk.config = RiskConfig(max_position_pct=0.05)
+    broker._qty_step = {"BTCUSDT": 0.001}
+    broker._min_qty = {"BTCUSDT": 0.001}
+
+    qty = broker.calc_legacy_notional_qty("BTCUSDT", entry_price=77_093.30)
+
+    assert qty == 0.097

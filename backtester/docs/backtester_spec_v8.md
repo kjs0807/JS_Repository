@@ -1783,79 +1783,89 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
 - `viz/metrics.py` / `viz/report.py` (Phase 2)
 - GlobalClock / 해외주식 / 페어 (Phase 3)
 
-**Phase 1 종료 조건**:
-- PR 1~8 모두 머지
-- BB-KC Squeeze 회귀 게이트 통과 — **Phase 1 long-only buy-entry subset regression** (`legacy_fixture ⊆ v8_actual_buys`, timestamp + direction 정확히 일치). 의도된 차이(RSI 필터, SHORT, TP-SL, EWM seed, legacy 데몬 폴링 지연)는 §20 PR 8 + `tests/fixtures/README.md` 참조.
-- Lookahead 테스트 그린 (전체/절반 데이터 두 번 실행)
-- `Crypto/Bybit_Trading/src/backtester/` (구버전) 변경 0건
+**Phase 1 종료 조건** (✅ 모두 달성):
+- [x] PR 1~8 모두 머지
+- [x] BB-KC Squeeze 회귀 게이트 통과 — **Phase 1 long-only buy-entry subset regression** (`legacy_fixture ⊆ v8_actual_buys`, timestamp + direction 정확히 일치). 의도된 차이(RSI 필터, SHORT, TP-SL, EWM seed, legacy 데몬 폴링 지연)는 §20 PR 8 + `tests/fixtures/README.md` 참조.
+- [x] Lookahead 테스트 그린 (전체/절반 데이터 두 번 실행)
+- [x] `Crypto/Bybit_Trading/src/backtester/` (구버전) 변경 0건
 
-### Phase 1 — 돌아가는 최소 엔진 (1-2주)
+### Phase 1 — 돌아가는 최소 엔진 (1-2주) ✅ 완료 (PR 1~8)
 
-- [ ] `core/types.py`, `core/orders.py`, `core/snapshot.py`, `core/result.py`
-- [ ] `core/errors.py` (ConfigError, RunDirectoryError 포함)
-- [ ] `core/clock.py` (SimpleClock, ClockHelper)
-- [ ] `data/base.py`, `data/parquet_source.py`
-- [ ] `instruments/base.py` (FeeModel flat taker), `registry.py`
-- [ ] `strategies/base.py`
-- [ ] `core/context.py` (BarsView O(1))
-- [ ] `core/orderbook.py`
-- [ ] `execution/base.py`, `execution/next_bar.py`
-- [ ] `portfolio/position.py`, `sizer.py`, `risk.py`, `ledger.py`
-- [ ] `indicators/engine.py` (stateless + persist_to)
-- [ ] `indicators/stateless/bb.py`, `kc.py`, `atr.py`
-- [ ] `events/types.py` (IntentCreatedPayload, SnapshotReason), `serialize.py`, `log.py`
-- [ ] `core/config.py` (snapshot_every_bars, on_run_exists, persist_run_data, **__post_init__ 검증**)
-- [ ] `core/engine.py`:
-  - [ ] `_resolve_run_dir` (4가지 정책, resolved_run_id 반환)
-  - [ ] `_notify_resolution` (verbose 알림)
-  - [ ] `_emit_snapshot(ts, reason)` 헬퍼
-  - [ ] bars/indicators persist
-  - [ ] BacktestResult 반환
-- [ ] `strategies/bbkc_squeeze.py` 포팅
-- [ ] **시간 모델 + Run Directory + SNAPSHOT 정책 + Config 검증 단위 테스트**
-- [ ] **회귀 + Lookahead 테스트**
+- [x] `core/types.py`, `core/orders.py`, `core/snapshot.py`, `core/result.py`
+- [x] `core/errors.py` (ConfigError, RunDirectoryError 포함)
+- [x] `core/clock.py` (SimpleClock, ClockHelper)
+- [x] `data/base.py`, `data/parquet_source.py`
+- [x] `instruments/base.py` (FeeModel flat taker), `registry.py`
+- [x] `strategies/base.py`
+- [x] `core/context.py` (BarsView O(1))
+- [x] `core/orderbook.py`
+- [x] `execution/base.py`, `execution/next_bar.py`
+- [x] `portfolio/position.py`, `sizer.py`, `risk.py`, `ledger.py`
+- [x] `indicators/engine.py` (stateless + persist_to)
+- [x] `indicators/stateless/bb.py`, `kc.py`, `atr.py`
+- [x] `events/types.py` (IntentCreatedPayload, SnapshotReason), `serialize.py`, `log.py`
+- [x] `core/config.py` (snapshot_every_bars, on_run_exists, persist_run_data, **__post_init__ 검증**)
+- [x] `core/engine.py`:
+  - [x] `_resolve_run_dir` (4가지 정책, resolved_run_id 반환)
+  - [x] `_notify_resolution` (verbose 알림)
+  - [x] `_emit_snapshot(ts, reason)` 헬퍼
+  - [x] bars/indicators persist
+  - [x] BacktestResult 반환
+- [x] `strategies/bbkc_squeeze.py` 포팅
+- [x] **시간 모델 + Run Directory + SNAPSHOT 정책 + Config 검증 단위 테스트**
+- [x] **회귀 + Lookahead 테스트**
 
-### Phase 1.5 — 부가 인프라 + 디버깅 시각화 (1-2주)
+### Phase 1.5 — 부가 인프라 + 디버깅 시각화 (1-2주) ✅ 완료 (PR 9~12)
 
-- [ ] `execution/funding.py`
-- [ ] `core/config.py` YAML 직렬화 (resolved_run_id 포함 형식)
-- [ ] `cli/main.py` (`run`, `report`, `--quiet` 지원)
-- [ ] EventLog Parquet export
-- [ ] `data/csv_source.py`
-- [ ] `events/reader.py` (EventLogReader, by_snapshot_reason)
-- [ ] `viz/equity.py` (snapshot 중복 group_by 처리)
-- [ ] `viz/run_chart.py`
-- [ ] 테스트: cache 지운 상태 차트 생성 (self-contained 검증)
+- [x] `execution/funding.py` (모듈 only — Engine wiring 은 Phase 2 후속 PR)
+- [x] `core/config.py` YAML 직렬화 (PR 9, ``to_yaml`` / ``from_yaml`` round-trip)
+- [x] `cli/main.py` (`run`, `report`, `metrics`, `rebuild-results`, `--quiet`)
+- [x] EventLog Parquet export (`events/parquet_export.py`)
+- [x] `data/csv_source.py`
+- [x] `events/reader.py` (EventLogReader, by_type / by_snapshot_reason)
+- [x] `viz/equity.py` (PR 10 — snapshot 중복 group_by + drawdown)
+- [x] `viz/run_chart.py` (PR 11 — Plotly 4단 subplot, run_dir self-contained)
+- [x] 테스트: cache 지운 상태 차트 생성 (self-contained 검증)
 
 ### Phase 2 — 확장 + 메트릭 + rebuild (1-2주)
 
 - [x] 멀티 timeframe (PR 13 ✅)
 - [x] `data/bybit_source.py` + 캐싱 (PR 14 ✅, pagination 포함)
-- [x] `execution/slippage_bps.py` (PR 15a ✅) / `slippage_atr.py` (단위 모듈만 ✅,
-      Engine YAML wiring 후속 PR — `BybitDataSource.category` 노출도 동일)
+- [x] `data/bybit_source.py` `category` (`linear`/`spot`/`inverse`) 를
+      `DataSourceConfig.bybit_category` 로 YAML 노출 (PR 16 prep 2차 ✅)
+- [x] `execution/slippage_bps.py` (PR 15a ✅) / `slippage_atr.py` 단위 모듈 (PR 15a ✅).
+      `execution_model='atr_slippage'` 는 PR 16 prep 2차에서 config-level fail-fast
+      (ConfigError) — atr_provider config 표현은 후속 PR.
 - [x] FeeModel maker/taker (PR 15a ✅)
-- [ ] Stateful 지표 (FRAMA), `strategies/frama_channel.py` (PR 16, 진행 중 — `ctx.indicators`
+- [ ] Stateful 지표 (FRAMA), `strategies/frama_channel.py` (PR 16, 진행 예정 — `ctx.indicators`
       view 는 PR 16 직전 prep 으로 활성화 ✅)
 - [x] `analysis/walkforward.py` (PR 17 ✅, rolling + expanding)
-- [ ] `events/replay.py` (후속 PR)
+- [ ] `events/replay.py` (후속 PR — canonical JSON ✅ 활성, byte-identical 게이트는 후속 PR)
 - [x] `viz/metrics.py`, `viz/report.py` (PR 18 ✅, UTC 00:00 daily_resample 자체 구현)
 - [x] **CLI `rebuild-results` + EventLog↔results 정합성 회귀** (PR 19 ✅)
+- [x] EventLog canonical JSON (PR 16 prep 2차 ✅, sort_keys + 고정 separators)
+- [x] `gap_policy='notify'` 활성 + `strategy.on_data_gap` 콜백 호출 (PR 16 prep ✅)
+- [x] `IndicatorEngine.snapshot()` read-only Mapping (PR 16 prep 2차 ✅, MappingProxyType)
 - [ ] IndicatorEngine disk cache (후속 PR)
 
 **Phase 2 후속 PR (deferred, 아직 wiring 미완)**:
 - Funding engine wiring (PR 9 funding 모듈 + ledger.on_settle 활성 + ClockEvent.settlements
   주입). 현재 ``execution/funding.py`` 단위 모듈만 완료. 백테스트 결과에 funding 비용
   미반영 — 명시 필요 시 별도 PR.
-- `execution_model='atr_slippage'` Engine 자동 wiring. 현재는 ``NotImplementedError``
-  (atr_provider 명시 주입 필요). 단위 클래스 ``AtrSlippageExecution`` 만 완료.
-- `gap_policy='ffill'` 보정. 현재는 ``NotImplementedError`` 명시 차단. ``notify`` 만 활성.
+- `execution_model='atr_slippage'` config 활성화. 현재 config 레벨 fail-fast.
+  ``atr_provider`` 표현 방식 (instrument-bound vs strategy-injected) 결정 후 다시 추가.
+- `gap_policy='ffill'` 실제 보정 (현재는 명시적 NotImplementedError). 옵션 자체를 제거
+  또는 forward-fill 보정 활성화 중 택일.
 - Order cancel / modify (`OrderAction.type in ("cancel", "modify")`,
-  `OrderBook.expire_pending`/`modify`, TIF 확장 GTC 외). 현재는 진입 체결 중심.
-- `BybitDataSource.category` (`linear` 외 `spot` / `inverse`) 를 ``DataSourceConfig`` /
-  YAML 으로 노출. 현재는 default `linear` 만 사용 가능.
-- EventLog canonical JSON (sort_keys + 고정 separators) — Phase 2 결정 §13.3 (byte-
-  identical replay) 활성용. 현 ``events/log.py`` 는 default `json.dumps`.
+  `OrderBook.expire_pending`/`modify`, TIF 확장 GTC 외). 현재는 진입 체결 중심 — TP/SL,
+  trailing stop, 주문 정정 전략 본격화 시 활성.
 - ``strategy.on_data_gap`` 콜백 반환 intent 의 event-loop 자동 주입. 현재는 로깅만.
+- BBKC `_has_position` desync 보호 — `ctx.position` / `ctx.equity` / `ctx.open_orders`
+  read-only view 도입 후 strategy 내부 플래그 의존 제거. 현재 docstring 으로 한계 명시.
+- Walkforward `state_policy='carryover'|'reset'` 옵션. 현재는 carryover (train→test 상태
+  이월) 단일 모드. 진짜 OOS 검증을 위한 reset 모드 후속 PR.
+- EventLog byte-identical replay 회귀 게이트 (§13.3 Phase 2). canonical JSON ✅, 남은
+  단계는 ``order_id`` deterministic sequence + dict iteration 순서 검증 회귀 추가.
 
 ### Phase 3 — 자산군 확장 + 비교 시각화 (1-2주)
 

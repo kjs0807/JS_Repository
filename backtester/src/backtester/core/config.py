@@ -30,18 +30,29 @@ _VALID_ON_RUN_EXISTS: frozenset[str] = frozenset(
 )
 _VALID_PERSIST_RUN_DATA: frozenset[str] = frozenset({"copy", "symlink", "none"})
 _VALID_GAP_POLICY: frozenset[str] = frozenset({"notify", "ffill"})
+# PR 16 prep 2차: ``atr_slippage`` 는 ``BacktestConfig`` 만으로 wiring 되지 않으므로
+# (atr_provider 명시 주입이 필요), config 레벨에서 fail-fast 차단. 라이브러리 사용자가
+# ``AtrSlippageExecution`` 을 직접 만들어 ``BacktestEngine`` 에 monkey-patch 하는 방식은
+# 코드 레벨 작업으로 별개 — 후속 PR 에서 ``atr_provider`` 를 config 로 표현하는 방식이
+# 결정되면 다시 추가.
 _VALID_EXECUTION_MODEL: frozenset[str] = frozenset(
-    {"next_bar_open", "slippage_bps", "atr_slippage"}
+    {"next_bar_open", "slippage_bps"}
 )
 _VALID_DATA_SOURCE_TYPE: frozenset[str] = frozenset({"parquet", "csv", "bybit"})
+_VALID_BYBIT_CATEGORY: frozenset[str] = frozenset({"linear", "spot", "inverse"})
 
 
 @dataclass(frozen=True)
 class DataSourceConfig:
-    """Phase 1: parquet. Phase 1.5: + csv. Phase 2 PR 14: + bybit (incremental cache)."""
+    """Phase 1: parquet. Phase 1.5: + csv. Phase 2 PR 14: + bybit (incremental cache).
+
+    PR 16 prep 2차: ``bybit_category`` 노출 — 기본 ``linear`` (perpetual), ``spot`` /
+    ``inverse`` 도 config 로 선택 가능. ``type != "bybit"`` 일 땐 의미 없음 (default 유지).
+    """
 
     base_dir: Path
     type: Literal["parquet", "csv", "bybit"] = "parquet"
+    bybit_category: Literal["linear", "spot", "inverse"] = "linear"
 
     def __post_init__(self) -> None:
         # Literal 은 런타임에 강제되지 않으므로 ConfigError 로 명시 검증.
@@ -49,6 +60,11 @@ class DataSourceConfig:
             raise ConfigError(
                 f"DataSourceConfig.type must be one of "
                 f"{sorted(_VALID_DATA_SOURCE_TYPE)}, got {self.type!r}"
+            )
+        if self.bybit_category not in _VALID_BYBIT_CATEGORY:
+            raise ConfigError(
+                f"DataSourceConfig.bybit_category must be one of "
+                f"{sorted(_VALID_BYBIT_CATEGORY)}, got {self.bybit_category!r}"
             )
 
 
@@ -88,10 +104,8 @@ class BacktestConfig:
     end: datetime
     gap_policy: Literal["notify", "ffill"] = "notify"
 
-    # 실행
-    execution_model: Literal["next_bar_open", "slippage_bps", "atr_slippage"] = (
-        "next_bar_open"
-    )
+    # 실행 — ``atr_slippage`` 는 PR 16 prep 2차에서 config 레벨 차단 (직접 wiring 필요).
+    execution_model: Literal["next_bar_open", "slippage_bps"] = "next_bar_open"
     bar_path_model: BarPathModel = BarPathModel.PESSIMISTIC
     slippage_bps: float = 0.0
 
@@ -301,13 +315,18 @@ def _parse_iso(value: str) -> datetime:
 
 
 def _data_source_to_dict(ds: DataSourceConfig) -> dict[str, Any]:
-    return {"base_dir": str(ds.base_dir), "type": ds.type}
+    out: dict[str, Any] = {"base_dir": str(ds.base_dir), "type": ds.type}
+    # ``bybit_category`` 는 ``type == "bybit"`` 일 때만 의미 있으므로 그 경우만 직렬화.
+    if ds.type == "bybit":
+        out["bybit_category"] = ds.bybit_category
+    return out
 
 
 def _data_source_from_dict(data: dict[str, Any]) -> DataSourceConfig:
     return DataSourceConfig(
         base_dir=Path(data["base_dir"]),
         type=data.get("type", "parquet"),
+        bybit_category=data.get("bybit_category", "linear"),
     )
 
 

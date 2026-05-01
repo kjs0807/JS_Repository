@@ -171,6 +171,14 @@ class BbkcDemoBroker(LiveBroker):
         rounded = self._round_qty(symbol, raw)
         return rounded
 
+    def calc_legacy_notional_qty(self, symbol: str, entry_price: float) -> float:
+        """Legacy live sizing: margin = equity * max_position_pct, notional = margin * leverage."""
+        if entry_price <= 0:
+            return 0.0
+        margin_alloc = self._equity * self._risk.config.max_position_pct
+        notional = margin_alloc * self._leverage
+        return self._round_qty(symbol, notional / entry_price)
+
     def buy(
         self, symbol: str, qty: float, stop_loss: float,
         take_profit: Optional[float] = None, reason: str = "",

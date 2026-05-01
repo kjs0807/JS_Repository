@@ -156,7 +156,11 @@ class BBKCSqueeze:
         if close > bb_mid and rsi_val < self.rsi_filter:
             sl = close * (1 - price_sl)
             tp = None if self.drop_tp else close * (1 + price_tp)
-            qty = broker.calc_qty(bar.symbol, risk_pct=0.02, stop_distance=close - sl)
+            qty = (
+                broker.calc_legacy_notional_qty(bar.symbol, close)
+                if hasattr(broker, "calc_legacy_notional_qty")
+                else broker.calc_qty(bar.symbol, risk_pct=0.02, stop_distance=close - sl)
+            )
             if qty > 0:
                 broker.buy(bar.symbol, qty, stop_loss=sl, take_profit=tp,
                            reason=f"BBKCSqueeze LONG rsi={rsi_val:.1f}")
@@ -165,7 +169,11 @@ class BBKCSqueeze:
         elif close < bb_mid and rsi_val > (100.0 - self.rsi_filter):
             sl = close * (1 + price_sl)
             tp = None if self.drop_tp else close * (1 - price_tp)
-            qty = broker.calc_qty(bar.symbol, risk_pct=0.02, stop_distance=sl - close)
+            qty = (
+                broker.calc_legacy_notional_qty(bar.symbol, close)
+                if hasattr(broker, "calc_legacy_notional_qty")
+                else broker.calc_qty(bar.symbol, risk_pct=0.02, stop_distance=sl - close)
+            )
             if qty > 0:
                 broker.sell(bar.symbol, qty, stop_loss=sl, take_profit=tp,
                             reason=f"BBKCSqueeze SHORT rsi={rsi_val:.1f}")

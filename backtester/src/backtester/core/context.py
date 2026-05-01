@@ -19,6 +19,7 @@ IndicatorsView (PR 16 전 prep, FRAMA 등 recursive/stateful 지표 대비):
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -118,12 +119,13 @@ class IndicatorsView:
 
     def __init__(
         self,
-        cache: dict[tuple[str, str], pl.DataFrame],
+        cache: Mapping[tuple[str, str], pl.DataFrame],
         timestamp_index: dict[str, dict[str, dict[datetime, int]]],
         timestamps: dict[str, dict[str, list[datetime]]],
         clock_helper: ClockHelper,
         now: datetime,
     ) -> None:
+        # ``Mapping`` 으로 받아 ``IndicatorEngine.snapshot()`` 의 read-only proxy 와도 호환.
         self._cache = cache
         self._timestamp_index = timestamp_index
         self._timestamps = timestamps

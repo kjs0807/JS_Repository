@@ -143,7 +143,7 @@ def test_next_bar_open_accepts_int_or_float_slippage() -> None:
 def _engine_with_execution_model(
     tmp_path: Path,
     *,
-    execution_model: Literal["next_bar_open", "slippage_bps", "atr_slippage"],
+    execution_model: str,
     slippage_bps: float = 0.0,
 ) -> BacktestConfig:
     import polars as pl
@@ -177,7 +177,7 @@ def _engine_with_execution_model(
         end=base.replace(hour=23),
         initial_equity=Decimal("100000"),
         output_dir=tmp_path / "runs",
-        execution_model=execution_model,
+        execution_model=execution_model,  # type: ignore[arg-type] — test allows passing arbitrary strings
         slippage_bps=slippage_bps,
     )
 
@@ -204,11 +204,14 @@ def test_engine_builds_slippage_bps_with_config_value(tmp_path: Path) -> None:
     assert em.slippage_bps == Decimal("15.0")
 
 
-def test_engine_atr_slippage_raises_explicit_message(tmp_path: Path) -> None:
-    cfg = _engine_with_execution_model(
-        tmp_path, execution_model="atr_slippage"
-    )
-    from backtester.strategies.bbkc_squeeze import BBKCSqueezeStrategy
+def test_atr_slippage_rejected_at_config_level(tmp_path: Path) -> None:
+    """PR 16 prep 2차: atr_slippage 는 config 레벨 fail-fast (ConfigError).
 
-    with pytest.raises(NotImplementedError, match="atr_slippage"):
-        BacktestEngine(cfg, BBKCSqueezeStrategy(), verbose=False)
+    이전엔 BacktestConfig 가 통과시키고 BacktestEngine.__init__ 에서 NotImplementedError.
+    이제는 ``BacktestConfig.__post_init__`` 가 즉시 차단 — 사용자에게 더 빠른 피드백.
+    AtrSlippageExecution 단위 클래스는 ``execution/slippage_atr.py`` 에서 직접 사용 가능.
+    """
+    from backtester.core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="execution_model"):
+        _engine_with_execution_model(tmp_path, execution_model="atr_slippage")

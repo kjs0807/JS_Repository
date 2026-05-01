@@ -1,9 +1,17 @@
-"""EventLog (spec §3.15) — JSONL writer, context manager.
+"""EventLog (spec §3.15, §13.3) — JSONL writer, context manager.
 
 매 라인에 `schema_version` 필드를 포함해 호환성을 깨는 변경 시 Reader가 거부할 수
 있게 한다 (필드 추가만 있는 변경은 동일 버전 유지 — spec §3.15).
 
 context manager 외부 사용 시 RuntimeError로 차단해 lifecycle 누락을 방지.
+
+Canonical JSON (PR 16 prep 2차, spec §13.3):
+- ``json.dumps(..., sort_keys=True, separators=(",", ":"))`` 로 deterministic 출력.
+- 같은 (config, random_seed) 두 번 실행 시 events.jsonl 이 byte-identical 하도록 게이트
+  활성. ``serialize_event_payload`` 가 Decimal → str / datetime → ISO8601 / Path → str 등
+  payload 결정성을 이미 보장하므로, log 라인 자체의 결정성만 추가.
+- ``json.loads`` 는 어떤 포맷이든 읽어들이므로 EventLogReader / rebuild-results / 분석
+  도구는 영향 없음.
 """
 
 from __future__ import annotations
@@ -60,12 +68,17 @@ class EventLog:
                 "EventLog used outside context manager. "
                 "Use `with EventLog(run_dir) as log: log.append(...)`."
             )
+        # Canonical JSON (spec §13.3): sort_keys + 고정 separators 로 byte-identical 출력.
+        # ``ensure_ascii=True`` (default) 유지 — non-ASCII 가 \uXXXX 로 escape 되어 시스템
+        # 인코딩 차이에도 동일 byte stream.
         line = json.dumps(
             {
                 "schema_version": EVENT_SCHEMA_VERSION,
                 "ts": event.ts.isoformat(),
                 "type": event.type.value,
                 "payload": serialize_event_payload(event.payload),
-            }
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
         self._file.write(line + "\n")
