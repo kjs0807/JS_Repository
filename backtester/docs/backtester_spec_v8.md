@@ -2169,11 +2169,6 @@ BB-KC 포팅 경계 (절대 위반 금지):
 - 같은 봉 내 TP/SL/limit/stop 동시 도달 시 정책별 우선순위 명확화
 - random 정책은 ``random_seed`` 재현성 확보 시에만 도입, 안 되면 명시 제외
 
-**PR 15c — BarPathModel 4종 정책 (Phase 2)**
-- spec enum vs 코드 enum 정렬 확인 후 통일
-- 같은 봉 내 TP/SL 동시 도달 우선순위 정책별 명확화
-- random 정책은 random_seed 재현성 확보 시에만 도입
-
 **PR 13 — 멀티 timeframe**
 **PR 14 — BybitDataSource + 캐싱**
 - ``data/bybit_source.py`` — ``BybitDataSource(cache_dir, *, category, fetcher)``. 로컬 parquet cache 가 단일 진실 소스 (``{cache_dir}/{symbol}_{timeframe}.parquet``). ``fetch(symbol, tf, start, end)`` 흐름:
