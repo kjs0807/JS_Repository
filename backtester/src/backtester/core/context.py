@@ -1,7 +1,9 @@
-"""StrategyContext + BarsView + IndicatorsView (spec §3.6, §3.8).
+"""StrategyContext + BarsView + IndicatorsView + PortfolioView + OrdersView
+(spec §3.5/§3.6/§3.8, PR A 추가).
 
 전략의 `on_bar`에 전달되는 컨텍스트 — 현재 시각, primary symbol/timeframe, BarsView,
-IndicatorsView.
+IndicatorsView, PortfolioView (read-only ledger snapshot), OrdersView (read-only open
+orders snapshot).
 
 BarsView / IndicatorsView 둘 다 last_closed 시점 이전의 봉들만 슬라이스해서 노출.
 미래 누설 차단(spec §2.4).
@@ -14,6 +16,16 @@ IndicatorsView (PR 16 전 prep, FRAMA 등 recursive/stateful 지표 대비):
   방식으로 lookahead-clipped 슬라이스로 노출.
 - 전략은 ``ctx.indicators[symbol][tf]`` 로 사전계산된 지표를 읽어 매 봉 재계산 비용을 절감.
 - 캐시에 없는 (symbol, tf) 는 ``KeyError`` — ``required_indicators()`` 에 올린 지표만 사용 가능.
+
+PortfolioView / OrdersView (PR A — 전략이 ledger / orderbook 을 직접 읽도록):
+- ``ctx.position(symbol)`` / ``ctx.has_position(symbol)`` / ``ctx.equity`` / ``ctx.cash``
+  / ``ctx.open_orders(symbol=None)`` 같은 read-only API 를 제공한다.
+- 전략 내부 ``_has_position`` 같은 plagiarized state 대신 ledger 가 single source of
+  truth. risk reject / 부분체결 등으로 desync 가 일어나지 않는다.
+- frozen dataclass + tuple/MappingProxyType 으로 mutate 시도 시 ``FrozenInstanceError`` /
+  ``TypeError``.
+- Engine 이 ``_invoke_strategy`` 시점에 snapshot 을 만들어 주입; 직접 ``StrategyContext``
+  를 만드는 테스트 fixture 는 default factory (빈 portfolio / orders) 가 사용된다.
 """
 
 from __future__ import annotations
@@ -22,6 +34,9 @@ from bisect import bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
+from types import MappingProxyType
+from typing import Literal
 
 import polars as pl
 
@@ -177,20 +192,149 @@ def _empty_indicators_view() -> IndicatorsView:
     )
 
 
+# ---------- PortfolioView (PR A) --------------------------------------------
+
+
+@dataclass(frozen=True)
+class PositionView:
+    """Read-only ``Position`` snapshot (PR A).
+
+    Engine 이 ``Ledger.positions[symbol]`` 의 mutable Position 으로부터 매 ``on_bar``
+    호출 시점에 새로 만들어 주입한다. ``StrategyContext`` 가 frozen 이라 위치를
+    바꾸려는 시도는 ``FrozenInstanceError``.
+
+    Phase 1 long-only 가정 (size >= 0) 이지만 Phase 2+ short 활성 시 size < 0 도 그대로
+    노출된다 — ``direction`` 으로 long/short/flat 구분.
+    """
+
+    symbol: str
+    size: Decimal
+    avg_price: Decimal
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal
+
+    @property
+    def is_flat(self) -> bool:
+        return self.size == 0
+
+    @property
+    def direction(self) -> Literal["long", "short", "flat"]:
+        if self.size > 0:
+            return "long"
+        if self.size < 0:
+            return "short"
+        return "flat"
+
+
+@dataclass(frozen=True)
+class PortfolioView:
+    """Read-only ledger snapshot (PR A) — equity / cash / positions.
+
+    ``positions`` 는 ``MappingProxyType`` 로 dict 보호. flat position 은 제외 (전략이
+    "내가 가지고 있는 심볼" 만 iterate 할 수 있도록). flat 도 보고 싶으면
+    ``has_position(symbol)`` 가 False 를 반환.
+    """
+
+    equity: Decimal
+    cash: Decimal
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal
+    positions: Mapping[str, PositionView]
+
+    def position(self, symbol: str) -> PositionView | None:
+        return self.positions.get(symbol)
+
+    def has_position(self, symbol: str) -> bool:
+        p = self.positions.get(symbol)
+        return p is not None and not p.is_flat
+
+
+def _empty_portfolio_view() -> PortfolioView:
+    """ctx.portfolio 의 default factory — 모든 값 0 (테스트 fixture 호환)."""
+    return PortfolioView(
+        equity=Decimal("0"),
+        cash=Decimal("0"),
+        realized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        positions=MappingProxyType({}),
+    )
+
+
+# ---------- OrdersView (PR A) -----------------------------------------------
+
+
+OrderState = Literal[
+    "pending", "partially_filled", "filled", "cancelled", "expired", "rejected"
+]
+OrderSide = Literal["buy", "sell"]
+OrderType = Literal["market", "limit", "stop", "stop_limit"]
+
+
+@dataclass(frozen=True)
+class OrderView:
+    """Read-only ``Order`` snapshot (PR A).
+
+    Engine 이 ``OrderBook.get_active()`` 결과로부터 매 ``on_bar`` 호출 시점에 새로
+    만들어 주입. 전략이 mutate 시도하면 ``FrozenInstanceError``. 가격 필드는 ``intent``
+    에서 가져오므로 Decimal | None.
+    """
+
+    id: str
+    symbol: str
+    side: OrderSide
+    type: OrderType
+    state: OrderState
+    sized_quantity: Decimal
+    remaining: Decimal
+    submitted_at: datetime
+    limit_price: Decimal | None
+    stop_price: Decimal | None
+
+
+@dataclass(frozen=True)
+class OrdersView:
+    """Read-only open order snapshot (PR A).
+
+    ``open_orders(symbol=None)`` 로 전체 또는 심볼 필터. 빈 tuple 가능. 활성 (pending /
+    partially_filled) 만 — terminal (filled/cancelled/expired/rejected) 은 제외.
+    """
+
+    _orders: tuple[OrderView, ...]
+
+    def open_orders(self, symbol: str | None = None) -> tuple[OrderView, ...]:
+        if symbol is None:
+            return self._orders
+        return tuple(o for o in self._orders if o.symbol == symbol)
+
+
+def _empty_orders_view() -> OrdersView:
+    """ctx.orders 의 default factory — 빈 tuple."""
+    return OrdersView(_orders=())
+
+
+# ---------- StrategyContext --------------------------------------------------
+
+
 @dataclass(frozen=True)
 class StrategyContext:
-    """전략의 on_bar 호출 시 전달되는 컨텍스트 (spec §3.5, §4.2, §3.8).
+    """전략의 on_bar 호출 시 전달되는 컨텍스트 (spec §3.5, §4.2, §3.8, PR A).
 
     필드:
     - `now`: ClockEvent.timestamp (= 봉 마감 시각, 의사결정 시점)
     - `primary_symbol`/`primary_timeframe`: 전략 기본 축
     - `bars`: BarsView, last_closed 이전만 노출
     - `indicators`: IndicatorsView, last_closed 이전만 노출 (PR 16 prep — FRAMA 등
-      stateful/recursive 지표가 batch precompute 결과를 직접 읽도록 하기 위함). Engine 은
-      항상 IndicatorEngine cache 를 연결한 view 를 주입; 직접 ``StrategyContext`` 를
-      만드는 테스트 fixture 는 default factory (빈 cache) 가 사용된다.
+      stateful/recursive 지표가 batch precompute 결과를 직접 읽도록 하기 위함).
+    - `portfolio`: PortfolioView (PR A) — read-only ledger snapshot.
+    - `orders`: OrdersView (PR A) — read-only open order snapshot.
 
-    추후 Phase에서 추가 예정: position 조회, equity 등.
+    Engine 은 항상 IndicatorEngine cache + Ledger / OrderBook snapshot 을 주입한다.
+    직접 ``StrategyContext`` 를 만드는 테스트 fixture 는 default factory (빈 view) 가
+    사용된다.
+
+    편의 proxy: ``ctx.position(symbol)`` / ``ctx.has_position(symbol)`` / ``ctx.equity``
+    / ``ctx.cash`` / ``ctx.open_orders(symbol=None)`` — ``portfolio`` / ``orders`` 의
+    short-cut.
     """
 
     now: datetime
@@ -198,3 +342,30 @@ class StrategyContext:
     primary_timeframe: str
     bars: BarsView
     indicators: IndicatorsView = field(default_factory=_empty_indicators_view)
+    portfolio: PortfolioView = field(default_factory=_empty_portfolio_view)
+    orders: OrdersView = field(default_factory=_empty_orders_view)
+
+    # ---------- portfolio proxy --------------------------------------------
+
+    def position(self, symbol: str) -> PositionView | None:
+        return self.portfolio.position(symbol)
+
+    def has_position(self, symbol: str) -> bool:
+        return self.portfolio.has_position(symbol)
+
+    @property
+    def positions(self) -> Mapping[str, PositionView]:
+        return self.portfolio.positions
+
+    @property
+    def equity(self) -> Decimal:
+        return self.portfolio.equity
+
+    @property
+    def cash(self) -> Decimal:
+        return self.portfolio.cash
+
+    # ---------- orders proxy ------------------------------------------------
+
+    def open_orders(self, symbol: str | None = None) -> tuple[OrderView, ...]:
+        return self.orders.open_orders(symbol)

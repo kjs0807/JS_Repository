@@ -36,9 +36,51 @@ def _make_ohlcv(closes: list[float]) -> pl.DataFrame:
     ).with_columns(pl.col("timestamp").cast(pl.Datetime(time_unit="us", time_zone="UTC")))
 
 
-def _make_ctx(df: pl.DataFrame, *, symbol: str = "BTCUSDT", tf: str = "1h") -> StrategyContext:
+def _make_ctx(
+    df: pl.DataFrame,
+    *,
+    symbol: str = "BTCUSDT",
+    tf: str = "1h",
+    has_position: bool = False,
+) -> StrategyContext:
+    """PR A: ``has_position`` 으로 ledger 시뮬. BBKC 가 ``ctx.has_position`` 을 읽어
+    의사결정하므로, 진입/청산 흐름 테스트는 fill 직후 상태를 ``has_position=True`` 로
+    재구성해 호출해야 한다.
+    """
+    from types import MappingProxyType
+
+    from backtester.core.context import PortfolioView, PositionView
+
     timestamps = df["timestamp"].to_list()
     now = timestamps[-1] + timedelta(hours=1)  # 마지막 봉 마감 시각
+
+    if has_position:
+        portfolio = PortfolioView(
+            equity=Decimal("100000"),
+            cash=Decimal("50000"),
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            positions=MappingProxyType(
+                {
+                    symbol: PositionView(
+                        symbol=symbol,
+                        size=Decimal("1"),
+                        avg_price=Decimal("100"),
+                        realized_pnl=Decimal("0"),
+                        unrealized_pnl=Decimal("0"),
+                    ),
+                }
+            ),
+        )
+    else:
+        portfolio = PortfolioView(
+            equity=Decimal("100000"),
+            cash=Decimal("100000"),
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            positions=MappingProxyType({}),
+        )
+
     return StrategyContext(
         now=now,
         primary_symbol=symbol,
@@ -50,6 +92,7 @@ def _make_ctx(df: pl.DataFrame, *, symbol: str = "BTCUSDT", tf: str = "1h") -> S
             clock_helper=ClockHelper(),
             now=now,
         ),
+        portfolio=portfolio,
     )
 
 
@@ -142,7 +185,11 @@ def test_bbkc_emits_buy_intent_on_release_with_up_momentum() -> None:
 
 
 def test_bbkc_emits_exit_after_close_below_mid() -> None:
-    """진입 후 가격이 mid 하회 시 ClosePosition 매도 intent 발행."""
+    """진입 후 가격이 mid 하회 시 ClosePosition 매도 intent 발행.
+
+    PR A: BBKC 가 ``ctx.has_position`` 을 읽으므로 buy intent 가 발행되면 다음
+    호출부터 fill 시뮬레이션 (has_position=True). exit signal 후 다시 False.
+    """
     s = BBKCSqueezeStrategy(bb_period=20, kc_period=20, kc_use_ema=False)
     closes = _generate_squeeze_then_breakout(n_squeeze=25, n_trend=15)
     # 후반에 급락 봉 추가 → close < mid 트리거
@@ -151,34 +198,39 @@ def test_bbkc_emits_exit_after_close_below_mid() -> None:
 
     saw_buy = False
     saw_sell = False
+    has_pos = False
     for n in range(2, df.height + 1):
         slice_df = df.slice(0, n)
-        ctx = _make_ctx(slice_df)
+        ctx = _make_ctx(slice_df, has_position=has_pos)
         intents = s.on_bar(ctx)
         for it in intents:
             if it.side == "buy":
                 saw_buy = True
+                has_pos = True  # 다음 봉부터 fill 시뮬
             elif it.side == "sell" and isinstance(it.size_spec, ClosePosition):
                 saw_sell = True
+                has_pos = False
                 assert it.reason == "bbkc_close_below_mid"
 
     assert saw_buy and saw_sell
 
 
 def test_bbkc_does_not_double_enter() -> None:
-    """has_position True인 동안 추가 buy intent를 발행하지 않는다."""
+    """has_position True인 동안 추가 buy intent를 발행하지 않는다 (PR A: ctx.has_position 기반)."""
     s = BBKCSqueezeStrategy(bb_period=20, kc_period=20, kc_use_ema=False)
     closes = _generate_squeeze_then_breakout(n_squeeze=25, n_trend=20)
     df = _make_ohlcv(closes)
 
     buy_count = 0
+    has_pos = False
     for n in range(2, df.height + 1):
         slice_df = df.slice(0, n)
-        ctx = _make_ctx(slice_df)
+        ctx = _make_ctx(slice_df, has_position=has_pos)
         intents = s.on_bar(ctx)
         for it in intents:
             if it.side == "buy":
                 buy_count += 1
+                has_pos = True  # fill 시뮬
     # exit 신호가 없으면 (가격이 mid 위 유지) 추가 buy 0
     assert buy_count == 1
 

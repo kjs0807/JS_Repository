@@ -1862,8 +1862,10 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
   `OrderBook.expire_pending`/`modify`, TIF 확장 GTC 외). 현재는 진입 체결 중심 — TP/SL,
   trailing stop, 주문 정정 전략 본격화 시 활성.
 - ``strategy.on_data_gap`` 콜백 반환 intent 의 event-loop 자동 주입. 현재는 로깅만.
-- BBKC `_has_position` desync 보호 — `ctx.position` / `ctx.equity` / `ctx.open_orders`
-  read-only view 도입 후 strategy 내부 플래그 의존 제거. 현재 docstring 으로 한계 명시.
+- ~~BBKC `_has_position` desync 보호~~ — PR A 에서 ledger 기반 `ctx.has_position`,
+  `ctx.position`, `ctx.equity`, `ctx.cash`, `ctx.open_orders` read-only view 도입.
+  BBKC 가 내부 플래그 대신 ledger 를 직접 읽도록 마이그레이션. risk reject / 부분체결
+  desync 해결 ✅
 - Walkforward `state_policy='carryover'|'reset'` 옵션. 현재는 carryover (train→test 상태
   이월) 단일 모드. 진짜 OOS 검증을 위한 reset 모드 후속 PR.
 - EventLog byte-identical replay 회귀 게이트 (§13.3 Phase 2). canonical JSON ✅, 남은

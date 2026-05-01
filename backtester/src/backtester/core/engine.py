@@ -32,7 +32,15 @@ from backtester.core.clock import (
     SimpleClock,
 )
 from backtester.core.config import BacktestConfig
-from backtester.core.context import BarsView, IndicatorsView, StrategyContext
+from backtester.core.context import (
+    BarsView,
+    IndicatorsView,
+    OrderView,
+    OrdersView,
+    PortfolioView,
+    PositionView,
+    StrategyContext,
+)
 from backtester.core.errors import RunDirectoryError
 from backtester.core.orderbook import OrderBook
 from backtester.core.orders import OrderAction, OrderIntent
@@ -555,12 +563,16 @@ class BacktestEngine:
             clock_helper=self.clock_helper,
             now=ts,
         )
+        portfolio_view = self._build_portfolio_view()
+        orders_view = self._build_orders_view()
         ctx = StrategyContext(
             now=ts,
             primary_symbol=self.config.primary_symbol,
             primary_timeframe=self.config.primary_timeframe,
             bars=bars_view,
             indicators=indicators_view,
+            portfolio=portfolio_view,
+            orders=orders_view,
         )
         intents = self.strategy.on_bar(ctx)
 
@@ -588,6 +600,56 @@ class BacktestEngine:
         actions = self.strategy.on_pending_orders(ctx, pending)
         for action in actions:
             self._handle_action(action, ts)
+
+    # ---------- PR A: portfolio / orders view 빌더 -------------------------
+
+    def _build_portfolio_view(self) -> PortfolioView:
+        """``Ledger`` 의 mutable 상태를 frozen ``PortfolioView`` snapshot 으로 복제.
+
+        flat position 은 제외 — 전략이 ``ctx.positions.items()`` 로 iterate 할 때
+        실제로 가진 심볼만 보이게 하기 위함. ``ctx.has_position(symbol)`` 도 flat 인
+        경우 False 를 반환.
+        """
+        from types import MappingProxyType
+
+        snapshot_positions: dict[str, PositionView] = {}
+        for sym, p in self.ledger.positions.items():
+            if p.is_flat:
+                continue
+            snapshot_positions[sym] = PositionView(
+                symbol=p.symbol,
+                size=p.size,
+                avg_price=p.avg_price,
+                realized_pnl=p.realized_pnl,
+                unrealized_pnl=p.unrealized_pnl,
+            )
+        return PortfolioView(
+            equity=self.ledger.equity,
+            cash=self.ledger.cash,
+            realized_pnl=self.ledger.realized_pnl,
+            unrealized_pnl=self.ledger.unrealized_pnl,
+            positions=MappingProxyType(snapshot_positions),
+        )
+
+    def _build_orders_view(self) -> OrdersView:
+        """``OrderBook.get_active()`` 결과를 frozen ``OrderView`` tuple 로 복제."""
+        active = self.orderbook.get_active()
+        order_views = tuple(
+            OrderView(
+                id=o.id,
+                symbol=o.intent.symbol,
+                side=o.intent.side,
+                type=o.intent.type,
+                state=o.state,
+                sized_quantity=o.sized_quantity,
+                remaining=o.remaining,
+                submitted_at=o.submitted_at,
+                limit_price=o.intent.limit_price,
+                stop_price=o.intent.stop_price,
+            )
+            for o in active
+        )
+        return OrdersView(_orders=order_views)
 
     def _build_snapshots(
         self,

@@ -19,11 +19,12 @@ Phase 1 한정 (legacy 대비 차이 — 회귀 fixture 비교 시 인지 필요
 - RSI / 추가 모멘텀 필터 미지원 — Phase 1.5+ 추가
 - 청산은 close < BB middle (mean revert) 하나만
 
-Phase 1 한정 — `_has_position` desync 리스크:
-- intent 발행 시점에 즉시 갱신. Risk reject / Sizer reject로 실제 주문이 OrderBook에
-  add되지 않으면 strategy 내부 상태와 ledger 실제 상태가 어긋날 수 있다.
-- Phase 1 기본 환경(빈 risk_limits, simple market)에서는 buy intent가 거의 통과 →
-  desync 위험 낮음. Phase 1.5+에서 `ctx.position()` 등으로 ledger 기반 동기화 예정.
+PR A 마이그레이션:
+- 이전엔 ``self._has_position`` 내부 플래그 — risk reject / 부분체결 시 desync 위험.
+- 이제는 ``ctx.has_position(symbol)`` 로 ledger 가 single source of truth.
+- 신호 흐름은 동일: 진입 시점에 ledger 가 flat 이면 entry intent, 보유 중이면 exit
+  signal. risk reject 가 발생하면 ledger 는 여전히 flat 이라 다음 release 신호가
+  있으면 재시도가 자연스럽다 (이전엔 내부 플래그 때문에 영영 진입 안 했음).
 """
 
 from __future__ import annotations
@@ -64,7 +65,6 @@ class BBKCSqueezeStrategy(BaseStrategy):
         self._order_size: Decimal = (
             Decimal(str(order_size)) if order_size is not None else Decimal("1")
         )
-        self._has_position: bool = False
 
     def required_indicators(self) -> list[Indicator]:
         return [self._bb, self._kc]
@@ -123,9 +123,11 @@ class BBKCSqueezeStrategy(BaseStrategy):
         if curr_close is None or curr_mid is None:
             return []  # 워밍업 미충족
 
+        # PR A: ledger 기반 has_position. risk reject / 부분체결 시 desync 없음.
+        has_pos = ctx.has_position(symbol)
+
         # Entry: squeeze release + 상승 모멘텀 + 미보유
-        if released and curr_close > curr_mid and not self._has_position:
-            self._has_position = True  # 주의: intent 발행 시점에 즉시 갱신 (Phase 1)
+        if released and curr_close > curr_mid and not has_pos:
             return [
                 OrderIntent(
                     symbol=symbol,
@@ -137,8 +139,7 @@ class BBKCSqueezeStrategy(BaseStrategy):
             ]
 
         # Exit: 보유 중 + 가격이 mid 하회
-        if self._has_position and curr_close < curr_mid:
-            self._has_position = False  # 주의: intent 발행 시점에 즉시 갱신 (Phase 1)
+        if has_pos and curr_close < curr_mid:
             return [
                 OrderIntent(
                     symbol=symbol,
