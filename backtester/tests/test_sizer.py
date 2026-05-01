@@ -183,9 +183,9 @@ def test_sizer_phase2_specs_raise(spec: object) -> None:
 
 
 def test_sizer_blocks_short_entry_target_units() -> None:
-    """flat에서 sell 시도 → short — NotImplementedError."""
+    """flat에서 sell 시도 → short — PR H: ``allow_short=False`` 면 NotImplementedError."""
     sizer = Sizer()
-    with pytest.raises(NotImplementedError, match="short not supported in Phase 1"):
+    with pytest.raises(NotImplementedError, match="short"):
         sizer.resolve(
             intent=_intent("sell", TargetUnits(units=Decimal("1"))),
             instrument=_btc(),
@@ -196,9 +196,9 @@ def test_sizer_blocks_short_entry_target_units() -> None:
 
 
 def test_sizer_blocks_oversell_target_units() -> None:
-    """long 1단위 보유, 2단위 매도 시도 → short — NotImplementedError."""
+    """long 1단위 보유, 2단위 매도 시도 → flip — PR H: ``allow_flip=False`` 면 ValueError."""
     sizer = Sizer()
-    with pytest.raises(NotImplementedError, match="short not supported"):
+    with pytest.raises(ValueError, match="flip"):
         sizer.resolve(
             intent=_intent("sell", TargetUnits(units=Decimal("2"))),
             instrument=_btc(),

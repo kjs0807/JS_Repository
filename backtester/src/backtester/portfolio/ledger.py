@@ -96,48 +96,79 @@ class Ledger:
     # ---------- Event handlers ---------------------------------------------
 
     def on_fill(self, fill: Fill, instrument: Instrument) -> None:
-        """체결 반영. Phase 1: long-only 진입(buy)/청산(sell).
+        """체결 반영 — long/short/flat 양방향 (PR H 일반화).
 
-        외부 입력(Fill의 price/size/fee)은 to_decimal로 강제 변환 — float 혼입 방지
-        (spec §11 Decimal 가드).
+        외부 입력(Fill의 price/size/fee)은 to_decimal로 강제 변환 — float 혼입 방지.
 
-        unrealized_pnl은 호출 끝에서 fill.price 기준으로 재계산해 stale 방지:
-        예) 2단위 매수 → on_market(가격↑)로 unrealized 갱신 → 1단위 부분 매도 →
-            남은 1단위에 대한 unrealized가 이전 mark 기준으로 stale될 수 있음. 따라서
-            fill 직후 fill.price를 새로운 마크로 보고 재계산.
+        Cases (signed delta = +size for buy, -size for sell):
+        1. flat → 새 포지션 (long 또는 short). avg_price = fill.price.
+        2. 같은 방향 추가: avg_price 가중평균.
+        3. 반대 방향 부분 청산: realize PnL on closed_size, size 만큼 줄어듦. avg_price 유지.
+        4. 반대 방향 완전 청산 (delta 가 정확히 |position.size|): realize 전체, size=0,
+           avg_price=0.
+        5. 반대 방향 초과 (= flip): allow_flip=True 일 때만 도달 (Sizer 가 차단). 기존
+           포지션 모두 청산 + 잔여로 새 반대 포지션 개시. realize 는 청산분만.
+
+        unrealized_pnl 재계산은 fill.price 기준으로 stale 방지. signed 공식 사용:
+        ``(price - avg) * size`` — long size>0 / short size<0 모두 양수 PnL 일관.
+
+        Cash:
+        - buy: cash -= size * price + fee.
+        - sell: cash += size * price - fee.
+        (short open/close 도 동일 부호 — sell 은 cash 들어옴, buy 는 cash 나감.)
         """
-        del instrument  # Phase 1 미사용 (Phase 2 contract_multiplier 등 활용)
+        del instrument  # contract_multiplier 등 활성은 후속 PR (PR I leverage)
         size = to_decimal(fill.size)
         price = to_decimal(fill.price)
         fee = to_decimal(fill.fee)
 
         position = self._positions.setdefault(fill.symbol, Position(symbol=fill.symbol))
+        delta = size if fill.side == "buy" else -size  # signed
+        prev_size = position.size
+        prev_avg = position.avg_price
+        new_size = prev_size + delta
 
-        if fill.side == "buy":
-            # 가중평균 avg_price 갱신
-            new_size = position.size + size
-            if new_size > 0:
-                position.avg_price = (
-                    position.size * position.avg_price + size * price
-                ) / new_size
+        if prev_size == 0:
+            # Case 1: open from flat
             position.size = new_size
-            self._cash -= size * price + fee
-        else:  # sell
-            # Phase 1: long-only이므로 size <= position.size여야 함 (Sizer가 보장)
-            if size > position.size:
-                raise ValueError(
-                    f"Sell fill of {size} exceeds position size {position.size} "
-                    f"for {fill.symbol!r} (Phase 1 long-only invariant violated)"
-                )
-            realized = (price - position.avg_price) * size
+            position.avg_price = price
+        elif (prev_size > 0 and delta > 0) or (prev_size < 0 and delta < 0):
+            # Case 2: same direction extend → 가중평균
+            position.avg_price = (
+                abs(prev_size) * prev_avg + abs(delta) * price
+            ) / abs(new_size)
+            position.size = new_size
+        else:
+            # Case 3/4/5: reduce / close / flip (반대 방향)
+            close_size = min(abs(prev_size), abs(delta))
+            if prev_size > 0:
+                # closing long
+                realized = (price - prev_avg) * close_size
+            else:
+                # closing short
+                realized = (prev_avg - price) * close_size
             position.realized_pnl += realized
-            position.size -= size
-            if position.size == 0:
-                position.avg_price = Decimal("0")
+
+            if abs(delta) <= abs(prev_size):
+                # Case 3 or 4: pure reduce/close
+                position.size = new_size
+                if new_size == 0:
+                    position.avg_price = Decimal("0")
+                # else avg_price stays
+            else:
+                # Case 5: flip. Sizer 는 allow_flip=False 면 여기 도달 안 시킴.
+                # 기존 포지션 전부 청산 + 잔여로 반대 방향 신규 개시.
+                position.size = new_size
+                position.avg_price = price  # 신규 포지션의 avg = fill price
+
+        # Cash 반영
+        if fill.side == "buy":
+            self._cash -= size * price + fee
+        else:
             self._cash += size * price - fee
 
-        # Stale unrealized 방지 — fill.price 기준으로 재계산
-        if position.size > 0:
+        # Stale unrealized 방지 — signed 공식.
+        if position.size != 0:
             position.unrealized_pnl = (price - position.avg_price) * position.size
         else:
             position.unrealized_pnl = Decimal("0")
@@ -145,7 +176,11 @@ class Ledger:
         position.last_update = fill.timestamp
 
     def on_market(self, snapshots: dict[str, MarketSnapshot]) -> None:
-        """mark-to-market — unrealized_pnl 갱신 + equity_curve에 (ts, equity) 적재."""
+        """mark-to-market — unrealized_pnl 갱신 + equity_curve에 (ts, equity) 적재.
+
+        signed 공식 ``(close - avg) * size`` — long size>0 / short size<0 모두
+        양수 PnL 일관 (PR H short 지원).
+        """
         if not snapshots:
             return
         for symbol, snap in snapshots.items():

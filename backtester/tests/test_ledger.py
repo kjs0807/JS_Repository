@@ -168,12 +168,20 @@ def test_ledger_on_fill_sell_full_resets_avg() -> None:
     assert ledger.equity == Decimal("105000")
 
 
-def test_ledger_on_fill_sell_exceeds_position_raises() -> None:
-    """Sizer 가드를 우회한 매도가 들어오면 Ledger가 invariant 위반으로 ValueError."""
+def test_ledger_on_fill_sell_exceeds_position_executes_flip() -> None:
+    """PR H: Ledger 자체는 long→short flip 을 정상 처리. Sizer 가 정책 게이트.
+
+    이전엔 Phase 1 long-only invariant 로 ValueError("exceeds position size") 였지만,
+    PR H 부터 Ledger 는 양방향 PnL 정확 누적이 단일 책임. flip 차단은 Sizer 의
+    allow_flip=False 정책으로 이동.
+    """
     ledger = Ledger(initial_equity=100000)
     ledger.on_fill(_fill(side="buy", price="50000", size="1", fee="0"), _btc())
-    with pytest.raises(ValueError, match="exceeds position size"):
-        ledger.on_fill(_fill(side="sell", price="51000", size="2", fee="0"), _btc())
+    ledger.on_fill(_fill(side="sell", price="51000", size="2", fee="0"), _btc())
+    pos = ledger.positions["BTCUSDT"]
+    assert pos.size == Decimal("-1")
+    assert pos.avg_price == Decimal("51000")
+    assert pos.realized_pnl == Decimal("1000")
 
 
 # ---------- on_fill: stale unrealized 방지 ----------------------------------

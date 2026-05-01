@@ -113,6 +113,14 @@ class BacktestConfig:
     bar_path_model: BarPathModel = BarPathModel.PESSIMISTIC
     slippage_bps: float = 0.0
 
+    # PR H — Short / Flip 정책. 기본 False = Phase 1 long-only 호환. ``True`` 로
+    # 켜면 Sizer 가 short open/extend/close 를 허용하고 Ledger 가 양방향 PnL 누적.
+    # ``allow_flip`` 은 long↔short 전환 (한 fill 로 새 반대 포지션 개시) 허용 여부 —
+    # PR H 1차는 reject 권장이라 default False. allow_short=True 이고 flip 이 발생하면
+    # Sizer 단계에서 ValueError 로 차단.
+    allow_short: bool = False
+    allow_flip: bool = False
+
     # 포트폴리오
     initial_equity: Decimal
     risk_limits: RiskLimits = field(default_factory=RiskLimits)
@@ -238,6 +246,8 @@ class BacktestConfig:
                 sym: _funding_model_to_dict(fm)
                 for sym, fm in self.funding_models.items()
             },
+            "allow_short": bool(self.allow_short),
+            "allow_flip": bool(self.allow_flip),
         }
 
     @classmethod
@@ -296,6 +306,10 @@ class BacktestConfig:
                 sym: _funding_model_from_dict(fm)
                 for sym, fm in data["funding_models"].items()
             }
+        if "allow_short" in data:
+            kwargs["allow_short"] = bool(data["allow_short"])
+        if "allow_flip" in data:
+            kwargs["allow_flip"] = bool(data["allow_flip"])
         return cls(**kwargs)
 
     def to_yaml(self, path: Path) -> None:

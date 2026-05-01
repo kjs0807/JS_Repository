@@ -151,7 +151,11 @@ class BacktestEngine:
         self.clock_helper = ClockHelper()
         self.orderbook = OrderBook()
         self.ledger = Ledger(initial_equity=config.initial_equity)
-        self.sizer = Sizer()
+        # PR H: Sizer 에 short/flip 정책 전달.
+        self.sizer = Sizer(
+            allow_short=config.allow_short,
+            allow_flip=config.allow_flip,
+        )
         self.risk = RiskManager(config.risk_limits)
         self.execution = self._build_execution_model()
 
