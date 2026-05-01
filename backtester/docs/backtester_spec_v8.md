@@ -1842,7 +1842,7 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
 - [ ] Stateful 지표 (FRAMA), `strategies/frama_channel.py` (PR 16, 진행 예정 — `ctx.indicators`
       view 는 PR 16 직전 prep 으로 활성화 ✅)
 - [x] `analysis/walkforward.py` (PR 17 ✅, rolling + expanding)
-- [ ] `events/replay.py` (후속 PR — canonical JSON ✅ 활성, byte-identical 게이트는 후속 PR)
+- [x] EventLog byte-identical replay 회귀 게이트 (PR B ✅) + canonical JSON. `events/replay.py` CLI 명령은 후속 PR.
 - [x] `viz/metrics.py`, `viz/report.py` (PR 18 ✅, UTC 00:00 daily_resample 자체 구현)
 - [x] **CLI `rebuild-results` + EventLog↔results 정합성 회귀** (PR 19 ✅)
 - [x] EventLog canonical JSON (PR 16 prep 2차 ✅, sort_keys + 고정 separators)
@@ -1852,10 +1852,11 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
 
 **Phase 2 후속 PR (deferred, 아직 wiring 미완)**:
 - ~~Funding engine wiring~~ — PR E 완료 ✅. ``BacktestConfig.funding_models`` 로
-  심볼별 ``FundingModel`` 등록 (YAML round-trip 포함). Engine 의 ``on_market`` 이후
-  funding boundary 마다 ``FundingProcessor.process`` 호출 → ``Ledger.on_settle`` (cash
-  적용) + SETTLE 이벤트 + SNAPSHOT(reason='settlement'). LONG + rate>0 → cash
-  지불, SHORT + rate>0 → cash 수령. ``rate_source='from_data_source'`` 활성은 후속 PR.
+  심볼별 ``FundingModel`` 등록 (YAML round-trip 포함). PR G 정렬: Engine 의 fill →
+  on_market → funding 순서 — funding boundary 마다 ``FundingProcessor.process`` 호출 →
+  ``Ledger.on_settle`` (cash 적용) + SETTLE 이벤트 + SNAPSHOT(reason='settlement').
+  LONG + rate>0 → cash 지불, SHORT + rate>0 → cash 수령. ``rate_source='from_data_source'``
+  활성은 후속 PR.
 - `execution_model='atr_slippage'` config 활성화. 현재 config 레벨 fail-fast.
   ``atr_provider`` 표현 방식 (instrument-bound vs strategy-injected) 결정 후 다시 추가.
 - ~~`gap_policy='ffill'` 실제 보정~~ — PR C 에서 옵션 자체 제거 (config-level

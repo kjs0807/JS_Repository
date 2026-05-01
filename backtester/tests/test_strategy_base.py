@@ -10,7 +10,6 @@ import pytest
 
 from backtester.core.clock import ClockHelper
 from backtester.core.context import BarsView, StrategyContext
-from backtester.core.orderbook import Order
 from backtester.core.orders import OrderIntent, TargetUnits
 from backtester.indicators.stateless.bb import BollingerBands
 from backtester.instruments.base import FeeModel, Instrument
@@ -80,7 +79,7 @@ def test_base_strategy_required_indicators_default_empty() -> None:
 def test_base_strategy_on_pending_orders_default_empty() -> None:
     s = BaseStrategy()
     ctx = _build_ctx()
-    assert s.on_pending_orders(ctx, pending=[]) == []
+    assert s.on_pending_orders(ctx, pending=()) == []
 
 
 def test_base_strategy_on_data_gap_default_empty() -> None:
@@ -142,14 +141,16 @@ def test_subclass_overriding_required_indicators() -> None:
 
 
 def test_subclass_overriding_on_pending_orders_uses_orders() -> None:
-    """on_pending_orders가 Order 리스트를 받아 처리할 수 있다."""
-    received: list[Order] = []
+    """PR G: on_pending_orders 가 read-only ``tuple[OrderView, ...]`` 를 받는다."""
+    from backtester.core.context import OrderView
+
+    received: list[OrderView] = []
 
     class Watcher(BaseStrategy):
         def on_pending_orders(
             self,
             ctx: StrategyContext,
-            pending: list[Order],
+            pending: tuple[OrderView, ...],
         ) -> list:  # type: ignore[type-arg]
             received.extend(pending)
             return []
@@ -159,5 +160,5 @@ def test_subclass_overriding_on_pending_orders_uses_orders() -> None:
 
     s = Watcher()
     ctx = _build_ctx()
-    s.on_pending_orders(ctx, pending=[])
+    s.on_pending_orders(ctx, pending=())
     assert received == []

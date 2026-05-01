@@ -10,8 +10,10 @@ FRAMA 등 후속 전략도 동일 contract 를 통과해야 한다.
    전체 데이터의 같은 시점 events 의 prefix.
 2. **Deterministic events**: 같은 (config, seed, data) 두 번 실행 → events.jsonl
    byte-identical (PR B 와 동일 회귀, 전략별 적용).
-3. **Position state sync**: 매 FILL 이후 같은 ts SNAPSHOT 의 positions 가 fill 누적과
-   일치 — Engine 의 ctx.portfolio wiring 이 ledger 와 동기화돼 있다는 증빙.
+3. **Position state sync**: events.jsonl 만 가지고 — 매 FILL 의 누적 size 가 같은 ts
+   SNAPSHOT.positions 와 일치한다 (Ledger ↔ EventLog 정합성). ``ctx.portfolio`` 의
+   직접 wiring 검증은 ``test_pr_a_portfolio_view.py`` 의 Engine smoke 테스트가 별도로
+   담당하며, 본 contract 는 EventLog 만으로 검증 가능한 표면 정합성을 본다.
 4. **Chart renders**: ``build_run_chart(run_dir)`` 가 raise 없이 ``go.Figure`` 반환.
 5. **Rebuild consistency**: ``rebuild_equity_curve(run_dir)`` 가 events.jsonl 만으로
    ``results/equity_curve.parquet`` 재생성. 빈 이벤트 아닌 경우 행 ≥ 1.

@@ -17,9 +17,8 @@ from pathlib import Path
 import polars as pl
 
 from backtester.core.config import BacktestConfig, DataSourceConfig
-from backtester.core.context import StrategyContext
+from backtester.core.context import OrderView, StrategyContext
 from backtester.core.engine import BacktestEngine
-from backtester.core.orderbook import Order
 from backtester.core.orders import OrderAction, OrderIntent, TargetUnits
 from backtester.events.reader import EventLogReader
 from backtester.events.types import EventType
@@ -105,11 +104,11 @@ class _CancelOnNextBarStrategy(BaseStrategy):
     def on_pending_orders(
         self,
         ctx: StrategyContext,
-        pending: list[Order],
+        pending: tuple[OrderView, ...],
     ) -> list[OrderAction]:
         if self._submitted_id is None:
             for o in pending:
-                if o.intent.type == "limit":
+                if o.type == "limit":
                     self._submitted_id = o.id
                     break
             return []
@@ -158,11 +157,11 @@ class _ModifyLimitStrategy(BaseStrategy):
     def on_pending_orders(
         self,
         ctx: StrategyContext,
-        pending: list[Order],
+        pending: tuple[OrderView, ...],
     ) -> list[OrderAction]:
         if self._submitted_id is None:
             for o in pending:
-                if o.intent.type == "limit":
+                if o.type == "limit":
                     self._submitted_id = o.id
                     break
             return []
@@ -259,7 +258,7 @@ class _CancelUnknownStrategy(BaseStrategy):
     def on_pending_orders(
         self,
         ctx: StrategyContext,
-        pending: list[Order],
+        pending: tuple[OrderView, ...],
     ) -> list[OrderAction]:
         if self._sent:
             return []
@@ -304,11 +303,11 @@ class _ModifyMarketStrategy(BaseStrategy):
     def on_pending_orders(
         self,
         ctx: StrategyContext,
-        pending: list[Order],
+        pending: tuple[OrderView, ...],
     ) -> list[OrderAction]:
         if self._submitted_id is None:
             for o in pending:
-                if o.intent.type == "limit":
+                if o.type == "limit":
                     self._submitted_id = o.id
                     break
             return []

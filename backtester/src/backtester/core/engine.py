@@ -1,14 +1,23 @@
-"""BacktestEngine — Phase 1 통합 오케스트레이터 (spec §4.2, §4.3).
+"""BacktestEngine — Phase 1+ 통합 오케스트레이터 (spec §4.2, §4.3).
 
-ClockEvent 처리 단계 (§4.3):
-1. expire (Phase 1: noop, expire_pending() returns [])
-2. market snapshot 생성
-3. ledger mark-to-market
-4. settlement (Phase 1: 항상 빈 리스트)
-5. active order fill → FILL + SNAPSHOT(fill)
+ClockEvent 처리 단계 (§4.3, PR G 정렬):
+1. expire (PR D 활성: ts >= expires_at 인 active 주문 → expired + ORDER_EXPIRED + SNAPSHOT)
+2. market snapshot 생성 (직전 봉의 OHLC)
+3. **active order fill** (PR G: 같은 봉 open 가격에 체결 — funding/mark 보다 먼저)
+   → FILL + SNAPSHOT(fill)
+4. ledger mark-to-market (post-fill 포지션을 봉 close 로 mark + equity_history 적재)
+5. settlement / funding (PR E, PR G: post-fill + post-mark 포지션으로 계산) →
+   SETTLE + SNAPSHOT(settlement)
 6. warmup 이후 strategy.on_bar → INTENT_CREATED → handle_intent → ORDER_ADDED/REJECTED
-7. on_pending_orders → handle_action
+7. on_pending_orders(ctx, fresh OrdersView) → handle_action (cancel/modify)
 8. periodic SNAPSHOT (snapshot_every_bars 일치 시)
+
+PR G 변경 (이전 버전과 다름):
+- 이전: snapshot → mark → funding → fill — 같은 봉의 fill 이 mark/funding 에 누락됨.
+- 이제: snapshot → fill → mark → funding — fill 결과가 같은 봉의 mark + funding 에 반영.
+- on_pending_orders 가 ``list[Order]`` 가 아닌 ``tuple[OrderView, ...]`` (read-only)
+  를 받음. 새 intent 가 처리된 후 fresh OrdersView 를 주입 — ctx.orders 와 동일한
+  스냅샷이 아니라 "그 시점 active 주문" 기준.
 
 모든 SNAPSHOT은 `_emit_snapshot(ts, reason)` 헬퍼 경유 — snapshot_reason 필드 자동 부착.
 """
@@ -538,16 +547,33 @@ class BacktestEngine:
             self.ledger.on_expired(expired)
             self._emit_snapshot(ts, "expire")
 
-        # 2. 시장 스냅샷
+        # 2. 시장 스냅샷 (직전 봉 OHLC)
         snapshots = self._build_snapshots(ts, event.bar_closes)
         self.current_snapshots = snapshots
 
-        # 3. mark-to-market
+        # 3. PR G: 활성 주문 체결 — 봉 open 가격으로 (NextBarOpenExecution).
+        # mark/funding 보다 먼저 처리 → 같은 봉에서 fill 된 포지션이 같은 봉의 mark
+        # 와 funding 계산에 반영된다.
+        for order in self.orderbook.get_active():
+            snap = snapshots.get(order.intent.symbol)
+            if snap is None:
+                continue
+            instrument = self.instrument_registry.get(order.intent.symbol)
+            fill = self.execution.try_fill(order, snap, instrument)
+            if fill is None:
+                continue
+            self.orderbook.fill(order.id, fill)
+            self.ledger.on_fill(fill, instrument)
+            self._fill_count += 1
+            self._event_log.append(Event(ts=ts, type=EventType.FILL, payload=fill))
+            self._emit_snapshot(ts, "fill")  # implicit, 주기 무관
+
+        # 4. mark-to-market — post-fill 포지션을 봉 close 로 mark + equity_history 적재.
         self.ledger.on_market(snapshots)
 
-        # 4. PR E: Funding/Settlement — funding_processor 가 있으면 봉 마감 시각이 funding
-        # boundary 인지 검사 (FundingProcessor.process 가 ``is_funding_boundary`` 내부에서
-        # 판정). 발행된 CashFlow 는 Ledger.on_settle 로 cash 반영 + SETTLE 이벤트 +
+        # 5. PR E + PR G: Funding/Settlement — post-fill, post-mark 포지션으로 계산.
+        # funding_processor 가 있으면 봉 마감 시각이 funding boundary 인지 검사.
+        # CashFlow → Ledger.on_settle (cash 반영) + SETTLE 이벤트 +
         # SNAPSHOT(reason='settlement').
         if self.funding_processor is not None:
             for symbol in self.config.timeframes_per_symbol:
@@ -581,21 +607,6 @@ class BacktestEngine:
                     )
                 )
                 self._emit_snapshot(ts, "settlement")
-
-        # 5. 활성 주문 체결
-        for order in self.orderbook.get_active():
-            snap = snapshots.get(order.intent.symbol)
-            if snap is None:
-                continue
-            instrument = self.instrument_registry.get(order.intent.symbol)
-            fill = self.execution.try_fill(order, snap, instrument)
-            if fill is None:
-                continue
-            self.orderbook.fill(order.id, fill)
-            self.ledger.on_fill(fill, instrument)
-            self._fill_count += 1
-            self._event_log.append(Event(ts=ts, type=EventType.FILL, payload=fill))
-            self._emit_snapshot(ts, "fill")  # implicit, 주기 무관
 
         # 6. 봉 마감 시 전략 + periodic SNAPSHOT
         # multi-TF: primary TF 가 닫혔을 때만 strategy 호출 + bar_count 증가.
@@ -666,9 +677,11 @@ class BacktestEngine:
         for intent in intents:
             self._handle_intent(intent, ts)
 
-        # Pending order management
-        pending = self.orderbook.get_active()
-        actions = self.strategy.on_pending_orders(ctx, pending)
+        # Pending order management (PR G: read-only OrdersView, post-intent 시점 빌드).
+        # 새 intent 처리로 추가된 주문도 ``fresh_orders`` 에 포함된다 — 전략이 방금 발행
+        # 한 limit/stop 을 같은 on_bar 안에서 cancel/modify 하는 경로도 가능.
+        fresh_orders = self._build_orders_view()
+        actions = self.strategy.on_pending_orders(ctx, fresh_orders.open_orders())
         for action in actions:
             self._handle_action(action, ts)
 
