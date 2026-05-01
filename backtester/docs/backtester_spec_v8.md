@@ -680,6 +680,250 @@ class EventLogReader:
 
 ---
 
+### 3.16 Crypto Futures Lifecycle Target Model (Phase 2.5)
+
+PR A~G까지의 결과로 `backtester`는 전략 개발용 기준 엔진의 기본 계약
+(`ctx.indicators`, `ctx.has_position`, `ctx.open_orders`, deterministic EventLog,
+funding wiring, read-only pending order view)을 갖췄다. 다만 Crypto/Bybit_Trading의
+BBKC처럼 실제 crypto perpetual futures 전략을 그대로 포팅하려면 다음 lifecycle
+기능을 추가해야 한다.
+
+**목표 범위**:
+- crypto spot / crypto perpetual futures 우선. 해외주식, 페어, GlobalClock은 Phase 3+.
+- long / short / flat 양방향 포지션.
+- leverage 기반 notional sizing.
+- reduce-only 청산 주문.
+- entry 이후 TP/SL bracket child order 생성.
+- OCO: TP 또는 SL 중 하나가 체결되면 sibling 자동 취소.
+- trailing stop / break-even stop / time stop.
+- funding 포함 equity와 deterministic EventLog.
+
+**핵심 invariant**:
+- 전략은 `ctx.position(symbol)`, `ctx.has_position(symbol)`, `ctx.open_orders(symbol)`만
+  읽고 OrderBook/Ledger mutable 객체를 직접 만지지 않는다.
+- SizeSpec 변환은 Sizer만 담당한다.
+- 포지션 방향 전환, reduce-only clamp/reject, leverage 노출 제한은 Sizer/Risk/Ledger
+  중 한 곳에만 흩어지지 않게 명시적으로 배치한다.
+- TP/SL/trailing/time_stop은 모두 EventLog에 원인과 order relationship을 남긴다.
+- 같은 봉에서 TP와 SL이 모두 도달하면 `BarPathModel`이 우선순위를 결정한다.
+
+#### 3.16.1 Futures SizeSpec 후보
+
+```python
+@dataclass(frozen=True)
+class TargetMarginPct:
+    margin_pct: Decimal
+    leverage: Decimal
+
+@dataclass(frozen=True)
+class TargetNotionalPct:
+    notional_pct: Decimal
+
+@dataclass(frozen=True)
+class FullEquityNotional:
+    leverage: Decimal
+```
+
+계산 예:
+
+```python
+margin = equity * margin_pct
+notional = margin * leverage
+units = notional / market.close
+```
+
+`TargetUnits`, `TargetNotional`, `ClosePosition`은 계속 지원한다. `TargetWeight`,
+`FullPosition`, `ScaleIn`은 futures sizing 정리 시 함께 재검토한다.
+
+#### 3.16.2 Reduce-Only 후보
+
+```python
+@dataclass(frozen=True)
+class OrderIntent:
+    ...
+    reduce_only: bool = False
+```
+
+정책 결정 필요:
+- flat 상태 reduce-only 주문: reject 권장.
+- long 상태 reduce-only sell 수량이 position size보다 큼: clamp 또는 reject 중 결정.
+- short 상태 reduce-only buy 수량이 abs(position size)보다 큼: clamp 또는 reject 중 결정.
+- reduce-only 주문은 절대 반대 방향 신규 포지션을 열 수 없다.
+
+#### 3.16.3 Bracket / OCO 후보
+
+```python
+@dataclass(frozen=True)
+class BracketSpec:
+    take_profit_price: Decimal | None = None
+    stop_loss_price: Decimal | None = None
+    time_stop_bars: int | None = None
+
+@dataclass(frozen=True)
+class OrderIntent:
+    ...
+    bracket: BracketSpec | None = None
+```
+
+Entry fill 후 Engine이 child order를 만든다:
+- long entry: TP = reduce-only sell limit, SL = reduce-only sell stop.
+- short entry: TP = reduce-only buy limit, SL = reduce-only buy stop.
+- child orders는 `parent_order_id`, `oco_group_id`, `reduce_only=True`를 갖는다.
+- TP/SL 중 하나가 체결되면 같은 `oco_group_id`의 active sibling을 자동 cancel하고
+  `ORDER_CANCELLED(reason="oco_sibling_filled")`를 남긴다.
+
+#### 3.16.4 Trailing / Break-Even 후보
+
+초기 구현은 전략 helper 방식이 우선이다. 전략은 `ctx.open_orders(symbol)`로 stop child
+order를 찾고 `OrderAction(type="modify", modify_stop_price=...)`를 반환한다.
+
+표준 helper는 후속으로 추가 가능:
+
+```python
+@dataclass(frozen=True)
+class TrailingStopSpec:
+    break_even_trigger: Decimal
+    trail_start: Decimal
+    trail_distance: Decimal
+```
+
+Ratchet invariant:
+- long stop은 위로만 이동한다.
+- short stop은 아래로만 이동한다.
+- 불리한 방향 stop update는 reject 또는 no-op.
+
+#### 3.16.5 Time Stop 후보
+
+선택지:
+- Engine이 `PositionView.opened_at`, `opened_bar_index`, `bars_held`를 관리.
+- 또는 전략 local state로 구현하되 Futures Strategy Harness에서 검증.
+
+표준 API 후보:
+
+```python
+ctx.bars_held(symbol) -> int | None
+```
+
+Time stop 청산은 market reduce-only close intent로 표현한다.
+
+---
+
+#### 3.16.6 Exchange Rules / Precision 후보
+
+Crypto 전략 검증은 주문 방향만 맞아서는 부족하다. Bybit 같은 거래소는 symbol별
+price tick, quantity step, minimum quantity, minimum notional, maker/taker fee tier가
+다르므로, backtester가 이를 반영하지 않으면 실제 주문 가능성과 백테스트 체결 수량이
+어긋난다.
+
+1차 구현 후보:
+
+```python
+@dataclass(frozen=True)
+class ExchangeRule:
+    symbol: str
+    price_tick: Decimal
+    qty_step: Decimal
+    min_qty: Decimal
+    min_notional: Decimal
+    max_leverage: Decimal | None = None
+```
+
+적용 위치:
+- Sizer: 계산된 units를 qty_step에 맞춰 보수적으로 quantize.
+- OrderBook / RiskManager: limit/stop price가 price_tick에 맞는지 검증.
+- RiskManager: min_qty / min_notional 미만 주문 reject.
+- InstrumentRegistry 또는 별도 `ExchangeRuleRegistry`에서 symbol별 rule을 조회.
+
+정책 (PR O 구현 + PR U 정정):
+- ``price_tick``: 정수배 위반 시 reject (자동 round 금지). limit/stop intent 의
+  ``limit_price`` / ``stop_price`` 가 ``price_tick`` 정수배가 아니면 ValueError →
+  Engine 이 ORDER_REJECTED 변환.
+- ``qty_step``: ``Sizer`` 가 계산된 units 를 ``qty_step.floor`` 로 보수 quantize
+  (자동 round 가 아니라 자동 ``floor`` — 절대로 의도한 수량보다 크지 않게). quantize
+  결과가 ``min_qty`` 미만이거나 ``notional < min_notional`` 이면 reject.
+- ``rounding_policy`` (round / ceil) 옵션은 후속 PR — 현재 floor 만 지원.
+- EventLog 에는 reject reason 을 남겨야 한다.
+
+#### 3.16.7 Margin / Liquidation 후보
+
+Leverage sizing만 추가하고 liquidation을 무시하면 crypto perpetual 전략의 손익이
+과도하게 낙관적이 된다. Phase 2.5에서는 최소한 isolated-margin에 가까운 보수 모델을
+도입한다.
+
+필수 상태:
+- position notional
+- initial margin
+- maintenance margin
+- leverage
+- estimated liquidation price
+
+필수 이벤트:
+- `LIQUIDATION` 또는 `FORCED_CLOSE`
+- liquidation fee / penalty가 있으면 cash에 반영
+- liquidation 이후 position은 flat, 관련 bracket/OCO child order는 cancel
+
+1차 범위:
+- cross/isolated 전체 거래소 모델을 완전 재현하지 않는다.
+- 단일 symbol isolated-style 근사부터 구현한다.
+- liquidation price는 보수적으로 계산하고, 같은 봉에서 low/high가 도달하면
+  `BarPathModel` 정책으로 처리한다.
+
+#### 3.16.8 Real Funding Rate 후보
+
+`FundingModel(rate_source="constant")`는 단위 테스트와 deterministic smoke에는 충분하지만
+실제 crypto futures 검증에는 부족하다. Bybit 과거 funding rate를 run data와 함께
+self-contained로 저장하고, rebuild/report/walkforward가 외부 cache 없이 재현되어야 한다.
+
+후보:
+- `data/funding_source.py`: symbol별 funding rate 시계열 Protocol.
+- `BybitDataSource` 또는 별도 fetcher가 funding history를 parquet cache로 저장.
+- run_dir에는 `funding/{symbol}.parquet` 또는 `data/funding_{symbol}.parquet`로 copy.
+- Engine funding boundary에서 해당 timestamp의 rate를 조회.
+
+정책:
+- rate가 없으면 `gap_policy`와 별개로 `funding_gap_policy`를 둔다.
+- 기본은 strict/reject. ffill은 명시 옵션 전까지 금지.
+
+#### 3.16.9 Walkforward / OOS 완성 후보
+
+현재 walkforward는 train 구간을 같은 engine run으로 warmup하고 test metrics만 잘라낸다.
+전략 개발용 기준 엔진에서는 다음 계약을 명시한다.
+
+- `state_policy="carryover" | "reset"`:
+  - carryover: train에서 만들어진 indicator/strategy/position state가 test로 이어진다.
+  - reset: test 시작 시 전략/포지션 상태를 reset하고 test 구간만 실행한다.
+- `strategy_factory(window)` 지원: window별 파라미터/최적화 결과를 주입할 수 있어야 한다.
+- window별 config.yaml, metrics_report.html, run_chart.html, events.jsonl을 보존한다.
+- aggregate report는 window별 OOS metrics와 전체 OOS stitched equity를 모두 제공한다.
+
+주의:
+- hyperparameter optimization 자체는 Phase 4 sweep 영역이다.
+- Phase 2.5에서는 window-aware strategy factory와 reset/carryover 정책까지만 완성한다.
+
+#### 3.16.10 Forward / Paper Runner 후보
+
+backtester의 최종 crypto 목표는 과거 데이터 백테스트뿐 아니라, 같은 전략을 forward/paper
+모드에서 돌려 event log와 report를 비교할 수 있게 하는 것이다.
+
+후보 모듈:
+- `runtime/forward_runner.py`
+- `runtime/paper_broker.py`
+- `runtime/live_data_adapter.py`
+
+필수 계약:
+- Strategy API는 BacktestEngine과 동일한 `StrategyContext` / `OrderIntent`를 사용한다.
+- paper broker는 실제 거래소 주문을 내지 않고, ExchangeRule / fee / funding / slippage
+  정책을 공유한다.
+- forward run도 `events.jsonl`, `config.yaml`, `run_chart.html`, `metrics_report.html`을
+  생성한다.
+- forward 결과는 같은 기간의 backtest replay와 비교 가능해야 한다.
+
+Phase 2.5 1차 범위:
+- WebSocket 실시간 안정화는 범위 밖.
+- parquet/CSV/Bybit polling data를 순차 공급하는 deterministic paper runner부터 구현한다.
+
+---
+
 ## 4. BacktestEngine + BacktestResult
 
 ### 4.1 BacktestResult
@@ -1541,6 +1785,27 @@ ClockEvent.timestamp, last_closed_time, BarsView.
 ### 13.10 BacktestResult 정확성
 auto_suffix 시 resolved_run_id ≠ requested_run_id 검증.
 
+### 13.11 Futures Strategy Harness (Phase 2.5)
+
+Crypto futures 전략을 추가할 때는 기존 `tests/_strategy_harness.py`의 5 contracts에
+다음 futures contracts를 추가한 harness를 통과해야 한다.
+
+필수 contract:
+- long / short open-close lifecycle.
+- reduce-only invariant: 청산 주문이 신규 반대 포지션을 열지 않음.
+- bracket consistency: entry fill 후 TP/SL child order 생성.
+- OCO consistency: TP/SL 한쪽 체결 후 sibling 자동 cancel.
+- same-bar TP/SL: `BarPathModel.PESSIMISTIC` / `OPTIMISTIC` 정책 차이 검증.
+- funding 포함 equity: long/short funding 부호와 cash/equity 반영.
+- deterministic replay: 동일 config/data/seed → events.jsonl byte-identical.
+- chart/report/rebuild smoke.
+- walkforward smoke.
+
+파일 위치:
+- 공통 harness: `tests/_strategy_harness.py`
+- futures 확장 harness: `tests/_futures_strategy_harness.py` (Phase 2.5 PR T)
+- 첫 통과 전략: `strategies/bbkc_legacy_compat.py`
+
 ---
 
 ## 14. CLI
@@ -1881,13 +2146,129 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
   (FILL ↔ SNAPSHOT positions) / chart 렌더 가능 / rebuild_results 정합성. BBKC 가
   첫 통과 사례. FRAMA 등 신규 전략은 동일 harness 로 같은 5 검증을 통과해야 한다.
 
+### Phase 2.5 — Crypto Futures Core + Strategy Parity
+
+목표: PR 16(FRAMA)와 다양한 자산군 확장 전에, crypto futures 전략의 일반적인
+진입·청산 생명주기를 backtester가 표현할 수 있게 한다. 이 단계가 끝나면
+Crypto/Bybit_Trading의 BBKC 같은 전략을 단순화하지 않고 포팅해 meaningful backtest,
+OOS, walkforward 검증을 수행할 수 있어야 한다.
+
+작업 트리 원칙:
+- `src/backtester/core/`: 주문 타입, OrderIntent, OrderAction, EventType, Engine event-loop.
+- `src/backtester/portfolio/`: long/short Ledger, Sizer, RiskManager.
+- `src/backtester/execution/`: bracket/OCO/bar path, trailing helper, slippage integration.
+- `src/backtester/strategies/`: `bbkc_legacy_compat.py` 등 전략 포팅.
+- `src/backtester/indicators/`: RSI, FRAMA 등 전략별 지표.
+- `tests/`: PR별 단위/통합 테스트 + `tests/_futures_strategy_harness.py`.
+- `docs/backtester_spec_v8.md`: 각 PR 시작 전에 계약을 먼저 갱신.
+
+**PR H — Short Position Support**
+- `Ledger.on_fill`이 long/short 양방향을 지원.
+- sell on flat → short open, buy on short → reduce/close.
+- flip(long→short, short→long)은 1차에서 reject 권장. 허용은 별도 결정 후.
+- `Sizer._validate_long_only` 제거 또는 `BacktestConfig.allow_short` 도입.
+- 테스트: long/short open-close, partial reduce, realized/unrealized PnL 부호,
+  funding long/short 부호.
+
+**PR I — Leverage / Futures Sizing**
+- `TargetMarginPct`, `TargetNotionalPct`, `FullEquityNotional` 후보 도입.
+- `notional = equity * margin_pct * leverage`.
+- `RiskLimits.max_leverage`, `max_total_exposure` 실제 검사.
+- 테스트: equity/price/leverage별 size 산출, risk reject, deterministic payload.
+
+**PR J — Reduce-Only / Close Semantics**
+- `OrderIntent.reduce_only: bool = False`.
+- `ClosePosition`은 reduce-only로 해석.
+- reduce-only 주문은 새 반대 포지션을 열 수 없음.
+- clamp vs reject 정책 결정 필요. 1차는 reject 권장.
+- 테스트: flat reduce-only reject, long reduce-only sell, short reduce-only buy,
+  oversize reduce-only 정책.
+
+**PR K — Bracket Orders (TP / SL)**
+- `BracketSpec(take_profit_price, stop_loss_price, time_stop_bars)` 후보 도입.
+- entry fill 후 reduce-only child orders 생성.
+- child order에 `parent_order_id`, `oco_group_id` 기록.
+- EventLog에 relationship이 남도록 `ORDER_ADDED` payload 확장.
+- 테스트: long/short entry 후 TP/SL child 생성, child reduce-only, chart marker smoke.
+
+**PR L — OCO + Same-Bar TP/SL Policy**
+- OCO sibling 자동 cancel.
+- `ORDER_CANCELLED(reason="oco_sibling_filled")`.
+- 같은 봉에서 TP/SL 모두 도달 시 `BarPathModel` 적용:
+  - PESSIMISTIC: 전략에 불리한 쪽 우선.
+  - OPTIMISTIC: 전략에 유리한 쪽 우선.
+  - OPEN_TO_CLOSE/OHLC_ORDER는 별도 명시.
+- 테스트: TP fill → SL cancel, SL fill → TP cancel, same-bar 정책별 결과.
+
+**PR M — Trailing / Break-Even Stop**
+- 1차는 strategy helper 방식: `ctx.open_orders()` + `OrderAction.modify`.
+- stop ratchet invariant:
+  - long stop은 위로만.
+  - short stop은 아래로만.
+- 후속으로 `TrailingStopSpec` 표준화 가능.
+- 테스트: break-even trigger, trailing start, ratchet only, short trailing.
+
+**PR N — Time Stop**
+- `PositionView.opened_at`, `opened_bar_index`, `bars_held` 또는 `ctx.bars_held(symbol)`
+  후보 도입.
+- time stop은 market reduce-only close intent.
+- 테스트: N bars 후 close, TP/SL 선체결 시 미발동, 재진입 시 bars_held reset.
+
+**PR O — Exchange Rules / Bybit Precision**
+- `ExchangeRule` / registry 후보를 도입한다.
+- price_tick, qty_step, min_qty, min_notional, max_leverage를 검증한다.
+- 기본 정책은 자동 보정이 아니라 reject. round 정책은 별도 옵션 전까지 금지한다.
+- 테스트: tick/step/min-notional reject, deterministic reject event, Bybit rule YAML round-trip.
+
+**PR P — Margin / Liquidation**
+- leverage position의 initial margin, maintenance margin, liquidation price를 추적한다.
+- liquidation 또는 forced close 이벤트를 추가한다.
+- liquidation 이후 bracket/OCO child order를 cancel한다.
+- 테스트: long/short liquidation, non-liquidation path, fee/penalty cash 반영,
+  same-bar liquidation policy.
+
+**PR Q — Real Funding Rate Source**
+- `FundingModel(rate_source="from_data_source")`를 활성화한다.
+- Bybit funding history를 local parquet cache + run_dir persistent artifact로 저장한다.
+- rebuild/report/walkforward가 외부 cache 없이 funding을 재현해야 한다.
+- 테스트: funding parquet lookup, missing-rate strict reject, cache-clean self-contained run.
+
+**PR R — Walkforward / OOS Completion**
+- `state_policy="carryover" | "reset"`을 도입한다.
+- `strategy_factory(window)`를 지원한다.
+- window별 config/events/chart/report와 aggregate OOS report를 보존한다.
+- 테스트: reset/carryover 차이, window-aware params, stitched OOS equity, report smoke.
+
+**PR S — Forward / Paper Runner**
+- `runtime/forward_runner.py`, `runtime/paper_broker.py` 후보를 추가한다.
+- BacktestEngine과 같은 StrategyContext / OrderIntent / EventLog 계약을 사용한다.
+- deterministic polling/parquet 기반 paper run을 1차 범위로 한다.
+- 테스트: 같은 데이터 구간 backtest vs paper replay event surface 비교,
+  run_dir artifact 생성, report/rebuild smoke.
+
+**PR T — BBKC Legacy Compat Strategy + Futures Harness**
+- `strategies/bbkc_legacy_compat.py`.
+- Crypto/Bybit_Trading BBKC 파라미터명 최대한 유지:
+  `bb_period`, `bb_std`, `kc_period`, `kc_mult`, `atr_period`, `rsi_period`,
+  `rsi_filter`, `tp_pct`, `sl_pct`, `leverage`, `exit_mode`, `drop_tp`,
+  `time_stop_bars`.
+- RSI indicator 추가.
+- fixed TP/SL, be_trail, time_stop, long/short lifecycle을 모두 포함한다.
+- `tests/_futures_strategy_harness.py`를 추가하고 BBKC legacy compat을 첫 통과 사례로 둔다.
+- 이후 FRAMA/RSI 등 crypto futures 전략은 이 harness를 기본 게이트로 통과해야 한다.
+
+Milestone:
+- **Futures Core**: PR H~L 완료.
+- **Crypto Reality Layer**: PR O~S 완료.
+- **Strategy Parity**: PR T 완료.
+- 그 다음 PR 16(FRAMA)와 Phase 3 자산군 확장으로 이동.
+
 ### Phase 3 — 자산군 확장 + 비교 시각화 (1-2주)
 
 - [ ] GlobalClock (session_based)
 - [ ] 해외주식 데이터
 - [ ] FRAMA를 SPX/NDX
 - [ ] 멀티 자산 (BTC-ETH pairs)
-- [ ] Liquidation, margin call
 - [ ] FeeModel tiered
 - [ ] `viz/compare.py`, `walkforward_viz.py`
 
@@ -2251,6 +2632,94 @@ BB-KC 포팅 경계 (절대 위반 금지):
 각 PR ~300라인. 매번 회귀 + lookahead 그린.
 
 ---
+
+### Phase 2.5 (PR H~T) — Crypto Futures Core + Strategy Parity
+
+이 블록은 §3.16 / §13.11 / §17 Phase 2.5를 구현 단위로 쪼갠 것이다. 목표는
+Crypto/Bybit_Trading의 BBKC 같은 futures lifecycle 전략을 단순화하지 않고
+backtester에 붙일 수 있게 만드는 것.
+
+**PR H — Short Position Support**
+- 소유 파일: `portfolio/ledger.py`, `portfolio/sizer.py`, `core/context.py`,
+  `tests/test_pr_h_short_support.py`.
+- 완료 조건: long/short open-close, partial reduce, flip 정책, realized/unrealized PnL,
+  funding long/short 부호 테스트.
+
+**PR I — Leverage / Futures Sizing**
+- 소유 파일: `core/orders.py`, `portfolio/sizer.py`, `portfolio/risk.py`,
+  `core/config.py`, `tests/test_pr_i_futures_sizing.py`.
+- 완료 조건: equity * margin_pct * leverage sizing, max_leverage/max_total_exposure
+  risk reject, deterministic payload 테스트.
+
+**PR J — Reduce-Only / Close Semantics**
+- 소유 파일: `core/orders.py`, `portfolio/sizer.py`, `portfolio/ledger.py`,
+  `core/engine.py`, `tests/test_pr_j_reduce_only.py`.
+- 완료 조건: flat reduce-only reject, long reduce-only sell, short reduce-only buy,
+  oversize 정책 테스트.
+
+**PR K — Bracket Orders (TP / SL)**
+- 소유 파일: `core/orders.py`, `core/orderbook.py`, `core/engine.py`,
+  `events/types.py`, `tests/test_pr_k_bracket_orders.py`.
+- 완료 조건: parent entry fill 후 TP/SL child order 생성, reduce-only child,
+  parent_order_id/oco_group_id EventLog 기록.
+
+**PR L — OCO + Same-Bar TP/SL Policy**
+- 소유 파일: `core/orderbook.py`, `execution/next_bar.py`, `core/engine.py`,
+  `tests/test_pr_l_oco_bar_path.py`.
+- 완료 조건: sibling 자동 cancel, OCO cancel reason, same-bar TP/SL의
+  PESSIMISTIC/OPTIMISTIC 결과 차이 테스트.
+
+**PR M — Trailing / Break-Even Stop**
+- 소유 파일: `core/orders.py`, `core/orderbook.py`, `strategies/helpers.py` 또는
+  `execution/trailing.py`, `tests/test_pr_m_trailing_stop.py`.
+- 완료 조건: break-even trigger, trailing ratchet, long/short 방향별 stop update 테스트.
+
+**PR N — Time Stop**
+- 소유 파일: `portfolio/position.py`, `core/context.py`, `core/engine.py`,
+  `tests/test_pr_n_time_stop.py`.
+- 완료 조건: `ctx.bars_held(symbol)` 또는 equivalent view, N bars 후 reduce-only close,
+  재진입 reset 테스트.
+
+**PR O — Exchange Rules / Bybit Precision**
+- 소유 파일: `instruments/base.py`, `instruments/registry.py`, `portfolio/sizer.py`,
+  `portfolio/risk.py`, `core/config.py`, `tests/test_pr_o_exchange_rules.py`.
+- 완료 조건: tick/step/min_qty/min_notional 검증, max_leverage 검증,
+  deterministic reject event, YAML round-trip.
+
+**PR P — Margin / Liquidation**
+- 소유 파일: `portfolio/position.py`, `portfolio/ledger.py`, `portfolio/risk.py`,
+  `core/engine.py`, `events/types.py`, `tests/test_pr_p_liquidation.py`.
+- 완료 조건: long/short liquidation, forced close event, liquidation 이후 child order cancel,
+  cash/equity 반영, same-bar path 정책.
+
+**PR Q — Real Funding Rate Source**
+- 소유 파일: `data/funding_source.py`, `data/bybit_source.py`, `execution/funding.py`,
+  `core/config.py`, `core/engine.py`, `tests/test_pr_q_funding_source.py`.
+- 완료 조건: Bybit funding parquet cache, run_dir self-contained persistence,
+  from_data_source lookup, missing-rate strict reject.
+
+**PR R — Walkforward / OOS Completion**
+- 소유 파일: `analysis/walkforward.py`, `viz/report.py`, `cli/main.py`,
+  `tests/test_pr_r_walkforward_oos.py`.
+- 완료 조건: state_policy carryover/reset, strategy_factory(window),
+  stitched OOS equity, window별 report artifact.
+
+**PR S — Forward / Paper Runner**
+- 소유 파일: `runtime/forward_runner.py`, `runtime/paper_broker.py`,
+  `runtime/live_data_adapter.py`, `cli/main.py`, `tests/test_pr_s_forward_runner.py`.
+- 완료 조건: BacktestEngine과 동일 StrategyContext/OrderIntent/EventLog 사용,
+  deterministic paper run, backtest replay와 event surface 비교.
+
+**PR T — BBKC Legacy Compat Strategy + Futures Harness**
+- 소유 파일: `indicators/stateless/rsi.py`, `strategies/bbkc_legacy_compat.py`,
+  `tests/_futures_strategy_harness.py`, `tests/test_pr_t_bbkc_futures_harness.py`,
+  `tests/fixtures/*`.
+- 완료 조건: Crypto/Bybit_Trading BBKC entry parity, long/short direction,
+  fixed TP/SL, drop_tp, be_trail, time_stop, funding, deterministic replay,
+  chart/report/rebuild/walkforward/forward smoke.
+
+각 PR은 spec 먼저 갱신 → 구현 → 단위 테스트 → 통합/harness 테스트 → `pytest / ruff / mypy src tests`
+순서로 닫는다.
 
 ## 21. 주의 사항 (Claude Code에 명시)
 

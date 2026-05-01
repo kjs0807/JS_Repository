@@ -67,7 +67,9 @@ class BBKCLegacyCompatStrategy(BaseStrategy):
         tp_pct: Decimal = Decimal("0.06"),
         sl_pct: Decimal = Decimal("0.07"),
         leverage: Decimal = Decimal("3"),
-        margin_pct: Decimal = Decimal("0.1"),
+        # PR U 후속 정정 — legacy ``max_position_pct=0.05`` 기본값 일치. 0.1 이면
+        # 같은 leverage 에서 포지션이 2 배 커진다.
+        margin_pct: Decimal = Decimal("0.05"),
         exit_mode: ExitMode = "fixed",
         trail_be_at_tp_frac: Decimal = Decimal("0.5"),
         trail_start_at_tp_frac: Decimal = Decimal("0.8"),
