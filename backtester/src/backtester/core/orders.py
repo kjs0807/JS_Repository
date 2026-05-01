@@ -133,6 +133,10 @@ class OrderIntent:
     tif: Literal["GTC", "IOC", "FOK", "DAY"] = "GTC"
     client_order_id: str | None = None
     expires_at: datetime | None = None
+    # PR J — reduce-only flag. True 면 새 반대 방향 포지션을 절대 열지 않는다.
+    # flat 또는 같은 방향 (extend) 시도는 Sizer 가 reject. ClosePosition 은 본질적으로
+    # reduce-only — 별도 표기 없이도 동일 의미로 처리.
+    reduce_only: bool = False
 
 
 # ---------- OrderAction -----------------------------------------------------

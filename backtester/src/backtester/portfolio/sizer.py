@@ -66,6 +66,12 @@ class Sizer:
         intent.side가 거래 방향. ``allow_short`` 가 False 면 sell 결과 음수 포지션 →
         NotImplementedError. allow_flip 이 False 면 한 fill 으로 long↔short 전환도
         ValueError.
+
+        PR J: ``intent.reduce_only=True`` 또는 ``ClosePosition`` SizeSpec 은 새 반대
+        포지션을 열지 않도록 추가 검사:
+        - flat → ValueError (closing 할 게 없음)
+        - same-direction (long + buy / short + sell) → ValueError (extend 시도)
+        - oversize (close size > abs(position size)) → ValueError (1차 reject 정책)
         """
         del instrument  # contract_multiplier 활용은 PR O exchange rules 에서.
         spec = intent.size_spec
@@ -93,7 +99,21 @@ class Sizer:
 
         if isinstance(spec, ClosePosition):
             if position.is_flat:
+                # ClosePosition + flat → 거래 없음 (정상 noop). reduce_only=True 명시
+                # intent 와 달리 ClosePosition 은 의미상 "있으면 닫고 없으면 패스".
                 return Decimal("0")
+            # side mismatch 검사 — long 보유 + side='buy' 또는 short 보유 + side='sell'
+            # 은 ClosePosition 의 본질을 위반.
+            if position.size > 0 and intent.side != "sell":
+                raise DataError(
+                    f"ClosePosition on long position requires side='sell', "
+                    f"got side={intent.side!r} for {intent.symbol!r}"
+                )
+            if position.size < 0 and intent.side != "buy":
+                raise DataError(
+                    f"ClosePosition on short position requires side='buy', "
+                    f"got side={intent.side!r} for {intent.symbol!r}"
+                )
             return abs(position.size)
 
         # PR I — Futures sizing 변종.
@@ -152,6 +172,63 @@ class Sizer:
         )
 
     def _enforce_short_policy(
+        self,
+        intent: OrderIntent,
+        position: Position,
+        units: Decimal,
+    ) -> Decimal:
+        # PR J: reduce_only 검사 우선. 새 반대 포지션 열기를 절대 차단.
+        if intent.reduce_only:
+            self._enforce_reduce_only(intent, position, units)
+        return self._check_short_flip(intent, position, units)
+
+    def _enforce_reduce_only(
+        self,
+        intent: OrderIntent,
+        position: Position,
+        units: Decimal,
+    ) -> None:
+        """PR J reduce_only 정책: 새 포지션 / extend / 반대 방향 초과 모두 reject.
+
+        Allowed:
+        - long > 0 + sell + units <= long_size
+        - short < 0 + buy + units <= abs(short_size)
+        Rejected:
+        - flat (nothing to reduce)
+        - same direction (long + buy, short + sell — extend)
+        - oversize (close > position) — flip to opposite would happen
+        """
+        side = intent.side
+        size = position.size
+        if size == 0:
+            raise ValueError(
+                f"reduce_only=True but position is flat for {intent.symbol!r} "
+                f"(nothing to reduce)"
+            )
+        if size > 0:
+            if side == "buy":
+                raise ValueError(
+                    f"reduce_only=True with side='buy' on long position {size} "
+                    f"would extend, not reduce, for {intent.symbol!r}"
+                )
+            if units > size:
+                raise ValueError(
+                    f"reduce_only=True oversize sell {units} > long {size} "
+                    f"for {intent.symbol!r} (would flip to short)"
+                )
+        else:  # size < 0
+            if side == "sell":
+                raise ValueError(
+                    f"reduce_only=True with side='sell' on short position {size} "
+                    f"would extend, not reduce, for {intent.symbol!r}"
+                )
+            if units > abs(size):
+                raise ValueError(
+                    f"reduce_only=True oversize buy {units} > short {abs(size)} "
+                    f"for {intent.symbol!r} (would flip to long)"
+                )
+
+    def _check_short_flip(
         self,
         intent: OrderIntent,
         position: Position,
