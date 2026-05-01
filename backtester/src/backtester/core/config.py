@@ -150,6 +150,11 @@ class BacktestConfig:
     # ``None`` 이면 from_data_source 모드는 DataError 로 차단.
     funding_source_dir: Path | None = None
 
+    # PR V 후속 — Engine 이 run 시작 시 instrument 의 ExchangeRule / MarginModel /
+    # FeeModel 을 ``run_dir/instruments_snapshot.yaml`` 에 자동 보존. preset 만으로는
+    # 거래소 갱신 시점 정합성이 깨질 수 있어 별도 보존 옵션. default True.
+    persist_instrument_snapshot: bool = True
+
     def __post_init__(self) -> None:
         # 숫자 한도
         if self.snapshot_every_bars < 1:

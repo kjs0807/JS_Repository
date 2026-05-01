@@ -15,7 +15,6 @@ import sqlite3
 import sys
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
 
 from backtester.instruments.bybit_fetcher import (
     BybitInstrumentSpec,
@@ -95,16 +94,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"=== preset diff vs {source} ===")
     if not diffs:
         print(
-            "no diffs — preset table 일치. ({0} symbols checked)".format(
-                len(_BYBIT_LINEAR_PERP_TABLE)
-            )
+            f"no diffs — preset table 일치. "
+            f"({len(_BYBIT_LINEAR_PERP_TABLE)} symbols checked)"
         )
         return 0
     print(f"{len(diffs)} mismatches:")
     for d in diffs:
-        print(f"  {d.symbol:<12s} {d.field_name:<14s} preset={d.preset_value:<12s} "
-              f"fetched={d.fetched_value}")
-    return 1 if diffs else 0
+        print(
+            f"  {d.symbol:<12s} {d.field_name:<14s} "
+            f"preset={d.preset_value:<12s} fetched={d.fetched_value}"
+        )
+    return 1
 
 
 if __name__ == "__main__":

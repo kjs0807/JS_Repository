@@ -98,7 +98,39 @@ class BybitInstrumentSpecFetcher:
 
         반환: ``{symbol: BybitInstrumentSpec}``. retCode != 0 또는 누락 필드는
         ``DataError``.
+
+        PR V 후속 최적화: ``symbols=[single]`` 일 때는 Bybit ``symbol=`` 파라미터
+        직접 전송 → 단일 페이지 호출. 다중 symbol 또는 None 일 때는 cursor pagination
+        으로 전체 리스트 받고 로컬 필터.
         """
+        # Single-symbol fast path
+        if symbols is not None and len(symbols) == 1:
+            sym_only = symbols[0]
+            if sym_only.endswith("USDT"):
+                return self._fetch_single_symbol(sym_only)
+            return {}
+        return self._fetch_paginated(symbols)
+
+    def _fetch_single_symbol(self, symbol: str) -> dict[str, BybitInstrumentSpec]:
+        params = {"category": "linear", "symbol": symbol}
+        url = f"{self.base_url}{BYBIT_INSTRUMENTS_PATH}?{urllib.parse.urlencode(params)}"
+        payload = self._http_fetcher(url)
+        if payload.get("retCode") != 0:
+            raise DataError(
+                f"Bybit instruments-info retCode={payload.get('retCode')}, "
+                f"retMsg={payload.get('retMsg')!r}"
+            )
+        result = payload.get("result") or {}
+        out: dict[str, BybitInstrumentSpec] = {}
+        for entry in result.get("list") or []:
+            sym = entry.get("symbol")
+            if sym == symbol:
+                out[sym] = self._normalize(entry)
+        return out
+
+    def _fetch_paginated(
+        self, symbols: list[str] | None
+    ) -> dict[str, BybitInstrumentSpec]:
         out: dict[str, BybitInstrumentSpec] = {}
         cursor: str | None = None
         max_pages = 50

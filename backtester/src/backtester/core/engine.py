@@ -113,6 +113,8 @@ class BacktestEngine:
         # config.yaml 은 Phase 1.5 PR 11 부터 run_chart 가 self-contained 로 읽기 위해 추가.
         self._persist_config()
         self._persist_config_yaml()
+        if config.persist_instrument_snapshot:
+            self._persist_instrument_snapshot()
 
         # 5. 데이터 소스 + fetch
         self.data_source = self._build_data_source()
@@ -337,6 +339,54 @@ class BacktestEngine:
             for tf, df in tfs.items():
                 target = bars_dir / f"{sanitize_symbol(symbol)}_{tf}.parquet"
                 df.write_parquet(target)
+
+    def _persist_instrument_snapshot(self) -> None:
+        """PR V 후속: instrument 의 ExchangeRule / MarginModel / FeeModel 을 run_dir 에
+        영속화. ``BacktestConfig.from_yaml`` 이 instrument margin_model 까지 round-trip
+        하지만, 별도 ``instruments_snapshot.yaml`` 로 사람이 읽기 쉬운 형식 보존.
+        """
+        import yaml
+
+        target = self.run_dir / "instruments_snapshot.yaml"
+        data: dict[str, Any] = {}
+        for inst in self.config.instruments:
+            entry: dict[str, Any] = {
+                "symbol": inst.symbol,
+                "asset_class": inst.asset_class,
+                "base_currency": inst.base_currency,
+                "quote_currency": inst.quote_currency,
+                "tick_size": str(inst.tick_size),
+                "fee_model": {
+                    "type": inst.fee_model.type,
+                    "taker": str(inst.fee_model.taker),
+                    "maker": str(inst.fee_model.maker),
+                },
+            }
+            if inst.exchange_rule is not None:
+                rule = inst.exchange_rule
+                entry["exchange_rule"] = {
+                    "price_tick": str(rule.price_tick),
+                    "qty_step": str(rule.qty_step),
+                    "min_qty": str(rule.min_qty),
+                    "min_notional": str(rule.min_notional),
+                    "max_leverage": (
+                        str(rule.max_leverage)
+                        if rule.max_leverage is not None
+                        else None
+                    ),
+                }
+            if inst.margin_model is not None:
+                entry["margin_model"] = {
+                    "maintenance_margin_rate": str(
+                        inst.margin_model.maintenance_margin_rate
+                    ),
+                    "liquidation_fee_rate": str(
+                        inst.margin_model.liquidation_fee_rate
+                    ),
+                }
+            data[inst.symbol] = entry
+        with open(target, "w", encoding="utf-8") as fp:
+            yaml.safe_dump(data, fp, sort_keys=False, default_flow_style=False)
 
     def _persist_funding_artifacts(self) -> None:
         """PR Q: funding parquet 을 run_dir/funding/ 으로 복사 — rebuild/walkforward 가

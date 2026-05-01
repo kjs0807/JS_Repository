@@ -359,3 +359,144 @@ def test_load_preset_yaml_root_not_mapping(tmp_path: Path) -> None:
     yaml_path.write_text("- 1\n- 2\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="must be a mapping"):
         load_preset_yaml(yaml_path)
+
+
+# ---------- 8. strict bool parsing (PR V follow-up) ------------------------
+
+
+def test_load_preset_yaml_string_allow_short_rejected(tmp_path: Path) -> None:
+    """PR V 후속: ``allow_short: "false"`` 같은 문자열은 ConfigError (silent footgun 차단)."""
+    yaml_path = _write_short_yaml(tmp_path, {"allow_short": "false"})
+    with pytest.raises(ConfigError, match="allow_short"):
+        load_preset_yaml(yaml_path)
+
+
+def test_load_preset_yaml_yaml_bool_allow_short_accepted(tmp_path: Path) -> None:
+    yaml_path = _write_short_yaml(tmp_path, {"allow_short": False})
+    cfg = load_preset_yaml(yaml_path)
+    assert cfg.allow_short is False
+
+
+# ---------- 9. fetcher single-symbol fast path -----------------------------
+
+
+def test_fetcher_single_symbol_uses_symbol_param() -> None:
+    """PR V 후속: symbols=[single] 일 때 URL 에 symbol= 파라미터 포함."""
+    captured_urls: list[str] = []
+
+    def _http(url: str) -> dict[str, Any]:
+        captured_urls.append(url)
+        return _mock_response_btc_only()
+
+    fetcher = BybitInstrumentSpecFetcher(http_fetcher=_http)
+    out = fetcher.fetch_linear_perp(symbols=["BTCUSDT"])
+    assert "BTCUSDT" in out
+    # 단 1 회 호출 + symbol=BTCUSDT URL 포함
+    assert len(captured_urls) == 1
+    assert "symbol=BTCUSDT" in captured_urls[0]
+
+
+def test_fetcher_multi_symbol_uses_pagination() -> None:
+    """다중 symbol 은 cursor pagination 경로 — symbol 파라미터 없음."""
+    captured_urls: list[str] = []
+
+    def _http(url: str) -> dict[str, Any]:
+        captured_urls.append(url)
+        return _mock_response_btc_only()  # 1 page only
+
+    fetcher = BybitInstrumentSpecFetcher(http_fetcher=_http)
+    fetcher.fetch_linear_perp(symbols=["BTCUSDT", "ETHUSDT"])
+    assert all("symbol=" not in u for u in captured_urls)
+
+
+# ---------- 10. Engine auto persist instruments_snapshot.yaml --------------
+
+
+def test_engine_persists_instruments_snapshot_yaml(tmp_path: Path) -> None:
+    """PR V 후속: persist_instrument_snapshot=True (default) → run_dir 에 자동 저장."""
+    import polars as pl
+
+    from backtester.core import crypto_perp_backtest_config
+    from backtester.core.engine import BacktestEngine
+    from backtester.strategies.base import BaseStrategy
+
+    # 작은 OHLCV 생성
+    df = pl.DataFrame(
+        {
+            "timestamp": [datetime(2026, 1, 1, tzinfo=UTC) + timedelta(hours=i) for i in range(8)],
+            "open": [100.0] * 8,
+            "high": [101.0] * 8,
+            "low": [99.0] * 8,
+            "close": [100.0] * 8,
+            "volume": [1.0] * 8,
+        }
+    ).with_columns(pl.col("timestamp").cast(pl.Datetime(time_unit="us", time_zone="UTC")))
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    df.write_parquet(data_dir / "BTCUSDT_1h.parquet")
+
+    cfg = crypto_perp_backtest_config(
+        run_id="snap_smoke",
+        symbol="BTCUSDT",
+        timeframe="1h",
+        data_dir=data_dir,
+        output_dir=tmp_path / "runs",
+        start=datetime(2026, 1, 1, tzinfo=UTC),
+        end=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(hours=8),
+    )
+
+    class _NoopStrategy(BaseStrategy):
+        def on_bar(self, ctx):  # type: ignore[no-untyped-def]
+            return []
+
+    result = BacktestEngine(cfg, _NoopStrategy(), verbose=False).run()
+    snap_path = result.run_dir / "instruments_snapshot.yaml"
+    assert snap_path.exists()
+    text = snap_path.read_text(encoding="utf-8")
+    assert "BTCUSDT" in text
+    assert "exchange_rule" in text
+    assert "margin_model" in text
+    assert "fee_model" in text
+
+
+def test_engine_skip_instrument_snapshot_when_disabled(tmp_path: Path) -> None:
+    """persist_instrument_snapshot=False 일 때 파일 미생성."""
+    import dataclasses
+
+    import polars as pl
+
+    from backtester.core import crypto_perp_backtest_config
+    from backtester.core.engine import BacktestEngine
+    from backtester.strategies.base import BaseStrategy
+
+    df = pl.DataFrame(
+        {
+            "timestamp": [datetime(2026, 1, 1, tzinfo=UTC) + timedelta(hours=i) for i in range(4)],
+            "open": [100.0] * 4,
+            "high": [101.0] * 4,
+            "low": [99.0] * 4,
+            "close": [100.0] * 4,
+            "volume": [1.0] * 4,
+        }
+    ).with_columns(pl.col("timestamp").cast(pl.Datetime(time_unit="us", time_zone="UTC")))
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    df.write_parquet(data_dir / "BTCUSDT_1h.parquet")
+
+    cfg = crypto_perp_backtest_config(
+        run_id="snap_off",
+        symbol="BTCUSDT",
+        timeframe="1h",
+        data_dir=data_dir,
+        output_dir=tmp_path / "runs",
+        start=datetime(2026, 1, 1, tzinfo=UTC),
+        end=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(hours=4),
+    )
+    cfg = dataclasses.replace(cfg, persist_instrument_snapshot=False)
+
+    class _NoopStrategy(BaseStrategy):
+        def on_bar(self, ctx):  # type: ignore[no-untyped-def]
+            return []
+
+    result = BacktestEngine(cfg, _NoopStrategy(), verbose=False).run()
+    assert not (result.run_dir / "instruments_snapshot.yaml").exists()

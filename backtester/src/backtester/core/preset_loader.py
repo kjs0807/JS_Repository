@@ -63,6 +63,21 @@ def _parse_iso(value: str) -> datetime:
     return dt
 
 
+def _strict_bool(value: Any, *, key: str) -> bool:
+    """Bool 만 허용 (PR V 후속 정정).
+
+    YAML 에서 ``true`` / ``false`` 는 자동으로 bool 로 파싱되지만, 사용자가 ``"false"``
+    같은 문자열로 잘못 쓰면 ``bool("false") == True`` 가 되어 short 가 켜진다. 명시
+    parser 로 ConfigError 를 내서 silent footgun 차단.
+    """
+    if isinstance(value, bool):
+        return value
+    raise ConfigError(
+        f"YAML field {key!r} must be a YAML bool (true/false, no quotes), "
+        f"got {type(value).__name__}: {value!r}"
+    )
+
+
 def _funding_from_dict(data: dict[str, Any]) -> FundingModel:
     rate = data.get("constant_rate")
     return FundingModel(
@@ -84,7 +99,7 @@ def _crypto_perp_from_dict(data: dict[str, Any]) -> BacktestConfig:
     funding_model = _funding_from_dict(funding_dict) if funding_dict else None
     extra_tfs = data.get("extra_timeframes")
     initial_equity = data.get("initial_equity")
-    allow_short = data.get("allow_short", True)
+    allow_short = _strict_bool(data.get("allow_short", True), key="allow_short")
     slippage_bps = float(data.get("slippage_bps", 2.0))
     bar_path = data.get("bar_path_model", "pessimistic")
     on_run_exists = data.get("on_run_exists", "auto_suffix")
@@ -107,7 +122,7 @@ def _crypto_perp_from_dict(data: dict[str, Any]) -> BacktestConfig:
         funding_model=funding_model,
         funding_source_dir=Path(funding_source_dir) if funding_source_dir else None,
         extra_timeframes=list(extra_tfs) if extra_tfs else None,
-        allow_short=bool(allow_short),
+        allow_short=allow_short,
         slippage_bps=slippage_bps,
         bar_path_model=BarPathModel(bar_path),
         snapshot_every_bars=snapshot_every_bars,
