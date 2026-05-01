@@ -26,6 +26,7 @@ from backtester.core.orders import (
     TargetUnits,
     TargetWeight,
 )
+from backtester.core.preset_loader import load_preset_yaml
 from backtester.core.result import BacktestResult
 from backtester.core.snapshot import MarketSnapshot
 from backtester.core.types import BarPathModel, Fill
@@ -35,6 +36,7 @@ __all__ = [
     "BacktestConfig",
     "DataSourceConfig",
     "crypto_perp_backtest_config",
+    "load_preset_yaml",
     # errors
     "BacktestError",
     "ConfigError",

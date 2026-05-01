@@ -9,6 +9,13 @@ from backtester.instruments.base import (
     Instrument,
     MarginModel,
 )
+from backtester.instruments.bybit_fetcher import (
+    BybitInstrumentSpec,
+    BybitInstrumentSpecFetcher,
+    PresetDiff,
+    diff_against_preset,
+    write_spec_snapshot,
+)
 from backtester.instruments.presets import (
     available_bybit_linear_symbols,
     bybit_adausdt_perp,
@@ -26,11 +33,14 @@ from backtester.instruments.presets import (
 from backtester.instruments.registry import InstrumentRegistry
 
 __all__ = [
+    "BybitInstrumentSpec",
+    "BybitInstrumentSpecFetcher",
     "ExchangeRule",
     "FeeModel",
     "Instrument",
     "InstrumentRegistry",
     "MarginModel",
+    "PresetDiff",
     "available_bybit_linear_symbols",
     "bybit_adausdt_perp",
     "bybit_avaxusdt_perp",
@@ -43,4 +53,6 @@ __all__ = [
     "bybit_solusdt_perp",
     "bybit_tonusdt_perp",
     "bybit_xrpusdt_perp",
+    "diff_against_preset",
+    "write_spec_snapshot",
 ]

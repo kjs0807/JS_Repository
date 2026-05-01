@@ -2649,10 +2649,20 @@ BB-KC 포팅 경계 (절대 위반 금지):
   + margin_model + 보수 default risk_limits + slippage_bps=2 + allow_short=True 등이
   모두 채워진 ``BacktestConfig`` 반환. preset / risk_limits / instrument 모두 override 가능.
 - preset 값은 실행 시 ``run_dir/config.yaml`` 에 영속화 — 재현 가능.
-- 후속 PR 후보:
-  * ``BybitInstrumentSpecFetcher`` — REST API 로 preset table 자동 갱신.
+- 활성 후속 (PR V ✅):
+  * ``BybitInstrumentSpecFetcher`` (``instruments/bybit_fetcher.py``) — Bybit REST
+    ``GET /v5/market/instruments-info`` fetch + 정규화. ``http_fetcher`` 인자로
+    mock 주입 가능. ``diff_against_preset`` 으로 preset table mismatch 보고.
+    ``write_spec_snapshot`` 으로 ``run_dir/instruments_snapshot.yaml`` 보존.
+  * ``preset: crypto_perp`` short YAML loader (``core/preset_loader.py``):
+    symbol/timeframe/period/strategy_params 만 적은 짧은 YAML 을 ``crypto_perp_
+    backtest_config`` 으로 빌드. preset 키 미지정 시 full schema fallback.
+  * ``scripts/check_presets.py`` — 로컬 DB (``products_master``) 또는 Bybit live 와
+    ``_BYBIT_LINEAR_PERP_TABLE`` 차이 보고. ``--db PATH`` / ``--live`` 모드.
+- 남은 후속 PR:
   * Tier 별 maintenance margin / fee tier (현재 단일 default).
-  * ``preset: crypto_perp`` short YAML loader (현재는 Python factory 만).
+  * Engine 이 매 run 마다 자동으로 ``write_spec_snapshot`` 호출 (현재는 사용자가 명시
+    호출 — 필요 시 Engine 통합).
 
 ### Phase 2.5 (PR H~T) — Crypto Futures Core + Strategy Parity
 
