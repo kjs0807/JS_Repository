@@ -4,12 +4,12 @@
 ``build_equity_series`` (PR 10) 결과를 입력으로 받아 통계 dict 반환:
 
 - ``total_return`` (float, 단위: 비율 — 0.05 = +5%)
-- ``sharpe_ratio`` (float)
-- ``sortino_ratio`` (float)
+- ``sharpe_ratio`` (float — annualized)
+- ``sortino_ratio`` (float — annualized, MAR=0 표준 downside deviation 기반)
 - ``max_drawdown_pct`` (float, 단위: 비율 — -0.10 = -10%)
 - ``max_drawdown_duration_bars`` (int — 연속 drawdown 봉 수)
-- ``calmar_ratio`` (float)
-- ``annual_volatility`` (float, 비율)
+- ``calmar_ratio`` (float — CAGR / |MDD|, periods_per_year 사용)
+- ``annual_volatility`` (float, 비율 — std × sqrt(periods_per_year))
 - ``n_periods`` (int — equity_series.height)
 
 수익률은 봉 단위 ``pct_change``. ``periods_per_year`` 가 봉 빈도와 일치해야 한다:
@@ -17,6 +17,13 @@
 - 1d 주식: 252
 - 1h crypto: 24*365 = 8760
 - 1h 주식: 24*252 = 6048
+
+**Sortino 정의 (MAR=0)**: downside deviation = sqrt(mean(min(r, 0)²)) — 모든 봉의
+음수 초과수익을 제곱·평균·제곱근. 단순히 음수 수익률 부분집합의 std 가 아님 (그
+방식은 손실폭이 일정하면 분산 ≈ 0 으로 sortino 가 비정상적으로 커짐).
+
+**Calmar 정의**: CAGR / |MDD|. CAGR = (eq_last/eq_first)^(periods_per_year/n_periods) − 1.
+``periods_per_year`` 를 명시적으로 사용해 기간 표준화.
 
 quantstats 의존성을 추가하지 않는다 — polars + stdlib 만 사용. 더 풍부한 메트릭은 추후
 PR 또는 별도 통합 레이어에서 도입.
@@ -109,14 +116,15 @@ def compute_core_metrics(
             else:
                 sharpe = float("nan")
 
-            downside = returns.filter(returns < 0)
-            if downside.len() > 0:
-                ds_std_val = cast(float | None, downside.std())
-                ds_std = float(ds_std_val) if ds_std_val is not None else 0.0
-                if ds_std > 0:
-                    sortino = (mean_ret / ds_std) * ann_factor
-                else:
-                    sortino = float("nan")
+            # 표준 Sortino (MAR=0): downside deviation = sqrt(mean(min(r, 0)^2))
+            # 음수 수익률 부분집합의 std 가 아니라 전체 봉에 대한 negative-excess 제곱평균.
+            neg_excess = returns.clip(upper_bound=0.0)  # min(r, 0)
+            sq_neg = neg_excess * neg_excess
+            mean_sq_val = cast(float | None, sq_neg.mean())
+            mean_sq_neg = float(mean_sq_val) if mean_sq_val is not None else 0.0
+            if mean_sq_neg > 0:
+                downside_dev = math.sqrt(mean_sq_neg)
+                sortino = (mean_ret / downside_dev) * ann_factor
             else:
                 # downside 없음 = 모든 기간 비음수 수익 → sortino 무한 (관례적으로 nan)
                 sortino = float("nan")
@@ -129,10 +137,22 @@ def compute_core_metrics(
         mdd_pct = 0.0
         mdd_duration = 0
 
-    if mdd_pct < 0:
-        # Calmar 통상 정의: annualized return / |MDD|. 단순화: total_return / |MDD|.
-        # 여러 기간 비교는 caller 가 periods_per_year 로 보정.
-        calmar = _safe_div(total_return, abs(mdd_pct))
+    # Calmar = CAGR / |MDD|. CAGR = (eq_last/eq_first)^(periods_per_year/n) - 1.
+    # eq_first <= 0 은 BacktestConfig 가 차단 (initial_equity > 0). eq_last <= 0
+    # (catastrophic loss) 은 power 가 정의되지 않아 nan 처리.
+    if (
+        n >= 2
+        and eq_first > 0
+        and eq_last > 0
+        and periods_per_year > 0
+    ):
+        years = n / periods_per_year
+        cagr = (eq_last / eq_first) ** (1.0 / years) - 1.0
+    else:
+        cagr = float("nan")
+
+    if mdd_pct < 0 and not math.isnan(cagr):
+        calmar = cagr / abs(mdd_pct)
     else:
         calmar = float("nan")
 

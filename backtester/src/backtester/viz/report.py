@@ -30,11 +30,18 @@ from backtester.viz.equity import build_equity_series
 from backtester.viz.metrics import compute_core_metrics
 from backtester.viz.run_chart import _load_run_config
 
+# 비율(0.05 = 5%) 단위 메트릭 — 라벨에 "(%)" 붙이고 값을 ×100 으로 표기.
+_PERCENT_FIELDS: frozenset[str] = frozenset(
+    {"total_return", "max_drawdown_pct", "annual_volatility"}
+)
 
-def _format_metric(value: Any) -> str:
+
+def _format_metric(key: str, value: Any) -> str:
     if isinstance(value, float):
         if math.isnan(value):
             return "—"
+        if key in _PERCENT_FIELDS:
+            return f"{value * 100:.4f}%"
         if abs(value) >= 1000:
             return f"{value:,.2f}"
         if abs(value) >= 1:
@@ -44,13 +51,13 @@ def _format_metric(value: Any) -> str:
 
 
 _METRIC_LABELS: dict[str, str] = {
-    "total_return": "Total return",
+    "total_return": "Total return (%)",
     "sharpe_ratio": "Sharpe",
     "sortino_ratio": "Sortino",
     "max_drawdown_pct": "Max drawdown (%)",
     "max_drawdown_duration_bars": "Max drawdown duration (bars)",
     "calmar_ratio": "Calmar",
-    "annual_volatility": "Annualized volatility",
+    "annual_volatility": "Annualized volatility (%)",
     "n_periods": "n periods",
 }
 
@@ -107,7 +114,7 @@ def _render_html_report(
 ) -> str:
     rows_html = "".join(
         f"<tr><td>{_html.escape(_METRIC_LABELS.get(k, k))}</td>"
-        f"<td>{_html.escape(_format_metric(v))}</td></tr>"
+        f"<td>{_html.escape(_format_metric(k, v))}</td></tr>"
         for k, v in metrics.items()
     )
     safe_run_id = _html.escape(run_id)

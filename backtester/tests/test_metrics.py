@@ -99,13 +99,32 @@ def test_compute_core_metrics_max_drawdown_basic() -> None:
     assert m["max_drawdown_duration_bars"] == 2
 
 
-def test_compute_core_metrics_calmar_when_drawdown() -> None:
-    """total_return = (900-1000)/1000 = -0.1, MDD = -0.1 → calmar = -0.1 / 0.1 = -1.0"""
-    df = _equity_df([1000.0, 900.0])
-    m = compute_core_metrics(df)
+def test_compute_core_metrics_calmar_uses_cagr_not_raw_total_return() -> None:
+    """Calmar = CAGR / |MDD|, not total_return / |MDD|.
+
+    365 봉, 1000 → 900 monotone, periods_per_year=365 → years=1, CAGR = -0.1.
+    MDD = -0.1 → calmar = -1.0.
+    """
+    n = 365
+    values = [1000.0 - 100.0 * (i / (n - 1)) for i in range(n)]
+    df = _equity_df(values)
+    m = compute_core_metrics(df, periods_per_year=365)
     assert m["total_return"] == pytest.approx(-0.1)
     assert m["max_drawdown_pct"] == pytest.approx(-0.1)
-    assert m["calmar_ratio"] == pytest.approx(-1.0)
+    assert m["calmar_ratio"] == pytest.approx(-1.0, abs=1e-6)
+
+
+def test_compute_core_metrics_calmar_scales_with_periods_per_year() -> None:
+    """같은 시리즈에서 periods_per_year 가 작아지면 years 가 커져 CAGR 가 작아짐 →
+    calmar 절대값도 작아짐. (n=2 봉, 큰 periods_per_year 면 years 가 매우 작음 → CAGR
+    가 폭발적으로 작아짐.)"""
+    df = _equity_df([1000.0, 900.0])
+    m_short = compute_core_metrics(df, periods_per_year=2)  # years=1, CAGR=-0.1
+    m_long = compute_core_metrics(df, periods_per_year=365)  # years≈0.0055, CAGR≈-1
+    # |calmar_long| > |calmar_short| (annualization 효과)
+    assert abs(m_long["calmar_ratio"]) > abs(m_short["calmar_ratio"])
+    # 짧은 periods_per_year 에서는 calmar ≈ -1.0 (cagr=-0.1, MDD=-0.1)
+    assert m_short["calmar_ratio"] == pytest.approx(-1.0, abs=1e-6)
 
 
 def test_compute_core_metrics_calmar_nan_when_no_drawdown() -> None:
@@ -125,10 +144,35 @@ def test_compute_core_metrics_sharpe_positive_for_upward_trend() -> None:
 
 
 def test_compute_core_metrics_sortino_handles_no_downside() -> None:
-    """수익률이 모두 비음수 → downside std 없음 → sortino nan (관례)."""
+    """수익률이 모두 비음수 → downside deviation = 0 → sortino nan (관례)."""
     df = _equity_df([100.0, 102.0, 105.0, 108.0])
     m = compute_core_metrics(df)
     assert math.isnan(m["sortino_ratio"])
+
+
+def test_compute_core_metrics_sortino_uses_downside_deviation_not_subset_std() -> None:
+    """단일 손실 봉 회귀 — 표준 Sortino (모든 봉의 min(r,0)^2 평균의 sqrt) 는 유한값.
+
+    이전 버그: 음수 수익률 부분집합의 std 사용 → 단일 손실 시 std=0 → sortino=nan.
+    """
+    # equity 100 → 110 → 90 → 100
+    # returns ≈ [0.1, -0.1818, 0.1111]. 음수는 1개.
+    df = _equity_df([100.0, 110.0, 90.0, 100.0])
+    m = compute_core_metrics(df, periods_per_year=252)
+    # 단일 손실이라도 새 공식은 finite. 양의 mean_ret 라 sortino > 0.
+    assert math.isfinite(m["sortino_ratio"])
+    assert m["sortino_ratio"] > 0
+
+
+def test_compute_core_metrics_sortino_value_known_sequence() -> None:
+    """수동 계산 검증: returns = [0.1, -0.1, 0.1, -0.1] (대칭)."""
+    df = _equity_df([100.0, 110.0, 99.0, 108.9, 98.01])
+    m = compute_core_metrics(df, periods_per_year=252)
+    # returns ≈ [0.10, -0.10, 0.10, -0.10]
+    # mean = 0
+    # min(r,0)^2 = [0, 0.01, 0, 0.01], mean=0.005, sqrt≈0.0707
+    # sortino = 0 / 0.0707 * sqrt(252) = 0
+    assert m["sortino_ratio"] == pytest.approx(0.0, abs=1e-6)
 
 
 def test_compute_core_metrics_periods_per_year_scales_volatility() -> None:
