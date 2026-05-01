@@ -1386,7 +1386,17 @@ def render_run_chart(run_dir: Path) -> Path:
     return output
 ```
 
-### 10.5 viz/metrics.py (Phase 2)
+### 10.5 viz/metrics.py (Phase 2 PR 18)
+
+PR 18 산출물 — ``compute_core_metrics(equity_series, *, periods_per_year=365)``:
+- 입력: ``build_equity_series`` (PR 10) 결과.
+- 출력 dict 키: ``total_return / sharpe_ratio / sortino_ratio / max_drawdown_pct / max_drawdown_duration_bars / calmar_ratio / annual_volatility / n_periods``.
+- ``periods_per_year`` 가 봉 빈도와 일치해야 함 (1d crypto 365 / 1d 주식 252 / 1h crypto 8760 / 1h 주식 6048 등).
+- 빈 DataFrame / 1봉 시리즈 / 단조 증가 / 상수 등 엣지 케이스에서 nan/0 기본값.
+- ``daily_resample(equity_series)`` — UTC 자정 기준 일별 last-equity 다운샘플 (group_by_dynamic).
+- quantstats 의존성 추가 안 함 — polars + stdlib 만 사용.
+
+
 
 ```python
 def compute_core_metrics(equity_series: pl.DataFrame,
@@ -1405,7 +1415,14 @@ def compute_core_metrics(equity_series: pl.DataFrame,
     }
 ```
 
-### 10.6 viz/report.py (Phase 2)
+### 10.6 viz/report.py (Phase 2 PR 18)
+
+PR 18 산출물 — ``render_metrics_report(run_dir, *, periods_per_year=365)``:
+- 입력: ``run_dir`` 만 (외부 cache 의존 없음, spec §10.1 self-contained).
+- 흐름: ``EventLogReader`` → ``build_equity_series`` → ``compute_core_metrics`` → HTML 렌더.
+- 출력: ``run_dir/charts/metrics_report.html`` — 핵심 메트릭 표 + 2단 (equity/drawdown) Plotly subplot.
+- CDN plotly include — 인터넷 없이도 차트 비활성으로만 표시 (전체 페이지는 OK).
+- CLI: ``backtester metrics runs/{run_id}/ [--periods-per-year N] [--quiet]``.
 
 UTC 00:00 기준 일별 리샘플링:
 ```python

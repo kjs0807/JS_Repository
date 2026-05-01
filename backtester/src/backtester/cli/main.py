@@ -21,6 +21,7 @@ from backtester.core.config import BacktestConfig
 from backtester.core.engine import BacktestEngine
 from backtester.core.errors import ConfigError, RunDirectoryError
 from backtester.strategies.registry import build_strategy
+from backtester.viz.report import render_metrics_report
 from backtester.viz.run_chart import render_run_chart
 
 
@@ -59,6 +60,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to runs/{run_id}/.",
     )
     report.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress INFO output (HTML output path).",
+    )
+
+    metrics = sub.add_parser(
+        "metrics",
+        help="Render metrics_report.html (PR 18) for an existing run directory.",
+        description="Render metrics_report.html (PR 18) for an existing run directory.",
+    )
+    metrics.add_argument(
+        "run_dir",
+        type=Path,
+        help="Path to runs/{run_id}/.",
+    )
+    metrics.add_argument(
+        "--periods-per-year",
+        type=int,
+        default=365,
+        help=(
+            "Periods per year for annualization (default 365). 1d crypto = 365, "
+            "1d stock = 252, 1h crypto = 8760, 1h stock = 6048."
+        ),
+    )
+    metrics.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -115,12 +142,46 @@ def cmd_report(run_dir: Path, *, quiet: bool) -> int:
     return 0
 
 
+def cmd_metrics(
+    run_dir: Path,
+    *,
+    periods_per_year: int,
+    quiet: bool,
+) -> int:
+    """``backtester metrics`` 본체 — metrics_report.html 렌더링."""
+    if not run_dir.exists() or not run_dir.is_dir():
+        print(f"[error] run dir not found: {run_dir}", file=sys.stderr)
+        return 2
+    if not (run_dir / "events.jsonl").exists():
+        print(
+            f"[error] events.jsonl missing in {run_dir} — not a valid run directory",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        output = render_metrics_report(
+            run_dir, periods_per_year=periods_per_year
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"[error] render: {e}", file=sys.stderr)
+        return 2
+    if not quiet:
+        print(f"[INFO] Wrote {output}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.cmd == "run":
         return cmd_run(args.config_path, quiet=args.quiet)
     if args.cmd == "report":
         return cmd_report(args.run_dir, quiet=args.quiet)
+    if args.cmd == "metrics":
+        return cmd_metrics(
+            args.run_dir,
+            periods_per_year=args.periods_per_year,
+            quiet=args.quiet,
+        )
     # argparse `required=True` 가 차단하지만 방어적으로
     print(f"[error] unknown command: {args.cmd!r}", file=sys.stderr)
     return 2
