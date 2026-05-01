@@ -136,24 +136,28 @@ def test_risk_max_orders_filters_by_symbol() -> None:
 # ---------- Phase 2 한도는 정의만 (검사 안 함) -----------------------------
 
 
-def test_risk_phase2_limits_not_enforced() -> None:
-    """max_position_size, max_total_exposure 등은 Phase 1에서 검사하지 않음."""
+def test_risk_phase2_limits_now_enforced() -> None:
+    """PR I: max_position_size / max_total_exposure / max_leverage 모두 활성.
+
+    이전엔 Phase 1 에서 무시됐지만, PR I 부터 RiskManager.check 가 사이즈 적용 후
+    새 포지션을 추정해 한도 검사한다. ``max_position_size`` 는 ``market_close``
+    없이도 검사 가능하므로 가장 먼저 reject.
+    """
     limits = RiskLimits(
-        max_position_size=Decimal("0.001"),  # 매우 작은 한도
+        max_position_size=Decimal("0.001"),
         max_total_exposure=Decimal("100"),
         max_leverage=Decimal("1"),
-        max_drawdown_halt=0.01,
     )
     rm = RiskManager(limits)
     result = rm.check(
         intent=_intent(),
-        sized_quantity=Decimal("100"),  # 한도를 한참 넘는 사이즈
+        sized_quantity=Decimal("100"),
         instrument=_btc(),
         ledger=Ledger(initial_equity=10000),
         active_orders=[],
     )
-    # Phase 1에서는 위 한도들이 무시되므로 accept
-    assert result.accepted
+    assert not result.accepted
+    assert "max_position_size" in result.reason
 
 
 def test_risk_default_limits_use_max_orders_5() -> None:

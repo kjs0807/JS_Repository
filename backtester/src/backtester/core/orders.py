@@ -56,8 +56,55 @@ class ScaleIn:
     by: Decimal
 
 
-SizeSpec = TargetWeight | TargetNotional | TargetUnits | FullPosition | ClosePosition | ScaleIn
-"""Sizer.resolve()의 입력. Phase 1 지원: TargetUnits, TargetNotional, ClosePosition."""
+# ---------- Futures sizing (PR I) -------------------------------------------
+
+
+@dataclass(frozen=True)
+class TargetMarginPct:
+    """``equity × margin_pct × leverage`` notional 을 mark price 로 단위 환산.
+
+    Phase 2.5 PR I — crypto perp 표준. 예: equity=100k, margin_pct=0.1 (initial
+    margin 10% 사용), leverage=5 → notional 50k → 가격 100 → 500 units.
+    """
+
+    margin_pct: Decimal
+    leverage: Decimal
+
+
+@dataclass(frozen=True)
+class TargetNotionalPct:
+    """``equity × notional_pct`` 직접 notional. leverage 별도 표현 안 함.
+
+    예: equity=100k, notional_pct=0.5 → notional 50k. RiskManager 가
+    max_total_exposure 로 별도 검증.
+    """
+
+    notional_pct: Decimal
+
+
+@dataclass(frozen=True)
+class FullEquityNotional:
+    """``equity × leverage`` notional. 가용 마진 전부를 사용 — risk 강함.
+
+    RiskLimits.max_leverage 가 이 변종을 가장 적극적으로 차단.
+    """
+
+    leverage: Decimal
+
+
+SizeSpec = (
+    TargetWeight
+    | TargetNotional
+    | TargetUnits
+    | FullPosition
+    | ClosePosition
+    | ScaleIn
+    | TargetMarginPct
+    | TargetNotionalPct
+    | FullEquityNotional
+)
+"""Sizer.resolve()의 입력. Phase 1 지원: TargetUnits, TargetNotional, ClosePosition.
+PR I 추가: TargetMarginPct, TargetNotionalPct, FullEquityNotional (futures sizing)."""
 
 
 # ---------- OrderIntent ------------------------------------------------------

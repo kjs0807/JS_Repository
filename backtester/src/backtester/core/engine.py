@@ -822,6 +822,7 @@ class BacktestEngine:
             instrument=instrument,
             ledger=self.ledger,
             active_orders=self.orderbook.get_active(),
+            market_close=market.close,
         )
         if not risk_result.accepted:
             self._event_log.append(

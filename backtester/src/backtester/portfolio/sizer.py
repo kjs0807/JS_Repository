@@ -26,10 +26,13 @@ from decimal import Decimal
 from backtester.core.errors import DataError
 from backtester.core.orders import (
     ClosePosition,
+    FullEquityNotional,
     FullPosition,
     OrderIntent,
     ScaleIn,
+    TargetMarginPct,
     TargetNotional,
+    TargetNotionalPct,
     TargetUnits,
     TargetWeight,
 )
@@ -64,7 +67,7 @@ class Sizer:
         NotImplementedError. allow_flip 이 False 면 한 fill 으로 long↔short 전환도
         ValueError.
         """
-        del instrument, equity  # PR I 에서 leverage/exposure 검사 시 활용
+        del instrument  # contract_multiplier 활용은 PR O exchange rules 에서.
         spec = intent.size_spec
 
         if isinstance(spec, TargetUnits):
@@ -93,10 +96,55 @@ class Sizer:
                 return Decimal("0")
             return abs(position.size)
 
+        # PR I — Futures sizing 변종.
+        if isinstance(spec, TargetMarginPct):
+            if spec.margin_pct <= 0:
+                raise DataError(
+                    f"TargetMarginPct.margin_pct must be > 0, got {spec.margin_pct}"
+                )
+            if spec.leverage <= 0:
+                raise DataError(
+                    f"TargetMarginPct.leverage must be > 0, got {spec.leverage}"
+                )
+            if market.close <= 0:
+                raise DataError(
+                    f"TargetMarginPct requires positive market.close, got {market.close}"
+                )
+            notional = equity * spec.margin_pct * spec.leverage
+            units = notional / market.close
+            return self._enforce_short_policy(intent, position, units)
+
+        if isinstance(spec, TargetNotionalPct):
+            if spec.notional_pct <= 0:
+                raise DataError(
+                    f"TargetNotionalPct.notional_pct must be > 0, got {spec.notional_pct}"
+                )
+            if market.close <= 0:
+                raise DataError(
+                    f"TargetNotionalPct requires positive market.close, got {market.close}"
+                )
+            notional = equity * spec.notional_pct
+            units = notional / market.close
+            return self._enforce_short_policy(intent, position, units)
+
+        if isinstance(spec, FullEquityNotional):
+            if spec.leverage <= 0:
+                raise DataError(
+                    f"FullEquityNotional.leverage must be > 0, got {spec.leverage}"
+                )
+            if market.close <= 0:
+                raise DataError(
+                    f"FullEquityNotional requires positive market.close, got {market.close}"
+                )
+            notional = equity * spec.leverage
+            units = notional / market.close
+            return self._enforce_short_policy(intent, position, units)
+
         if isinstance(spec, (TargetWeight, FullPosition, ScaleIn)):
             raise NotImplementedError(
                 f"{type(spec).__name__} is Phase 2+ "
-                f"(현재 TargetUnits / TargetNotional / ClosePosition 만 지원)"
+                f"(현재 TargetUnits / TargetNotional / ClosePosition / TargetMarginPct / "
+                f"TargetNotionalPct / FullEquityNotional 만 지원)"
             )
 
         raise NotImplementedError(  # pragma: no cover — 모든 SizeSpec 분기 처리됨
