@@ -271,9 +271,10 @@ def test_run_walkforward_oos_metrics_only_count_test_segment(tmp_path: Path) -> 
     )
     assert result.windows, "must have at least one window"
     for w in result.windows:
-        # test_bars=12 + ParquetDataSource 의 [start, end] inclusive 필터 + SNAPSHOT.ts =
-        # 봉 마감 시각이라 경계 봉 SNAPSHOT 이 추가될 수 있음. test_bars 기준 ±2 허용.
-        assert 1 <= w.metrics["n_periods"] <= 14
+        # test_start 의 anchor SNAPSHOT (train 종료 직후 equity) + test 구간 내 12 봉
+        # close = 13 SNAPSHOT. cfg.end -= bar_interval 보정으로 test_end 이후 SNAPSHOT
+        # 차단 → 정확히 test_bars + 1.
+        assert w.metrics["n_periods"] == 13
 
 
 def test_aggregate_metrics_returns_per_key_summary(tmp_path: Path) -> None:

@@ -9,15 +9,27 @@ PR 17 minimum 범위:
   (train 시작은 고정, train 길이 누적). spec Decision Backlog "rolling/expanding 둘 다
   후보 유지" 양쪽 채택.
 - ``run_walkforward(base_config, strategy_factory, splitter, ...)`` — 각 window 에서
-  BacktestEngine 실행. config.start = ``window.train_start`` (warmup 용), config.end =
-  ``window.test_end``. 결과 equity 시리즈를 ``test_start`` 이후로 필터 → 순수 OOS metrics.
+  BacktestEngine 실행. window 의 ``test_end`` 가 exclusive 이므로 ``cfg.end =
+  test_end - bar_interval`` 로 보정 (그렇지 않으면 ``ParquetDataSource`` 의 inclusive
+  ``<= end`` 필터 + ClockEvent 의 close 시각 emit 으로 ``test_end + bar_interval`` 까지
+  SNAPSHOT 이 생긴다). OOS 필터도 상하한 모두 명시: ``test_start <= ts <= test_end``.
 - ``WalkforwardResult.aggregate_metrics`` — 각 window metric 의 mean/median/std/min/max
   로 분포 요약.
+
+**Train 구간 동작 (의도적 — 문서화)**:
+``run_walkforward`` 는 각 window 를 ``[train_start, test_end)`` 로 한 번에 실행한다 —
+train 구간이 단순 indicator warmup 이 아니라 실거래 시뮬레이션이다. 의미:
+- train 동안 strategy 가 발행한 주문/체결로 ``test_start`` 시점에 포지션이 열려 있을 수
+  있다. OOS metrics 는 그 상태에서 시작하는 equity 변화를 측정한다.
+- 진짜 "pure OOS" (test_start 시점에 ledger/orderbook reset) 가 필요하면 후속 PR 에서
+  옵션으로 추가. 현재는 "warmup with state carryover" — 실거래 환경에서 pre-existing
+  포지션 영향까지 보는 평가에 가깝다.
 
 PR 17 한계 / 후속:
 - 본 PR 은 strategy_factory 에서 같은 strategy 를 반복 instantiate (no per-window
   hyperparameter optimization). 진짜 walk-forward optimization 은 Phase 4 sweep 에서.
 - `WalkforwardResult` 직렬화 / report 는 후속 PR.
+- ``test_start`` reset 모드 (pure OOS) 는 후속 PR.
 """
 
 from __future__ import annotations
@@ -193,14 +205,22 @@ def run_walkforward(
     periods_per_year: int = 365,
     verbose: bool = False,
 ) -> WalkforwardResult:
-    """각 window 의 ``[train_start, test_end]`` 로 BacktestEngine 실행 + OOS metrics 추출.
+    """각 window 의 ``[train_start, test_end)`` 로 BacktestEngine 실행 + OOS metrics 추출.
 
     각 window 의 ``run_id`` = ``f"{base_config.run_id}_wf_{i}"``. ``base_config`` 의 다른
     필드 (instruments, strategy_name 등) 는 그대로. start/end/run_id 만 ``dataclasses.replace``
     로 교체.
 
-    OOS metrics 는 engine 실행 후 events.jsonl → build_equity_series → ``timestamp >=
-    test_start`` 필터 → ``compute_core_metrics``. train 구간 equity 는 metrics 에 영향 없음.
+    경계 처리:
+    - ``window.test_end`` 는 exclusive. ``ParquetDataSource`` 의 ``<= end`` inclusive
+      필터 + ClockEvent 의 close 시각 emit 으로 ``test_end + bar_interval`` SNAPSHOT 이
+      생기는 것을 막기 위해 ``cfg.end = test_end - bar_interval`` 로 보정.
+    - OOS 필터 ``test_start <= ts <= test_end`` 로 상하한 모두 명시. test_start 시점의
+      anchor SNAPSHOT (= train 종료 직후 equity) 을 포함해 OOS 수익률 계산의 기점으로 사용.
+
+    OOS metrics 는 engine 실행 후 events.jsonl → build_equity_series → 위 필터 →
+    ``compute_core_metrics``. train 구간 equity 는 metrics 에 영향 없음. (단 train 의
+    state — 포지션/주문 — 는 이월: 모듈 docstring "Train 구간 동작" 참조.)
     """
     windows = splitter.split()
     results: list[WalkforwardWindowResult] = []
@@ -209,14 +229,17 @@ def run_walkforward(
             base_config,
             run_id=f"{base_config.run_id}_wf_{window.index}",
             start=window.train_start,
-            end=window.test_end,
+            end=window.test_end - splitter.bar_interval,
         )
         engine = BacktestEngine(cfg, strategy_factory(), verbose=verbose)
         result = engine.run()
 
         reader = EventLogReader(result.events_path)
         equity = build_equity_series(reader, base_config.initial_equity)
-        test_equity = equity.filter(pl.col("timestamp") >= window.test_start)
+        test_equity = equity.filter(
+            (pl.col("timestamp") >= window.test_start)
+            & (pl.col("timestamp") <= window.test_end)
+        )
         metrics = compute_core_metrics(
             test_equity, periods_per_year=periods_per_year
         )
