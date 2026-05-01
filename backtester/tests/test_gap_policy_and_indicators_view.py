@@ -1,10 +1,11 @@
-"""PR 16 prep — gap_policy 활성 + ctx.indicators 엔진 wiring 회귀.
+"""PR 16 prep + PR C — gap_policy 활성 + ctx.indicators 엔진 wiring 회귀.
 
 이 파일은 두 가지를 검증한다:
 1. ``gap_policy='notify'`` 가 ``strategy.on_data_gap`` 을 실제로 호출하고 verbose 알림을
    stdout 으로 낸다 — 이전엔 GapReport 만 쌓고 정책이 무시됐다.
-2. ``gap_policy='ffill'`` 은 명시적 ``NotImplementedError``.
-3. Engine 의 strategy.on_bar 호출 경로에 ``ctx.indicators[symbol][tf]`` 가 precomputed
+2. ``gap_policy='ffill'`` 은 PR C 에서 config valid set 에서 제거 — config 레벨 ``ConfigError``.
+3. ``gap_policy='strict'`` (PR C 추가) 는 데이터 갭이 있으면 즉시 ``DataError``.
+4. Engine 의 strategy.on_bar 호출 경로에 ``ctx.indicators[symbol][tf]`` 가 precomputed
    결과로 채워져 있고 last_closed 컷오프가 적용된다.
 """
 
@@ -150,12 +151,57 @@ def test_gap_policy_notify_no_gap_no_callback(tmp_path: Path) -> None:
     assert strat.gap_calls == []
 
 
-def test_gap_policy_ffill_raises_not_implemented(tmp_path: Path) -> None:
+def test_gap_policy_ffill_rejected_at_config_level(tmp_path: Path) -> None:
+    """PR C: ``ffill`` 은 config valid set 에서 제거 — ``ConfigError`` for fail-fast."""
+    from backtester.core.errors import ConfigError
+
     base = datetime(2026, 1, 1, tzinfo=UTC)
     timestamps = [base + timedelta(hours=i) for i in range(5)]
-    cfg = _config(tmp_path, timestamps=timestamps, gap_policy="ffill")
-    with pytest.raises(NotImplementedError, match="ffill"):
+    with pytest.raises(ConfigError, match="gap_policy"):
+        _config(tmp_path, timestamps=timestamps, gap_policy="ffill")
+
+
+def test_gap_policy_strict_with_gap_raises_data_error(tmp_path: Path) -> None:
+    """PR C: ``strict`` 모드 + 갭 있는 데이터 → ``DataError`` (백테스트 시작 차단)."""
+    from backtester.core.errors import DataError
+
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    # 02:00 / 03:00 빠진 시리즈
+    timestamps = [
+        base,
+        base + timedelta(hours=1),
+        base + timedelta(hours=4),
+        base + timedelta(hours=5),
+    ]
+    cfg = _config(tmp_path, timestamps=timestamps, gap_policy="strict")
+    with pytest.raises(DataError, match="strict"):
         BacktestEngine(cfg, _GapRecorderStrategy(), verbose=False)
+
+
+def test_gap_policy_strict_no_gap_passes(tmp_path: Path) -> None:
+    """PR C: ``strict`` 모드 + 연속 데이터 → 정상 통과 (DataError 없음)."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    timestamps = [base + timedelta(hours=i) for i in range(5)]  # 연속
+    cfg = _config(tmp_path, timestamps=timestamps, gap_policy="strict")
+    BacktestEngine(cfg, _GapRecorderStrategy(), verbose=False)  # raise 없음
+
+
+def test_gap_policy_strict_does_not_call_on_data_gap(tmp_path: Path) -> None:
+    """PR C: ``strict`` 모드는 콜백 호출 없이 즉시 raise — 전략에 책임 안 떠넘김."""
+    from backtester.core.errors import DataError
+
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    timestamps = [
+        base,
+        base + timedelta(hours=1),
+        base + timedelta(hours=4),
+        base + timedelta(hours=5),
+    ]
+    cfg = _config(tmp_path, timestamps=timestamps, gap_policy="strict")
+    strat = _GapRecorderStrategy()
+    with pytest.raises(DataError):
+        BacktestEngine(cfg, strat, verbose=False)
+    assert strat.gap_calls == []
 
 
 # ---------- ctx.indicators (Engine wiring) -----------------------------------

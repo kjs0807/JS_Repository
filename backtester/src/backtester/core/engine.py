@@ -324,24 +324,38 @@ class BacktestEngine:
     # ---------- gap_policy --------------------------------------------------
 
     def _handle_data_gaps(self) -> None:
-        """``config.gap_policy`` 활성 (PR 16 전 prep, spec §5.1).
+        """``config.gap_policy`` 활성 (PR 16 prep + PR C 강화, spec §5.1).
 
         - ``notify`` (기본): GapReport 가 비어 있지 않은 (symbol, tf) 마다 verbose stdout
           알림 + ``strategy.on_data_gap(symbol, gap_start, gap_end)`` 콜백. 콜백이 반환한
           ``OrderIntent`` 는 알림용으로 로깅만 하고 자동 주입은 안 함 — Phase 2 한정,
           gap-driven intent 주입은 후속 PR (event-loop 내 hook 위치 결정 필요).
-        - ``ffill``: ``NotImplementedError``. 이전엔 config 가 통과만 시키고 정책이 무시됐음.
-          본 PR 은 명시적 차단. 실제 ffill 보정은 후속 PR.
+        - ``strict`` (PR C): 데이터 갭이 하나라도 있으면 즉시 ``DataError``. 백테스트가
+          시작도 안 됨. crypto 전략처럼 가격 연속성이 신뢰되어야 하는 도메인 권장.
+          ``strategy.on_data_gap`` 콜백은 호출하지 않음 (전략에 책임 떠넘기지 않음).
 
         gap_reports 는 ``_fetch_all_bars()`` 가 채워둔 ``self.gap_reports`` 를 사용.
         """
+        from backtester.core.errors import DataError
+
         policy = self.config.gap_policy
-        if policy == "ffill":
-            raise NotImplementedError(
-                "gap_policy='ffill' is deferred to a subsequent PR; "
-                "use 'notify' (default) until then"
-            )
-        # notify
+        if policy == "strict":
+            details: list[str] = []
+            for symbol, tfs in self.gap_reports.items():
+                for tf, report in tfs.items():
+                    if report.gaps:
+                        details.append(
+                            f"{symbol}/{tf}: {report.total_missing_bars} missing "
+                            f"bar(s) across {len(report.gaps)} gap(s)"
+                        )
+            if details:
+                raise DataError(
+                    "gap_policy='strict' detected data gaps: "
+                    + "; ".join(details)
+                    + " — switch to 'notify' or fix the data source"
+                )
+            return
+        # notify (default)
         for symbol, tfs in self.gap_reports.items():
             for tf, report in tfs.items():
                 if not report.gaps:

@@ -1856,8 +1856,9 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
   미반영 — 명시 필요 시 별도 PR.
 - `execution_model='atr_slippage'` config 활성화. 현재 config 레벨 fail-fast.
   ``atr_provider`` 표현 방식 (instrument-bound vs strategy-injected) 결정 후 다시 추가.
-- `gap_policy='ffill'` 실제 보정 (현재는 명시적 NotImplementedError). 옵션 자체를 제거
-  또는 forward-fill 보정 활성화 중 택일.
+- ~~`gap_policy='ffill'` 실제 보정~~ — PR C 에서 옵션 자체 제거 (config-level
+  ConfigError). ``strict`` 모드 추가 ✅. forward-fill 실제 보정은 후속 PR (`ffill`
+  옵션 자체를 다시 추가하거나 별개 기능으로 도입).
 - Order cancel / modify (`OrderAction.type in ("cancel", "modify")`,
   `OrderBook.expire_pending`/`modify`, TIF 확장 GTC 외). 현재는 진입 체결 중심 — TP/SL,
   trailing stop, 주문 정정 전략 본격화 시 활성.

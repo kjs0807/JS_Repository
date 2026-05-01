@@ -29,7 +29,10 @@ _VALID_ON_RUN_EXISTS: frozenset[str] = frozenset(
     {"fail", "overwrite", "auto_suffix", "archive"}
 )
 _VALID_PERSIST_RUN_DATA: frozenset[str] = frozenset({"copy", "symlink", "none"})
-_VALID_GAP_POLICY: frozenset[str] = frozenset({"notify", "ffill"})
+# PR C 정정: ``ffill`` 옵션 제거 (silent ignore 기간 종료, 실제 보정은 후속 PR).
+# ``strict`` 모드 추가 — 데이터 갭이 하나라도 있으면 즉시 ``DataError`` 로 백테스트
+# 시작 자체를 차단. crypto 전략처럼 가격 연속성이 신뢰되어야 하는 도메인 기본값 후보.
+_VALID_GAP_POLICY: frozenset[str] = frozenset({"notify", "strict"})
 # PR 16 prep 2차: ``atr_slippage`` 는 ``BacktestConfig`` 만으로 wiring 되지 않으므로
 # (atr_provider 명시 주입이 필요), config 레벨에서 fail-fast 차단. 라이브러리 사용자가
 # ``AtrSlippageExecution`` 을 직접 만들어 ``BacktestEngine`` 에 monkey-patch 하는 방식은
@@ -102,7 +105,7 @@ class BacktestConfig:
     primary_timeframe: str
     start: datetime
     end: datetime
-    gap_policy: Literal["notify", "ffill"] = "notify"
+    gap_policy: Literal["notify", "strict"] = "notify"
 
     # 실행 — ``atr_slippage`` 는 PR 16 prep 2차에서 config 레벨 차단 (직접 wiring 필요).
     execution_model: Literal["next_bar_open", "slippage_bps"] = "next_bar_open"
