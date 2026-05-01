@@ -1183,7 +1183,7 @@ results/*.parquet = 캐시·편의 산출물
 불일치 시 EventLog 기준
 ```
 
-`backtester rebuild-results runs/{run_id}/` (Phase 2)로 results 재생성.
+`backtester rebuild-results runs/{run_id}/` (Phase 2 PR 19)로 results 재생성. 구현: ``analysis/rebuild.py`` ``rebuild_results(run_dir)`` — events.jsonl 의 SNAPSHOT 이벤트만으로 ``results/equity_curve.parquet`` 재생성. 같은 ts 다중 SNAPSHOT 은 group_by + last dedup. Engine 런타임 ``Ledger.equity_curve`` 와의 시간 컨벤션 차이 (Engine = 봉 시작 / rebuild = 봉 마감) 는 봉 길이 만큼 시프트 — equity 시퀀스 자체는 동일. 멀티 TF 백테스트에서는 secondary TF 단독 close 시점은 rebuild 에 빠짐. EventLog 가 canonical 정책 (spec §6.3) 과 일관.
 
 ### 6.4 config 영속화 형식
 

@@ -17,6 +17,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from backtester.analysis.rebuild import rebuild_results
 from backtester.core.config import BacktestConfig
 from backtester.core.engine import BacktestEngine
 from backtester.core.errors import ConfigError, RunDirectoryError
@@ -90,6 +91,29 @@ def _build_parser() -> argparse.ArgumentParser:
         "--quiet",
         action="store_true",
         help="Suppress INFO output (HTML output path).",
+    )
+
+    rebuild = sub.add_parser(
+        "rebuild-results",
+        help=(
+            "Regenerate run_dir/results/ cache from events.jsonl alone (PR 19, "
+            "spec section 6.3)."
+        ),
+        description=(
+            "Regenerate run_dir/results/ cache from events.jsonl alone "
+            "(PR 19). EventLog is canonical; results/ are cache."
+        ),
+    )
+    rebuild.add_argument(
+        "run_dir",
+        type=Path,
+        help="Path to runs/{run_id}/.",
+    )
+    rebuild.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress INFO output (regenerated paths).",
     )
 
     return parser
@@ -170,6 +194,28 @@ def cmd_metrics(
     return 0
 
 
+def cmd_rebuild_results(run_dir: Path, *, quiet: bool) -> int:
+    """``backtester rebuild-results`` 본체 — events.jsonl 로 results/ 캐시 재생성."""
+    if not run_dir.exists() or not run_dir.is_dir():
+        print(f"[error] run dir not found: {run_dir}", file=sys.stderr)
+        return 2
+    if not (run_dir / "events.jsonl").exists():
+        print(
+            f"[error] events.jsonl missing in {run_dir} — not a valid run directory",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        outputs = rebuild_results(run_dir)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"[error] rebuild: {e}", file=sys.stderr)
+        return 2
+    if not quiet:
+        for name, path in outputs.items():
+            print(f"[INFO] Rebuilt {name}: {path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.cmd == "run":
@@ -182,6 +228,8 @@ def main(argv: list[str] | None = None) -> int:
             periods_per_year=args.periods_per_year,
             quiet=args.quiet,
         )
+    if args.cmd == "rebuild-results":
+        return cmd_rebuild_results(args.run_dir, quiet=args.quiet)
     # argparse `required=True` 가 차단하지만 방어적으로
     print(f"[error] unknown command: {args.cmd!r}", file=sys.stderr)
     return 2
