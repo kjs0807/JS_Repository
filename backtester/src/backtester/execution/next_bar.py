@@ -1,24 +1,29 @@
 """NextBarOpenExecution — 다음 봉 OHLC 기반 체결 (spec §3.10).
 
-Phase 2 PR 15b 까지 누적된 동작:
+Phase 2 PR 15c 까지 누적된 동작:
 - ``order.intent.type == "market"`` → 다음 봉 open 가격에 즉시 전량 체결.
   bps slippage 적용 (PR 15a). market = taker.
-- ``"limit"`` (PESSIMISTIC, spec §3.10):
-  - buy: ``open<=L`` → fill at open (taker); ``low<=L`` → fill at L (maker); else no fill.
-  - sell: ``open>=L`` → fill at open (taker); ``high>=L`` → fill at L (maker); else no fill.
-- ``"stop"`` (PESSIMISTIC, market on trigger):
-  - buy: ``open>=S`` → fill at open (taker); ``high>=S`` → fill at S (taker); else no fill.
-  - sell: ``open<=S`` → fill at open (taker); ``low<=S`` → fill at S (taker); else no fill.
-- ``"stop_limit"`` (PR 15b minimum — 단일 봉 stop+limit 동시 처리):
-  같은 봉 안에서 stop trigger + limit 체결이 둘 다 가능한 경우만 fill. trigger 만 되고
-  limit 미도달이면 no fill. 다음 봉에서 stop 이 다시 평가됨 — **trigger state 미보존**
-  은 PR 15b 한계로 문서화. 후속 PR 에서 ``Order.triggered`` 상태 도입 예정.
+- ``"limit"``/``"stop"``/``"stop_limit"`` (PR 15b): OHLC 기반 PESSIMISTIC 분기.
+- ``BarPathModel`` 4종 분기 (PR 15c):
+  - ``PESSIMISTIC`` (default): 트레이더에게 불리한 봉 path 가정. PR 15b 동작.
+  - ``OPTIMISTIC``: 단일 주문 단일 봉 컨텍스트에서 PESSIMISTIC 와 동일 fill 결과
+    (limit/stop 의 spec 규칙 자체가 path 에 무관하게 결정적). 차별화는 PR 16+ 의
+    position-level TP/SL coexistence 도입 시 활성.
+  - ``OHLC_ORDER``: open→high→low→close 명시 path. 단일 주문에서는 PESSIMISTIC 와
+    동일 결과 (path 의 fill 가능 여부가 high/low 도달 여부로 결정되며 spec 규칙과
+    일치). 차별화는 PR 16+.
+  - ``OPEN_TO_CLOSE``: linear path open→close. **high/low 무시**. limit/stop trigger
+    여부를 close 도달로만 판단 → PESSIMISTIC 와 명확히 다른 fill 결과 (PR 15c
+    minimum 차별화 포인트).
 
-부분 체결 없음 — order.remaining 전량을 한 번에 fill. slippage_bps 는 market 에만 적용
-(limit/stop/stop_limit 은 OHLC 기반 정확한 가격에 체결).
+slippage_bps 는 market 에만 적용 (PR 15b). limit/stop/stop_limit 은 OHLC 기반 정확
+가격에 체결.
 
 ``Fill.timestamp`` 는 ``snapshot.timestamp`` (= 봉 시작 = open 시각). EventLog Event.ts 는
 ClockEvent.timestamp (봉 마감) 이라 별도 — Engine 이 처리.
+
+랜덤 path 정책 (예: monte-carlo intra-bar) 은 ``BarPathModel`` 에 정의되어 있지 않음 →
+PR 15c 에서 도입하지 않는다. 향후 추가 시 ``random_seed`` 와의 결합 + 재현성 보장 필요.
 """
 
 from __future__ import annotations
@@ -27,19 +32,30 @@ from decimal import Decimal
 
 from backtester.core.orderbook import Order
 from backtester.core.snapshot import MarketSnapshot
-from backtester.core.types import Fill
+from backtester.core.types import BarPathModel, Fill
 from backtester.execution.slippage_bps import apply_bps_slippage
 from backtester.instruments.base import Instrument
 
 
 class NextBarOpenExecution:
-    """다음 봉 OHLC 기반 체결. market 은 open + slippage, limit/stop/stop_limit 은 OHLC."""
+    """다음 봉 OHLC 기반 체결. ``bar_path_model`` 로 봉 내 path 가정 선택."""
 
-    def __init__(self, *, slippage_bps: Decimal | float | int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        slippage_bps: Decimal | float | int = 0,
+        bar_path_model: BarPathModel = BarPathModel.PESSIMISTIC,
+    ) -> None:
         bps = Decimal(str(slippage_bps))
         if bps < 0:
             raise ValueError(f"slippage_bps must be >= 0, got {bps}")
+        if not isinstance(bar_path_model, BarPathModel):
+            raise ValueError(
+                f"bar_path_model must be a BarPathModel enum member, "
+                f"got {type(bar_path_model).__name__}"
+            )
         self.slippage_bps = bps
+        self.bar_path_model = bar_path_model
 
     def try_fill(
         self,
@@ -50,17 +66,24 @@ class NextBarOpenExecution:
         intent = order.intent
         if intent.type == "market":
             return self._fill_market(order, snapshot, instrument)
+        # PR 15c: BarPathModel 분기 — 단일 주문 컨텍스트에서는 OPEN_TO_CLOSE 만
+        # PESSIMISTIC 와 차별화. OPTIMISTIC / OHLC_ORDER 는 PR 16+ TP/SL coexistence
+        # 도입 시 차별화.
+        if self.bar_path_model == BarPathModel.OPEN_TO_CLOSE:
+            dispatch = self._dispatch_open_to_close
+        else:
+            dispatch = self._dispatch_pessimistic
         if intent.type == "limit":
-            return self._fill_limit(order, snapshot, instrument)
+            return dispatch(order, snapshot, instrument, kind="limit")
         if intent.type == "stop":
-            return self._fill_stop(order, snapshot, instrument)
+            return dispatch(order, snapshot, instrument, kind="stop")
         if intent.type == "stop_limit":
-            return self._fill_stop_limit(order, snapshot, instrument)
+            return dispatch(order, snapshot, instrument, kind="stop_limit")
         raise NotImplementedError(  # pragma: no cover — OrderBook.add 가 차단
             f"NextBarOpenExecution does not support order type {intent.type!r}"
         )
 
-    # ---------- 변종별 분기 -------------------------------------------------
+    # ---------- market -----------------------------------------------------
 
     def _fill_market(
         self,
@@ -73,32 +96,45 @@ class NextBarOpenExecution:
         price = apply_bps_slippage(base_price, intent.side, self.slippage_bps)
         return self._make_fill(order, snapshot, instrument, price=price, is_maker=False)
 
-    def _fill_limit(
+    # ---------- PESSIMISTIC (= OPTIMISTIC = OHLC_ORDER, single-order) -------
+
+    def _dispatch_pessimistic(
+        self,
+        order: Order,
+        snapshot: MarketSnapshot,
+        instrument: Instrument,
+        *,
+        kind: str,
+    ) -> Fill | None:
+        if kind == "limit":
+            return self._fill_limit_pess(order, snapshot, instrument)
+        if kind == "stop":
+            return self._fill_stop_pess(order, snapshot, instrument)
+        return self._fill_stop_limit_pess(order, snapshot, instrument)
+
+    def _fill_limit_pess(
         self,
         order: Order,
         snapshot: MarketSnapshot,
         instrument: Instrument,
     ) -> Fill | None:
         intent = order.intent
-        assert intent.limit_price is not None  # OrderBook.add 가 강제
+        assert intent.limit_price is not None
         L = intent.limit_price
         o, h, low_ = snapshot.open, snapshot.high, snapshot.low
         if intent.side == "buy":
             if o <= L:
-                # 시가가 limit 이하 → market 처럼 open 에 즉시 체결 (taker)
                 return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
             if low_ <= L:
-                # 봉 안에서 limit 도달 → limit 가격 체결 (maker)
                 return self._make_fill(order, snapshot, instrument, price=L, is_maker=True)
             return None
-        # sell
         if o >= L:
             return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
         if h >= L:
             return self._make_fill(order, snapshot, instrument, price=L, is_maker=True)
         return None
 
-    def _fill_stop(
+    def _fill_stop_pess(
         self,
         order: Order,
         snapshot: MarketSnapshot,
@@ -109,32 +145,23 @@ class NextBarOpenExecution:
         S = intent.stop_price
         o, h, low_ = snapshot.open, snapshot.high, snapshot.low
         if intent.side == "buy":
-            # buy stop: 가격이 S 이상으로 가면 trigger
             if o >= S:
-                # 갭업 — open 에서 trigger, market 으로 체결 (taker, 더 비쌈 = 불리)
                 return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
             if h >= S:
-                # 봉 안에서 S 터치 → S 에서 market 체결 (taker)
                 return self._make_fill(order, snapshot, instrument, price=S, is_maker=False)
             return None
-        # sell stop
         if o <= S:
             return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
         if low_ <= S:
             return self._make_fill(order, snapshot, instrument, price=S, is_maker=False)
         return None
 
-    def _fill_stop_limit(
+    def _fill_stop_limit_pess(
         self,
         order: Order,
         snapshot: MarketSnapshot,
         instrument: Instrument,
     ) -> Fill | None:
-        """PR 15b minimum: 같은 봉 안에서 stop trigger + limit 체결이 가능한 경우만 fill.
-
-        trigger 만 되고 limit 미도달이면 no fill (order 는 active 유지). 다음 봉에서 stop
-        이 재평가되는 PR 15b 한계 — Order.triggered 상태 도입은 후속 PR.
-        """
         intent = order.intent
         assert intent.limit_price is not None and intent.stop_price is not None
         L = intent.limit_price
@@ -142,22 +169,109 @@ class NextBarOpenExecution:
         o, h, low_ = snapshot.open, snapshot.high, snapshot.low
 
         if intent.side == "buy":
-            # 1. stop trigger 검사 (buy stop: price >= S)
             if not (o >= S or h >= S):
                 return None
-            # 2. trigger 됐으니 limit BUY 처럼 체결 시도
             if o <= L:
                 return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
             if low_ <= L:
                 return self._make_fill(order, snapshot, instrument, price=L, is_maker=True)
             return None
-
-        # sell stop_limit
         if not (o <= S or low_ <= S):
             return None
         if o >= L:
             return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
         if h >= L:
+            return self._make_fill(order, snapshot, instrument, price=L, is_maker=True)
+        return None
+
+    # ---------- OPEN_TO_CLOSE (high/low 무시, linear path) ------------------
+
+    def _dispatch_open_to_close(
+        self,
+        order: Order,
+        snapshot: MarketSnapshot,
+        instrument: Instrument,
+        *,
+        kind: str,
+    ) -> Fill | None:
+        if kind == "limit":
+            return self._fill_limit_otc(order, snapshot, instrument)
+        if kind == "stop":
+            return self._fill_stop_otc(order, snapshot, instrument)
+        return self._fill_stop_limit_otc(order, snapshot, instrument)
+
+    def _fill_limit_otc(
+        self,
+        order: Order,
+        snapshot: MarketSnapshot,
+        instrument: Instrument,
+    ) -> Fill | None:
+        intent = order.intent
+        assert intent.limit_price is not None
+        L = intent.limit_price
+        o, c = snapshot.open, snapshot.close
+        if intent.side == "buy":
+            if o <= L:
+                return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
+            if c <= L:
+                # path open(>L) → close(<=L) 가 L 을 통과 → limit fill at L
+                return self._make_fill(order, snapshot, instrument, price=L, is_maker=True)
+            return None
+        if o >= L:
+            return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
+        if c >= L:
+            return self._make_fill(order, snapshot, instrument, price=L, is_maker=True)
+        return None
+
+    def _fill_stop_otc(
+        self,
+        order: Order,
+        snapshot: MarketSnapshot,
+        instrument: Instrument,
+    ) -> Fill | None:
+        intent = order.intent
+        assert intent.stop_price is not None
+        S = intent.stop_price
+        o, c = snapshot.open, snapshot.close
+        if intent.side == "buy":
+            if o >= S:
+                return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
+            if c >= S:
+                return self._make_fill(order, snapshot, instrument, price=S, is_maker=False)
+            return None
+        if o <= S:
+            return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
+        if c <= S:
+            return self._make_fill(order, snapshot, instrument, price=S, is_maker=False)
+        return None
+
+    def _fill_stop_limit_otc(
+        self,
+        order: Order,
+        snapshot: MarketSnapshot,
+        instrument: Instrument,
+    ) -> Fill | None:
+        intent = order.intent
+        assert intent.limit_price is not None and intent.stop_price is not None
+        L = intent.limit_price
+        S = intent.stop_price
+        o, c = snapshot.open, snapshot.close
+
+        if intent.side == "buy":
+            triggered = o >= S or c >= S
+            if not triggered:
+                return None
+            if o <= L:
+                return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
+            if c <= L:
+                return self._make_fill(order, snapshot, instrument, price=L, is_maker=True)
+            return None
+        triggered = o <= S or c <= S
+        if not triggered:
+            return None
+        if o >= L:
+            return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
+        if c >= L:
             return self._make_fill(order, snapshot, instrument, price=L, is_maker=True)
         return None
 

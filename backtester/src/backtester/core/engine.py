@@ -384,12 +384,16 @@ class BacktestEngine:
 
     def _build_execution_model(self) -> NextBarOpenExecution:
         em = self.config.execution_model
+        bpm = self.config.bar_path_model  # PR 15c 분기 (default PESSIMISTIC)
         if em == "next_bar_open":
-            # Phase 1 호환 — slippage 0
-            return NextBarOpenExecution()
+            # Phase 1 호환 — slippage 0 + bar_path_model 전달
+            return NextBarOpenExecution(bar_path_model=bpm)
         if em == "slippage_bps":
             # Phase 2 PR 15a — config.slippage_bps 를 NextBarOpen 에 주입
-            return NextBarOpenExecution(slippage_bps=self.config.slippage_bps)
+            return NextBarOpenExecution(
+                slippage_bps=self.config.slippage_bps,
+                bar_path_model=bpm,
+            )
         if em == "atr_slippage":
             # ATR slippage 는 atr_provider 주입이 필요해 Engine 자동 wiring 불가.
             # 사용자가 명시적으로 ``AtrSlippageExecution`` 을 만들어 ``BacktestEngine`` 의

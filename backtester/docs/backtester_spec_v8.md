@@ -2164,10 +2164,14 @@ BB-KC 포팅 경계 (절대 위반 금지):
 - slippage_bps 는 market 에만 적용. limit/stop/stop_limit 은 OHLC 기반 정확 가격에 체결.
 - **PR 15b 한계 (문서화)**: stop_limit 의 stop trigger 상태가 다중 봉에 걸쳐 보존되지 않음. trigger 후 limit 미도달이면 다음 봉에서 stop 이 재평가됨. ``Order.triggered`` 상태 도입은 후속 PR.
 
-**PR 15c — BarPathModel 4종 정책 (Phase 2)**
-- spec enum (``BarPathModel.{PESSIMISTIC, OPTIMISTIC, OPEN_TO_CLOSE, OHLC_ORDER}``) vs 코드 enum 정렬
-- 같은 봉 내 TP/SL/limit/stop 동시 도달 시 정책별 우선순위 명확화
-- random 정책은 ``random_seed`` 재현성 확보 시에만 도입, 안 되면 명시 제외
+**PR 15c — BarPathModel 4종 정책 (Phase 2 완료)**
+- spec/code enum 정렬 검증: ``BarPathModel.{PESSIMISTIC, OPTIMISTIC, OPEN_TO_CLOSE, OHLC_ORDER}`` (4종) — `core/types.py` 와 일치 확인.
+- ``NextBarOpenExecution(*, slippage_bps, bar_path_model)`` 파라미터 추가. ``BacktestConfig.bar_path_model`` 을 Engine ``_build_execution_model`` 에서 자동 전달.
+- **단일 주문 단일 봉 컨텍스트의 차별화**:
+  - ``PESSIMISTIC`` (default) = ``OPTIMISTIC`` = ``OHLC_ORDER``: spec §3.10 limit/stop 규칙이 path 에 무관하게 결정적 → 동일 fill 결과 (PR 15c 회귀로 명시 검증).
+  - ``OPEN_TO_CLOSE``: open→close linear path. **high/low 를 무시**하여 PESSIMISTIC 와 명확히 다름. limit BUY 예: low<=L 이지만 close>L 이면 PESSIMISTIC fill, OPEN_TO_CLOSE no fill.
+- **PR 15c minimum 한계 (문서화)**: ``OPTIMISTIC`` 와 ``OHLC_ORDER`` 의 PESSIMISTIC 와의 진정한 차별화는 PR 16+ TP/SL coexistence (한 position 에 take-profit 과 stop-loss 가 같은 봉에서 모두 도달하는 케이스의 우선순위) 도입 시점부터 활성화된다. 본 PR 은 enum 정렬 + parameter wiring + OPEN_TO_CLOSE specialization 까지.
+- ``random`` 정책은 ``BarPathModel`` 에 정의되어 있지 않음 → PR 15c 에서 도입하지 **않음**. 향후 추가 시 ``random_seed`` 결합 + 재현성 보장 인프라가 필수.
 
 **PR 13 — 멀티 timeframe**
 **PR 14 — BybitDataSource + 캐싱**
