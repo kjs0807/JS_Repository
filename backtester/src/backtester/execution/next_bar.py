@@ -251,6 +251,14 @@ class NextBarOpenExecution:
         snapshot: MarketSnapshot,
         instrument: Instrument,
     ) -> Fill | None:
+        """OPEN_TO_CLOSE stop_limit — trigger_at_open vs trigger_via_close 경로 분리.
+
+        ``trigger_at_open`` 시: post-trigger 가격이 ``open`` 부터 시작 → limit 비교는
+        ``open`` 기반.
+        ``trigger_via_close`` 시: stop 이 path 위 어딘가에서 발동 (가격=``S``) →
+        post-trigger 가격이 ``S`` 부터 시작. limit 비교는 ``S`` 기반 (``open`` 사용 금지 —
+        open 시점에는 아직 발동 전이라 limit 체결 불가).
+        """
         intent = order.intent
         assert intent.limit_price is not None and intent.stop_price is not None
         L = intent.limit_price
@@ -258,19 +266,39 @@ class NextBarOpenExecution:
         o, c = snapshot.open, snapshot.close
 
         if intent.side == "buy":
-            triggered = o >= S or c >= S
-            if not triggered:
+            trigger_at_open = o >= S
+            if trigger_at_open:
+                # post-trigger 가격 = open. limit 비교 기준 = open.
+                if o <= L:
+                    return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
+                if c <= L:
+                    return self._make_fill(order, snapshot, instrument, price=L, is_maker=True)
                 return None
-            if o <= L:
-                return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
+            # open 시점 미발동. close 도 S 미도달이면 path 어디에서도 미발동.
+            if c < S:
+                return None
+            # trigger_via_close: post-trigger 가격은 ``S`` 부터 시작 (open 사용 금지).
+            if S <= L:
+                # 발동 즉시 limit 체결 가능 (S <= L) → market-on-trigger style, taker.
+                return self._make_fill(order, snapshot, instrument, price=S, is_maker=False)
+            # S > L (atypical): post-trigger path S→c 가 L 통과해야 fill.
             if c <= L:
                 return self._make_fill(order, snapshot, instrument, price=L, is_maker=True)
             return None
-        triggered = o <= S or c <= S
-        if not triggered:
+
+        # sell stop_limit
+        trigger_at_open = o <= S
+        if trigger_at_open:
+            if o >= L:
+                return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
+            if c >= L:
+                return self._make_fill(order, snapshot, instrument, price=L, is_maker=True)
             return None
-        if o >= L:
-            return self._make_fill(order, snapshot, instrument, price=o, is_maker=False)
+        if c > S:
+            return None
+        # trigger_via_close: post-trigger 가격 = ``S``.
+        if S >= L:
+            return self._make_fill(order, snapshot, instrument, price=S, is_maker=False)
         if c >= L:
             return self._make_fill(order, snapshot, instrument, price=L, is_maker=True)
         return None

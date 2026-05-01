@@ -219,9 +219,9 @@ def test_open_to_close_stop_limit_buy_no_trigger_when_close_below_stop() -> None
     assert fill is None
 
 
-def test_open_to_close_stop_limit_buy_triggered_via_close_fills_at_open() -> None:
-    """trigger 조건: open>=S OR close>=S. open<L → fill at open."""
-    snap = _snap("101", "104", "99", "103")  # close=103>=S=100, triggered. open=101<=L=102
+def test_open_to_close_stop_limit_buy_trigger_at_open_fills_at_open() -> None:
+    """``o >= S`` 라 open 시점 발동. post-trigger 가격 = open. open <= L → fill at open."""
+    snap = _snap("101", "104", "99", "103")  # o=101>=S=100, o<=L=102
     otc = NextBarOpenExecution(bar_path_model=BarPathModel.OPEN_TO_CLOSE)
     fill = otc.try_fill(
         _order(
@@ -235,6 +235,91 @@ def test_open_to_close_stop_limit_buy_triggered_via_close_fills_at_open() -> Non
     )
     assert fill is not None
     assert fill.price == Decimal("101")
+
+
+# ---------- trigger_via_close 분리 (PR 15c 후속 버그 정정) ------------------
+
+
+def test_open_to_close_stop_limit_buy_trigger_via_close_fills_at_stop_not_open() -> None:
+    """버그 회귀: o<S 라 open 시점 미발동인데 close>=S 라 path 위에서 발동.
+
+    이전 구현은 ``triggered = o>=S or c>=S`` 후 ``o<=L`` 분기를 먼저 실행해 발동 전
+    open 가격(99)에 체결하던 버그. 정정: post-trigger 가격은 S=100 부터 → S<=L 이면
+    fill at S (taker).
+    """
+    snap = _snap("99", "104", "98", "103")  # o=99<S=100, c=103>=S, triggered via close
+    otc = NextBarOpenExecution(bar_path_model=BarPathModel.OPEN_TO_CLOSE)
+    fill = otc.try_fill(
+        _order(
+            "stop_limit",
+            "buy",
+            limit_price=Decimal("102"),
+            stop_price=Decimal("100"),
+        ),
+        snap,
+        _btc(),
+    )
+    assert fill is not None
+    assert fill.price == Decimal("100")  # S, NOT open=99
+
+
+def test_open_to_close_stop_limit_sell_trigger_via_close_fills_at_stop_not_open() -> None:
+    """sell 대칭: o>S 라 open 시점 미발동, close<=S 라 path 위에서 발동.
+    post-trigger 가격 = S, S>=L 이면 fill at S (taker)."""
+    snap = _snap("101", "102", "96", "97")  # o=101>S=100, c=97<=S, triggered via close
+    otc = NextBarOpenExecution(bar_path_model=BarPathModel.OPEN_TO_CLOSE)
+    fill = otc.try_fill(
+        _order(
+            "stop_limit",
+            "sell",
+            limit_price=Decimal("98"),
+            stop_price=Decimal("100"),
+        ),
+        snap,
+        _btc(),
+    )
+    assert fill is not None
+    assert fill.price == Decimal("100")  # S, NOT open=101
+
+
+def test_open_to_close_stop_limit_buy_trigger_via_close_atypical_s_above_l() -> None:
+    """S>L atypical (don't-buy-if-too-high). trigger_via_close + post-trigger path
+    S→c 가 L 통과 (c<=L) → fill at L (maker)."""
+    snap = _snap("99", "101", "97", "98")
+    # o=99<S=100 (no trigger at open), c=98<S? No c=98 < 100 → not via_close either.
+    # Adjust: need c>=S=100 for trigger via close. Let's use:
+    snap = _snap("99", "105", "97", "100.5")
+    # o=99<S=100, c=100.5>=S → triggered via close. S=100 > L=99 → no immediate fill.
+    # post-trigger path 100→100.5: doesn't cross L=99 going down. c=100.5>L=99 → no fill.
+    otc = NextBarOpenExecution(bar_path_model=BarPathModel.OPEN_TO_CLOSE)
+    fill = otc.try_fill(
+        _order(
+            "stop_limit",
+            "buy",
+            limit_price=Decimal("99"),  # L < S
+            stop_price=Decimal("100"),
+        ),
+        snap,
+        _btc(),
+    )
+    assert fill is None
+
+
+def test_open_to_close_stop_limit_buy_no_trigger_when_path_misses_stop() -> None:
+    """o<S AND c<S → path 어디에서도 stop 미발동 → no fill."""
+    snap = _snap("95", "99", "94", "97")  # o<S=100, c=97<S, never triggered
+    otc = NextBarOpenExecution(bar_path_model=BarPathModel.OPEN_TO_CLOSE)
+    fill = otc.try_fill(
+        _order(
+            "stop_limit",
+            "buy",
+            limit_price=Decimal("102"),
+            stop_price=Decimal("100"),
+        ),
+        snap,
+        _btc(),
+    )
+    assert fill is None
 
 
 # ---------- Engine wiring (config.bar_path_model 전달) ---------------------
