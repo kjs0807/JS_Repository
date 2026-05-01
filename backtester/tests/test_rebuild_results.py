@@ -207,6 +207,41 @@ def test_rebuild_results_returns_mapping(tmp_path: Path) -> None:
     assert outputs["equity_curve"].exists()
 
 
+def test_rebuild_results_works_without_config_files(tmp_path: Path) -> None:
+    """events.jsonl 만 있으면 rebuild_results 가 동작 — config.{yaml,json} 미존재 OK.
+
+    PR 19 계약 회귀: ``rebuild_results`` 가 events.jsonl 원본만으로 캐시 재생성.
+    이전 구현은 무결성 가드 명목으로 ``_load_run_config`` 를 강제 → events 만 있는
+    run_dir 에서 FileNotFoundError 로 실패하던 버그.
+    """
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    rd = tmp_path / "events_only"
+    rd.mkdir()
+    # events.jsonl 만, config.yaml/json 없음
+    with open(rd / "events.jsonl", "w", encoding="utf-8") as f:
+        for i in range(3):
+            f.write(
+                json.dumps(
+                    {
+                        "schema_version": EVENT_SCHEMA_VERSION,
+                        "ts": (base + timedelta(hours=i)).isoformat(),
+                        "type": "snapshot",
+                        "payload": {
+                            "equity": str(10000 + i * 50),
+                            "snapshot_reason": "periodic",
+                        },
+                    }
+                )
+                + "\n"
+            )
+
+    outputs = rebuild_results(rd)
+    assert outputs["equity_curve"].exists()
+    df = pl.read_parquet(outputs["equity_curve"])
+    assert df.height == 3
+    assert df["equity"].to_list() == [10000.0, 10050.0, 10100.0]
+
+
 def test_rebuild_results_after_purging_results_dir(tmp_path: Path) -> None:
     """results/ 를 통째로 지운 뒤 rebuild → 다시 생성."""
     import shutil

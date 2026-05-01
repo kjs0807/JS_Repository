@@ -31,7 +31,6 @@ import polars as pl
 
 from backtester.events.reader import EventLogReader
 from backtester.events.types import EventType
-from backtester.viz.run_chart import _load_run_config
 
 
 def _equity_curve_schema() -> dict[str, pl.DataType]:
@@ -90,13 +89,13 @@ def rebuild_results(run_dir: Path) -> dict[str, Path]:
 
     반환: ``{name: output_path}`` 매핑 — 호출자가 어떤 파일이 생성됐는지 확인 가능.
     PR 19 에서는 ``equity_curve`` 만. 후속 PR (PR 20 trades / metrics 캐시 등) 에서 추가.
+
+    **계약**: events.jsonl 만 있으면 동작 — config.{yaml,json} 미존재여도 OK.
+    후속 산출물 중 config 가 실제로 필요한 것이 추가되면 그 helper 가 ``_load_run_config``
+    를 직접 호출하도록 한다 (현재는 equity_curve 만이라 config 미사용).
     """
     if not (run_dir.exists() and run_dir.is_dir()):
         raise FileNotFoundError(f"run dir not found or not a directory: {run_dir}")
-    # config 로드는 추가 산출물에서 initial_equity 등이 필요할 때 활용. 현 PR 19 의
-    # equity_curve 는 SNAPSHOT.payload.equity 만 있으면 충분하지만, 무결성 가드로 한 번
-    # 로드 (config.{yaml,json} 둘 중 하나 필수).
-    _ = _load_run_config(run_dir)
     return {
         "equity_curve": rebuild_equity_curve(run_dir),
     }
