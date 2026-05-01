@@ -40,6 +40,7 @@ import statistics
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any, Literal
 
 import polars as pl
@@ -153,6 +154,59 @@ class WalkforwardResult:
 
     windows: list[WalkforwardWindowResult] = field(default_factory=list)
 
+    def stitched_oos_equity(self) -> pl.DataFrame:
+        """모든 window 의 OOS test 구간 equity 를 시간순 이어붙인 단일 시리즈 (PR R).
+
+        같은 ts 가 여러 window 에 등장하면 그 시점의 마지막 window 값을 채택 (later
+        window 가 더 정확한 OOS state). 빈 windows 는 빈 DataFrame.
+        """
+        if not self.windows:
+            return pl.DataFrame(
+                schema={
+                    "timestamp": pl.Datetime(time_unit="us", time_zone="UTC"),
+                    "equity": pl.Float64,
+                    "window_index": pl.Int64,
+                }
+            )
+        from backtester.events.reader import EventLogReader
+        from backtester.viz.equity import build_equity_series
+
+        rows: list[dict[str, Any]] = []
+        for w in self.windows:
+            reader = EventLogReader(w.run_dir / "events.jsonl")
+            eq = build_equity_series(reader, Decimal("0"))  # 초기값은 의미 없음
+            for r in eq.iter_rows(named=True):
+                ts = r["timestamp"]
+                if ts < w.window.test_start or ts > w.window.test_end:
+                    continue
+                rows.append(
+                    {
+                        "timestamp": ts,
+                        "equity": float(r["equity"]),
+                        "window_index": w.window.index,
+                    }
+                )
+        if not rows:
+            return pl.DataFrame(
+                schema={
+                    "timestamp": pl.Datetime(time_unit="us", time_zone="UTC"),
+                    "equity": pl.Float64,
+                    "window_index": pl.Int64,
+                }
+            )
+        return (
+            pl.DataFrame(rows)
+            .with_columns(
+                pl.col("timestamp").cast(pl.Datetime(time_unit="us", time_zone="UTC")),
+                pl.col("equity").cast(pl.Float64),
+                pl.col("window_index").cast(pl.Int64),
+            )
+            .sort(["timestamp", "window_index"])
+            .group_by("timestamp", maintain_order=True)
+            .last()
+            .sort("timestamp")
+        )
+
     def aggregate_metrics(self) -> dict[str, dict[str, float]]:
         """각 metric key 별로 mean/median/std/min/max 집계.
 
@@ -195,44 +249,102 @@ class WalkforwardResult:
 
 
 StrategyFactory = Callable[[], BaseStrategy]
+WindowAwareStrategyFactory = Callable[[WalkforwardWindow], BaseStrategy]
+StatePolicy = Literal["carryover", "reset"]
+
+
+def _invoke_factory(
+    factory: StrategyFactory | WindowAwareStrategyFactory,
+    window: WalkforwardWindow,
+) -> BaseStrategy:
+    """Factory 가 window 인자를 받는지 시그니처 검사 후 호출 (PR R).
+
+    positional-or-keyword 파라미터가 있을 때만 ``factory(window)`` 형태로 호출.
+    BBKCSqueezeStrategy 처럼 keyword-only 인자만 받는 클래스는 ``factory()`` (= no
+    args) 로 호출해야 한다.
+    """
+    import inspect
+
+    sig = inspect.signature(factory)
+    positional_params = [
+        p for p in sig.parameters.values()
+        if p.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    ]
+    if len(positional_params) >= 1:
+        return factory(window)  # type: ignore[call-arg]
+    return factory()  # type: ignore[call-arg]
 
 
 def run_walkforward(
     *,
     base_config: BacktestConfig,
-    strategy_factory: StrategyFactory,
+    strategy_factory: StrategyFactory | WindowAwareStrategyFactory,
     splitter: WalkforwardSplitter,
     periods_per_year: int = 365,
     verbose: bool = False,
+    state_policy: StatePolicy = "carryover",
 ) -> WalkforwardResult:
-    """각 window 의 ``[train_start, test_end)`` 로 BacktestEngine 실행 + OOS metrics 추출.
+    """각 window 에서 BacktestEngine 실행 + OOS metrics 추출.
 
-    각 window 의 ``run_id`` = ``f"{base_config.run_id}_wf_{i}"``. ``base_config`` 의 다른
-    필드 (instruments, strategy_name 등) 는 그대로. start/end/run_id 만 ``dataclasses.replace``
-    로 교체.
+    PR R 변경:
+    - ``state_policy="carryover"`` (default, PR 17 호환): 한 BacktestEngine 이 ``[train_
+      start, test_end)`` 를 한 번에 돌리고 OOS metrics 만 잘라낸다 — train 의 포지션
+      상태가 test 로 이월 ("warmup with state carryover").
+    - ``state_policy="reset"``: 두 단계 실행 — train 만 돌려 indicator/strategy state
+      만 warm up 한 뒤 BacktestEngine 을 새로 만들어 ``[test_start, test_end)`` 만
+      돌린다. ledger / orderbook / position 모두 reset → 진짜 OOS 평가.
+    - ``strategy_factory`` 는 ``() -> BaseStrategy`` 또는 ``(WalkforwardWindow) ->
+      BaseStrategy`` 시그니처 모두 허용. window-aware factory 로 per-window
+      파라미터 / 최적화 결과 주입 가능.
 
     경계 처리:
-    - ``window.test_end`` 는 exclusive. ``ParquetDataSource`` 의 ``<= end`` inclusive
-      필터 + ClockEvent 의 close 시각 emit 으로 ``test_end + bar_interval`` SNAPSHOT 이
-      생기는 것을 막기 위해 ``cfg.end = test_end - bar_interval`` 로 보정.
-    - OOS 필터 ``test_start <= ts <= test_end`` 로 상하한 모두 명시. test_start 시점의
-      anchor SNAPSHOT (= train 종료 직후 equity) 을 포함해 OOS 수익률 계산의 기점으로 사용.
+    - ``window.test_end`` 는 exclusive. ``cfg.end = test_end - bar_interval`` 로 보정.
+    - OOS 필터 ``test_start <= ts <= test_end`` 로 상하한 모두 명시.
 
     OOS metrics 는 engine 실행 후 events.jsonl → build_equity_series → 위 필터 →
-    ``compute_core_metrics``. train 구간 equity 는 metrics 에 영향 없음. (단 train 의
-    state — 포지션/주문 — 는 이월: 모듈 docstring "Train 구간 동작" 참조.)
+    ``compute_core_metrics``. window 별 ``run_dir`` 은 항상 보존 — chart/report/rebuild
+    가 동작.
     """
     windows = splitter.split()
     results: list[WalkforwardWindowResult] = []
     for window in windows:
-        cfg = dataclasses.replace(
-            base_config,
-            run_id=f"{base_config.run_id}_wf_{window.index}",
-            start=window.train_start,
-            end=window.test_end - splitter.bar_interval,
-        )
-        engine = BacktestEngine(cfg, strategy_factory(), verbose=verbose)
-        result = engine.run()
+        if state_policy == "carryover":
+            cfg = dataclasses.replace(
+                base_config,
+                run_id=f"{base_config.run_id}_wf_{window.index}",
+                start=window.train_start,
+                end=window.test_end - splitter.bar_interval,
+            )
+            engine = BacktestEngine(
+                cfg, _invoke_factory(strategy_factory, window), verbose=verbose
+            )
+            result = engine.run()
+            run_dir = result.run_dir
+        else:  # reset
+            # Step 1: warmup — train 구간만 돌려 strategy 가 indicator state 형성.
+            # ledger/orderbook 결과는 버려진다 (다음 단계가 새 엔진).
+            warm_cfg = dataclasses.replace(
+                base_config,
+                run_id=f"{base_config.run_id}_wf_{window.index}_warmup",
+                start=window.train_start,
+                end=window.train_end - splitter.bar_interval,
+            )
+            warm_strat = _invoke_factory(strategy_factory, window)
+            BacktestEngine(warm_cfg, warm_strat, verbose=verbose).run()
+            # Step 2: OOS — test 구간만 fresh ledger 로. strategy 도 새 인스턴스.
+            cfg = dataclasses.replace(
+                base_config,
+                run_id=f"{base_config.run_id}_wf_{window.index}",
+                start=window.test_start,
+                end=window.test_end - splitter.bar_interval,
+            )
+            oos_strat = _invoke_factory(strategy_factory, window)
+            engine = BacktestEngine(cfg, oos_strat, verbose=verbose)
+            result = engine.run()
+            run_dir = result.run_dir
 
         reader = EventLogReader(result.events_path)
         equity = build_equity_series(reader, base_config.initial_equity)
@@ -246,7 +358,7 @@ def run_walkforward(
         results.append(
             WalkforwardWindowResult(
                 window=window,
-                run_dir=result.run_dir,
+                run_dir=run_dir,
                 metrics=metrics,
             )
         )
