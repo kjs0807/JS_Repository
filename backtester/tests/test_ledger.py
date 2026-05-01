@@ -358,11 +358,20 @@ def test_ledger_snapshot_excludes_flat_positions() -> None:
 # ---------- on_settle / on_expired ------------------------------------------
 
 
-def test_ledger_on_settle_raises_phase_15() -> None:
+def test_ledger_on_settle_credits_cash() -> None:
+    """PR E: ``on_settle`` 활성. ``amount`` 가 cash 에 그대로 더해짐."""
     ledger = Ledger(initial_equity=100000)
-    cf = CashFlow(timestamp=TS, symbol="BTCUSDT", amount=Decimal("100"), reason="funding")
-    with pytest.raises(NotImplementedError, match="Phase 1.5"):
-        ledger.on_settle(cf)
+    before = ledger.cash
+    cf = CashFlow(
+        timestamp=TS, symbol="BTCUSDT", amount=Decimal("100"), reason="funding"
+    )
+    ledger.on_settle(cf)
+    assert ledger.cash == before + Decimal("100")
+    cf_neg = CashFlow(
+        timestamp=TS, symbol="BTCUSDT", amount=Decimal("-50"), reason="funding"
+    )
+    ledger.on_settle(cf_neg)
+    assert ledger.cash == before + Decimal("50")
 
 
 def test_ledger_on_expired_is_noop() -> None:

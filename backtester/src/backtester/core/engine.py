@@ -59,6 +59,7 @@ from backtester.events.types import (
     IntentCreatedPayload,
     SnapshotReason,
 )
+from backtester.execution.funding import FundingProcessor
 from backtester.execution.next_bar import NextBarOpenExecution
 from backtester.indicators.engine import IndicatorEngine
 from backtester.instruments.registry import InstrumentRegistry
@@ -144,6 +145,13 @@ class BacktestEngine:
         self.sizer = Sizer()
         self.risk = RiskManager(config.risk_limits)
         self.execution = self._build_execution_model()
+
+        # PR E: FundingProcessor (config.funding_models 비어있으면 None — funding 미적용).
+        self.funding_processor: FundingProcessor | None = (
+            FundingProcessor(config.funding_models)
+            if config.funding_models
+            else None
+        )
 
         self.current_snapshots: dict[str, MarketSnapshot] = {}
         self._bar_count = 0
@@ -537,8 +545,42 @@ class BacktestEngine:
         # 3. mark-to-market
         self.ledger.on_market(snapshots)
 
-        # 4. Settlement (Phase 1: settlements는 항상 빈 리스트)
-        # for symbol, kind in event.settlements: ...
+        # 4. PR E: Funding/Settlement — funding_processor 가 있으면 봉 마감 시각이 funding
+        # boundary 인지 검사 (FundingProcessor.process 가 ``is_funding_boundary`` 내부에서
+        # 판정). 발행된 CashFlow 는 Ledger.on_settle 로 cash 반영 + SETTLE 이벤트 +
+        # SNAPSHOT(reason='settlement').
+        if self.funding_processor is not None:
+            for symbol in self.config.timeframes_per_symbol:
+                snap = snapshots.get(symbol)
+                if snap is None:
+                    continue
+                instrument = self.instrument_registry.get(symbol)
+                position = self.ledger.positions.get(
+                    symbol, Position(symbol=symbol)
+                )
+                cashflow = self.funding_processor.process(
+                    symbol, ts, instrument, position, snap
+                )
+                if cashflow is None:
+                    continue
+                self.ledger.on_settle(cashflow)
+                self._event_log.append(
+                    Event(
+                        ts=ts,
+                        type=EventType.SETTLE,
+                        payload={
+                            "symbol": cashflow.symbol,
+                            "amount": str(cashflow.amount),
+                            "kind": cashflow.kind,
+                            "rate": (
+                                str(cashflow.rate)
+                                if cashflow.rate is not None
+                                else None
+                            ),
+                        },
+                    )
+                )
+                self._emit_snapshot(ts, "settlement")
 
         # 5. 활성 주문 체결
         for order in self.orderbook.get_active():

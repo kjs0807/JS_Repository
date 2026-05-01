@@ -1,17 +1,19 @@
 """Ledger (spec §3.13).
 
-심볼별 Position과 cash, equity 추적. Fill / Market 이벤트로 갱신.
+심볼별 Position과 cash, equity 추적. Fill / Market / Settle 이벤트로 갱신.
 
-Phase 1 범위:
+범위:
 - on_fill: long-only 진입/청산. 매수 시 avg_price 가중평균, 매도 시 realized_pnl 갱신.
 - on_market: snapshot의 close로 mark-to-market unrealized PnL 갱신.
+- on_settle (PR E 활성): funding / settlement cashflow 를 cash 에 적용.
+- on_expired: noop (Phase 2 expire_pending 활성 후, 마진 해제 등 후속 PR).
 - equity: cash + Σ(position.size * avg_price + unrealized_pnl) = cash + 보유자산 시가
 - equity_curve: on_market 호출마다 (timestamp, equity) 적재.
 - snapshot: SNAPSHOT 이벤트 payload용 dict (str 직렬화).
 
-Phase 1 미구현:
-- on_settle: NotImplementedError("Phase 1.5") — settlement/funding 도입 후.
-- on_expired: noop. expire_pending이 항상 []이라 호출되어도 영향 없음 (Phase 1.5+).
+본 모듈의 ``CashFlow`` 는 funding/settlement 호환을 위해 ``execution.funding.CashFlow``
+와 동일 시그니처로 정의 — 두 클래스 모두 (symbol, ts, amount, kind|reason) 형태로
+서로 호환되도록 ``on_settle`` 가 ``amount`` 만 사용한다.
 """
 
 from __future__ import annotations
@@ -31,9 +33,11 @@ from backtester.portfolio.position import Position
 
 @dataclass(frozen=True)
 class CashFlow:
-    """Settlement/funding으로 발생하는 현금 흐름 (Phase 1.5+).
+    """Settlement/funding으로 발생하는 현금 흐름 (PR E 활성).
 
-    Phase 1에서는 정의만 두고 사용하지 않음.
+    호환을 위해 ``execution.funding.CashFlow`` 와 같은 ``symbol`` / ``ts`` / ``amount``
+    필드를 보유. 이 모듈의 ``CashFlow`` 는 ``reason`` (legacy 명명), 상위 모듈은
+    ``kind``. ``Ledger.on_settle`` 는 두 변종 모두 받는다 (Protocol).
     """
 
     timestamp: datetime
@@ -157,12 +161,14 @@ class Ledger:
         any_ts = next(iter(snapshots.values())).timestamp
         self._equity_history.append((any_ts, self.equity))
 
-    def on_settle(self, cashflow: CashFlow) -> None:
-        """Phase 1 미구현. Settlement/funding 도입은 Phase 1.5 PR 9."""
-        del cashflow
-        raise NotImplementedError(
-            "Ledger.on_settle is Phase 1.5 (settlement/funding 도입 후 활성화)"
-        )
+    def on_settle(self, cashflow: Any) -> None:
+        """Settlement / funding cashflow 를 cash 에 적용 (PR E 활성).
+
+        ``cashflow.amount`` 는 signed Decimal. 양수=수령, 음수=지불. ``execution.funding
+        .CashFlow`` (kind 필드) 와 본 모듈의 ``CashFlow`` (reason 필드) 모두 수용 —
+        duck-typed (``cashflow.amount`` attribute 만 사용).
+        """
+        self._cash += to_decimal(cashflow.amount)
 
     def on_expired(self, expired: list[Any]) -> None:
         """Phase 1: noop. expire_pending이 항상 []이라 호출되어도 영향 없음.

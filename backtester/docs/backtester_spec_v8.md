@@ -1851,9 +1851,11 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
 - [ ] IndicatorEngine disk cache (후속 PR)
 
 **Phase 2 후속 PR (deferred, 아직 wiring 미완)**:
-- Funding engine wiring (PR 9 funding 모듈 + ledger.on_settle 활성 + ClockEvent.settlements
-  주입). 현재 ``execution/funding.py`` 단위 모듈만 완료. 백테스트 결과에 funding 비용
-  미반영 — 명시 필요 시 별도 PR.
+- ~~Funding engine wiring~~ — PR E 완료 ✅. ``BacktestConfig.funding_models`` 로
+  심볼별 ``FundingModel`` 등록 (YAML round-trip 포함). Engine 의 ``on_market`` 이후
+  funding boundary 마다 ``FundingProcessor.process`` 호출 → ``Ledger.on_settle`` (cash
+  적용) + SETTLE 이벤트 + SNAPSHOT(reason='settlement'). LONG + rate>0 → cash
+  지불, SHORT + rate>0 → cash 수령. ``rate_source='from_data_source'`` 활성은 후속 PR.
 - `execution_model='atr_slippage'` config 활성화. 현재 config 레벨 fail-fast.
   ``atr_provider`` 표현 방식 (instrument-bound vs strategy-injected) 결정 후 다시 추가.
 - ~~`gap_policy='ffill'` 실제 보정~~ — PR C 에서 옵션 자체 제거 (config-level

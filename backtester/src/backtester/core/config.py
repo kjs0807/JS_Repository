@@ -22,6 +22,7 @@ import yaml
 
 from backtester.core.errors import ConfigError
 from backtester.core.types import BarPathModel
+from backtester.execution.funding import FundingModel
 from backtester.instruments.base import FeeModel, Instrument
 from backtester.portfolio.risk import RiskLimits
 
@@ -133,6 +134,9 @@ class BacktestConfig:
     strategy_name: str = ""
     strategy_params: dict[str, Any] = field(default_factory=dict)
 
+    # PR E — 심볼별 funding 모델 (perp 등). 비어있으면 funding 미적용.
+    funding_models: dict[str, FundingModel] = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         # 숫자 한도
         if self.snapshot_every_bars < 1:
@@ -230,6 +234,10 @@ class BacktestConfig:
             "on_run_exists": self.on_run_exists,
             "strategy_name": self.strategy_name,
             "strategy_params": dict(self.strategy_params),
+            "funding_models": {
+                sym: _funding_model_to_dict(fm)
+                for sym, fm in self.funding_models.items()
+            },
         }
 
     @classmethod
@@ -283,6 +291,11 @@ class BacktestConfig:
             kwargs["strategy_name"] = data["strategy_name"]
         if "strategy_params" in data:
             kwargs["strategy_params"] = dict(data["strategy_params"])
+        if "funding_models" in data:
+            kwargs["funding_models"] = {
+                sym: _funding_model_from_dict(fm)
+                for sym, fm in data["funding_models"].items()
+            }
         return cls(**kwargs)
 
     def to_yaml(self, path: Path) -> None:
@@ -315,6 +328,25 @@ def _parse_iso(value: str) -> datetime:
             f"datetime must be timezone-aware, got naive: {value!r}"
         )
     return dt
+
+
+def _funding_model_to_dict(fm: FundingModel) -> dict[str, Any]:
+    return {
+        "interval_hours": int(fm.interval_hours),
+        "rate_source": fm.rate_source,
+        "constant_rate": (
+            str(fm.constant_rate) if fm.constant_rate is not None else None
+        ),
+    }
+
+
+def _funding_model_from_dict(data: dict[str, Any]) -> FundingModel:
+    rate = data.get("constant_rate")
+    return FundingModel(
+        interval_hours=int(data["interval_hours"]),
+        rate_source=data.get("rate_source", "constant"),
+        constant_rate=Decimal(rate) if rate is not None else None,
+    )
 
 
 def _data_source_to_dict(ds: DataSourceConfig) -> dict[str, Any]:
