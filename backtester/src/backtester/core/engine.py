@@ -561,8 +561,15 @@ class BacktestEngine:
         # PR K: 체결 후 entry 가 ``intent.bracket`` 을 가지면 reduce-only TP/SL child
         # 자동 생성. children 도 같은 봉의 후속 체결 시도가 일어날 수 있도록 같은
         # iteration 의 snapshot list 만 사용하여 무한 루프 방지.
-        active_at_start = self.orderbook.get_active()
+        # PR L: OCO group 내부 우선순위는 BarPathModel — same-bar TP/SL 양쪽 도달 시
+        # PESSIMISTIC = stop 먼저, OPTIMISTIC = limit 먼저. 한쪽이 fill 되면 sibling
+        # 자동 cancel + ORDER_CANCELLED(reason="oco_sibling_filled").
+        active_at_start = self._order_oco_aware_active_list(
+            self.orderbook.get_active()
+        )
         for order in active_at_start:
+            if not order.is_active:
+                continue  # PR L: sibling fill 이 이 주문을 cancel 했을 수 있음
             snap = snapshots.get(order.intent.symbol)
             if snap is None:
                 continue
@@ -575,6 +582,10 @@ class BacktestEngine:
             self._fill_count += 1
             self._event_log.append(Event(ts=ts, type=EventType.FILL, payload=fill))
             self._emit_snapshot(ts, "fill")  # implicit, 주기 무관
+
+            # PR L: OCO sibling 자동 cancel.
+            if order.oco_group_id is not None:
+                self._cancel_oco_siblings(order, ts)
 
             # PR K: bracket child 생성 (entry 만, 즉 parent_order_id is None).
             if (
@@ -872,6 +883,70 @@ class BacktestEngine:
             )
         )
 
+    # ---------- PR L: OCO + Same-Bar Path 우선순위 -------------------------
+
+    def _order_oco_aware_active_list(self, active: list[Order]) -> list[Order]:
+        """OCO group 내부 fill 시도 순서 결정 (BarPathModel 기반).
+
+        - 같은 ``oco_group_id`` 안에서 PESSIMISTIC (default) → stop 먼저, limit 나중.
+        - OPTIMISTIC → limit 먼저, stop 나중.
+        - OPEN_TO_CLOSE / OHLC_ORDER → PESSIMISTIC 과 동일하게 보수적으로 stop 먼저
+          (후속 PR 에서 정밀 모델링).
+        - OCO group 외 주문은 원래 순서 유지. group 들은 고유 group_id sort 로 결정성 보장.
+
+        반환: 평탄화된 새 리스트.
+        """
+        from collections import defaultdict
+
+        from backtester.core.types import BarPathModel as _BPM
+
+        bpm = self.config.bar_path_model
+        groups: dict[str | None, list[Order]] = defaultdict(list)
+        for o in active:
+            groups[o.oco_group_id].append(o)
+
+        def _sort_key(o: Order) -> int:
+            # PESSIMISTIC / 기본: stop 우선 (불리한 가격 먼저)
+            if bpm == _BPM.OPTIMISTIC:
+                return 0 if o.intent.type == "limit" else 1
+            return 0 if o.intent.type == "stop" else 1
+
+        out: list[Order] = []
+        # 결정성: ungrouped (None) 먼저, 그 다음 group_id 알파벳 정렬.
+        ungrouped = groups.pop(None, [])
+        out.extend(ungrouped)
+        # group_id is non-None 으로 좁힘 (None 은 위에서 pop 됨)
+        non_null_keys: list[str] = [k for k in groups if k is not None]
+        for gid in sorted(non_null_keys):
+            out.extend(sorted(groups[gid], key=_sort_key))
+        return out
+
+    def _cancel_oco_siblings(self, filled: Order, ts: datetime) -> None:
+        """PR L: 한 OCO sibling 이 fill 되면 같은 group 의 다른 active 주문 cancel."""
+        assert self._event_log is not None
+        gid = filled.oco_group_id
+        if gid is None:
+            return
+        # snapshot 후 iterate — cancel 이 dict mutate 일으킴
+        for sibling in list(self.orderbook.get_active()):
+            if sibling.id == filled.id:
+                continue
+            if sibling.oco_group_id != gid:
+                continue
+            cancelled = self.orderbook.cancel(sibling.id, ts)
+            if cancelled:
+                self._event_log.append(
+                    Event(
+                        ts=ts,
+                        type=EventType.ORDER_CANCELLED,
+                        payload={
+                            "order_id": sibling.id,
+                            "reason": "oco_sibling_filled",
+                            "filled_sibling_id": filled.id,
+                        },
+                    )
+                )
+
     def _spawn_bracket_children(
         self,
         parent_order: Order,
@@ -960,7 +1035,10 @@ class BacktestEngine:
                     Event(
                         ts=ts,
                         type=EventType.ORDER_CANCELLED,
-                        payload={"order_id": action.order_id},
+                        payload={
+                            "order_id": action.order_id,
+                            "reason": "user_cancel",
+                        },
                     )
                 )
             return
