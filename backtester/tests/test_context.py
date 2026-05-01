@@ -11,7 +11,7 @@ import polars as pl
 import pytest
 
 from backtester.core.clock import ClockHelper
-from backtester.core.context import BarsView, StrategyContext
+from backtester.core.context import BarsView, IndicatorsView, StrategyContext
 
 UTC = timezone.utc
 
@@ -182,3 +182,96 @@ def test_strategy_context_is_frozen() -> None:
     assert ctx.primary_symbol == "BTCUSDT"
     with pytest.raises(dataclasses.FrozenInstanceError):
         ctx.now = base  # type: ignore[misc]
+
+
+def test_strategy_context_default_indicators_is_empty_view() -> None:
+    """직접 생성 fixture 호환: indicators 기본값은 빈 IndicatorsView."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    view = _build_view([base], now=base + timedelta(hours=1))
+    ctx = StrategyContext(
+        now=base + timedelta(hours=1),
+        primary_symbol="BTCUSDT",
+        primary_timeframe="1h",
+        bars=view,
+    )
+    assert isinstance(ctx.indicators, IndicatorsView)
+    assert ctx.indicators.has("BTCUSDT", "1h") is False
+
+
+# ---------- IndicatorsView ---------------------------------------------------
+
+
+def _build_indicators_view(
+    timestamps: list[datetime],
+    *,
+    symbol: str = "BTCUSDT",
+    tf: str = "1h",
+    now: datetime,
+) -> IndicatorsView:
+    n = len(timestamps)
+    ind_df = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "sma_5": [float(i) + 0.5 for i in range(n)],
+        }
+    ).with_columns(
+        pl.col("timestamp").cast(pl.Datetime(time_unit="us", time_zone="UTC"))
+    )
+    idx_map = {ts: i for i, ts in enumerate(timestamps)}
+    return IndicatorsView(
+        cache={(symbol, tf): ind_df},
+        timestamp_index={symbol: {tf: idx_map}},
+        timestamps={symbol: {tf: timestamps}},
+        clock_helper=ClockHelper(),
+        now=now,
+    )
+
+
+def test_indicators_view_returns_clipped_at_last_closed() -> None:
+    """now 와 마감 시각이 정확히 일치하면 그 봉까지 포함."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    timestamps = [base + timedelta(hours=i) for i in range(5)]  # 00..04
+    # now = 03:00 → last_closed = 02:00 (봉 시작 02:00, 03:00 마감) → 인덱스 2 까지.
+    view = _build_indicators_view(timestamps, now=base + timedelta(hours=3))
+    out = view["BTCUSDT"]["1h"]
+    assert out.height == 3  # 인덱스 0/1/2
+    assert "sma_5" in out.columns
+    assert out["timestamp"][-1] == base + timedelta(hours=2)
+
+
+def test_indicators_view_clips_lookahead() -> None:
+    """now 시점에 진행 중인 봉은 노출 안 됨."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    timestamps = [base + timedelta(hours=i) for i in range(5)]
+    # now = 02:30 → last_closed = 02:00 (= 02:00 봉이 03:00 마감 직전, 즉 last_closed = 01:00)
+    view = _build_indicators_view(
+        timestamps, now=base + timedelta(hours=2, minutes=30)
+    )
+    out = view["BTCUSDT"]["1h"]
+    # 1h 봉 기준 last_closed_time(02:30) = 02:00 (open 01:00 봉이 02:00 마감) → idx 1
+    assert out.height == 2
+    assert out["timestamp"][-1] == base + timedelta(hours=1)
+
+
+def test_indicators_view_unknown_pair_raises() -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    view = _build_indicators_view([base], now=base + timedelta(hours=1))
+    with pytest.raises(KeyError, match="not precomputed"):
+        view["ETHUSDT"]["1h"]
+
+
+def test_indicators_view_has_helper() -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    view = _build_indicators_view([base], now=base + timedelta(hours=1))
+    assert view.has("BTCUSDT", "1h") is True
+    assert view.has("ETHUSDT", "1h") is False
+    assert view.has("BTCUSDT", "4h") is False
+
+
+def test_indicators_view_empty_returns_empty_slice() -> None:
+    """now 가 첫 봉 시작 직전이면 빈 슬라이스."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    timestamps = [base + timedelta(hours=i) for i in range(5)]
+    view = _build_indicators_view(timestamps, now=base - timedelta(hours=1))
+    out = view["BTCUSDT"]["1h"]
+    assert out.height == 0

@@ -17,7 +17,7 @@
 - **A안 (개인용)**: 코드 깔끔·확장 가능, 외부 배포 미고려
 - **언어**: Python 100%
 - **DataFrame**: Polars (시각화 경계만 pandas)
-- **시각화**: Plotly + quantstats
+- **시각화**: Plotly (자체 메트릭, quantstats 의존성 미사용 — PR 18 확정)
 - **데이터 소스**: Bybit API + 로컬 Parquet
 
 ### v7 → v8 핵심 변경
@@ -1312,7 +1312,7 @@ OHLCV 스키마 3.1, Parquet Snappy, 검증 자동.
 | 분류 | Phase | 라이브러리 |
 |------|-------|------------|
 | 디버깅 차트 | Phase 1.5 | Plotly |
-| 메트릭 리포트 | Phase 2 | quantstats + 자체 |
+| 메트릭 리포트 | Phase 2 | 자체 (Plotly, polars+stdlib) |
 | 비교·탐색 | Phase 3~4 | Plotly |
 
 ### 10.3 viz/equity.py (Phase 1.5)
@@ -1829,16 +1829,33 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
 
 ### Phase 2 — 확장 + 메트릭 + rebuild (1-2주)
 
-- [ ] 멀티 timeframe
-- [ ] `data/bybit_source.py` + 캐싱
-- [ ] `execution/slippage_bps.py`, `slippage_atr.py`
-- [ ] FeeModel maker/taker
-- [ ] Stateful 지표 (FRAMA), `strategies/frama_channel.py`
-- [ ] `analysis/walkforward.py`
-- [ ] `events/replay.py`
-- [ ] `viz/metrics.py`, `viz/report.py` (UTC 00:00)
-- [ ] **CLI `rebuild-results` + EventLog↔results 정합성 회귀**
-- [ ] IndicatorEngine disk cache
+- [x] 멀티 timeframe (PR 13 ✅)
+- [x] `data/bybit_source.py` + 캐싱 (PR 14 ✅, pagination 포함)
+- [x] `execution/slippage_bps.py` (PR 15a ✅) / `slippage_atr.py` (단위 모듈만 ✅,
+      Engine YAML wiring 후속 PR — `BybitDataSource.category` 노출도 동일)
+- [x] FeeModel maker/taker (PR 15a ✅)
+- [ ] Stateful 지표 (FRAMA), `strategies/frama_channel.py` (PR 16, 진행 중 — `ctx.indicators`
+      view 는 PR 16 직전 prep 으로 활성화 ✅)
+- [x] `analysis/walkforward.py` (PR 17 ✅, rolling + expanding)
+- [ ] `events/replay.py` (후속 PR)
+- [x] `viz/metrics.py`, `viz/report.py` (PR 18 ✅, UTC 00:00 daily_resample 자체 구현)
+- [x] **CLI `rebuild-results` + EventLog↔results 정합성 회귀** (PR 19 ✅)
+- [ ] IndicatorEngine disk cache (후속 PR)
+
+**Phase 2 후속 PR (deferred, 아직 wiring 미완)**:
+- Funding engine wiring (PR 9 funding 모듈 + ledger.on_settle 활성 + ClockEvent.settlements
+  주입). 현재 ``execution/funding.py`` 단위 모듈만 완료. 백테스트 결과에 funding 비용
+  미반영 — 명시 필요 시 별도 PR.
+- `execution_model='atr_slippage'` Engine 자동 wiring. 현재는 ``NotImplementedError``
+  (atr_provider 명시 주입 필요). 단위 클래스 ``AtrSlippageExecution`` 만 완료.
+- `gap_policy='ffill'` 보정. 현재는 ``NotImplementedError`` 명시 차단. ``notify`` 만 활성.
+- Order cancel / modify (`OrderAction.type in ("cancel", "modify")`,
+  `OrderBook.expire_pending`/`modify`, TIF 확장 GTC 외). 현재는 진입 체결 중심.
+- `BybitDataSource.category` (`linear` 외 `spot` / `inverse`) 를 ``DataSourceConfig`` /
+  YAML 으로 노출. 현재는 default `linear` 만 사용 가능.
+- EventLog canonical JSON (sort_keys + 고정 separators) — Phase 2 결정 §13.3 (byte-
+  identical replay) 활성용. 현 ``events/log.py`` 는 default `json.dumps`.
+- ``strategy.on_data_gap`` 콜백 반환 intent 의 event-loop 자동 주입. 현재는 로깅만.
 
 ### Phase 3 — 자산군 확장 + 비교 시각화 (1-2주)
 
@@ -1869,7 +1886,7 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
 | **패키지명** | **`backtester` (단일). import 경로 `from backtester.core import ...`** |
 | 언어 | Python 100% |
 | DataFrame | Polars (시각화 경계만 pandas) |
-| 시각화 라이브러리 | Plotly + quantstats |
+| 시각화 라이브러리 | Plotly (자체 메트릭, polars+stdlib — PR 18 확정) |
 | Run Directory | self-contained 패키지 |
 | persist_run_data 기본값 | copy |
 | on_run_exists 기본값 | fail |
@@ -1909,7 +1926,7 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
 | 시각화 입력 | run_dir만 |
 | viz/equity.py | equity/position/drawdown 단일 DataFrame |
 | viz/metrics.py | 통계만 |
-| quantstats 리샘플링 | UTC 00:00 (origin="epoch") |
+| daily_resample (viz/metrics.py) | UTC 00:00 (group_by_dynamic, every="1d", origin="epoch") |
 | periods_per_year | crypto 365, 주식 252 |
 | 디버깅 차트 | Phase 1.5 |
 | 메트릭 리포트 | Phase 2 |
@@ -1929,7 +1946,6 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
 | 항목 | 결정 시점 | 현재 기본 방침 | 결정 기준 | 영향 범위 |
 |------|-----------|----------------|-----------|-----------|
 | **로깅 라이브러리** | Phase 1 PR 1 전 | 표준 `logging` 우선 | 테스트 캡처 용이성, 의존성 최소화 | core, cli |
-| **자체 메트릭 vs quantstats 비율** | Phase 2 시작 전 | 핵심 메트릭 자체 구현, quantstats 보조 | 재현성, 커스터마이즈 자유도 | viz/metrics, viz/report |
 | **Walk-forward 기본 분할 방식** | ✅ PR 17 확정 | **rolling + expanding 양쪽 채택** — `WalkforwardSplitter(mode='rolling'\|'expanding')` 으로 caller 선택. test 구간은 양 모드 동일 (back-to-back OOS). rolling 은 train 도 동기 슬라이드, expanding 은 train 시작 고정 + 길이 누적 | 전략 검증 목적, 데이터 길이 | analysis/walkforward |
 | **파라미터 스윕 병렬화** | Phase 4 시작 전 | `concurrent.futures.ProcessPoolExecutor` 우선 | Windows 호환성, 단순성, joblib 의존성 | sweep, cli |
 | **이벤트 로그 resume** | Phase 4 전 | 미지원 (fail/overwrite/auto_suffix/archive만) | 복잡도 대비 실 필요성 | events, engine |
@@ -2206,7 +2222,7 @@ BB-KC 포팅 경계 (절대 위반 금지):
 **PR 17 — Walk-forward**
 **PR 18 — viz/metrics.py**
 **PR 19 — viz/report.py (UTC 00:00)**
-**PR 20 — CLI rebuild-results + EventLog↔results 정합성**
+**PR 19 — CLI rebuild-results + EventLog↔results 정합성** (✅ 완료)
 
 각 PR ~300라인. 매번 회귀 + lookahead 그린.
 
@@ -2273,7 +2289,7 @@ BB-KC 포팅 경계 (절대 위반 금지):
 ### 시각화
 - run_dir 하나만 입력
 - viz/equity.py가 drawdown 포함, metrics.py는 통계만
-- quantstats 리샘플링 `resample("1D", origin="epoch")` (UTC 00:00 고정)
+- 일별 리샘플링은 `viz/metrics.py daily_resample` (`group_by_dynamic` every="1d" origin="epoch", UTC 00:00 고정 — quantstats 미사용)
 - periods_per_year 명시 (crypto 365, 주식 252)
 - 색상: long=green, short=red, neutral=gray
 

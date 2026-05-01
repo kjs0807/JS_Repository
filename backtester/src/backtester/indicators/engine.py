@@ -67,3 +67,11 @@ class IndicatorEngine:
 
     def has(self, symbol: str, timeframe: str) -> bool:
         return (symbol, timeframe) in self._cache
+
+    def snapshot(self) -> dict[tuple[str, str], pl.DataFrame]:
+        """Return the underlying ``(symbol, tf) → DataFrame`` cache.
+
+        Engine 이 ``IndicatorsView`` 를 만들 때 cache 를 통째로 넘기는 용도.
+        반환되는 dict 는 내부 dict 그대로 — 호출 측은 mutate 하지 말 것.
+        """
+        return self._cache

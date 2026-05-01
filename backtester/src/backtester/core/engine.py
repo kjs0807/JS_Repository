@@ -32,7 +32,7 @@ from backtester.core.clock import (
     SimpleClock,
 )
 from backtester.core.config import BacktestConfig
-from backtester.core.context import BarsView, StrategyContext
+from backtester.core.context import BarsView, IndicatorsView, StrategyContext
 from backtester.core.errors import RunDirectoryError
 from backtester.core.orderbook import OrderBook
 from backtester.core.orders import OrderAction, OrderIntent
@@ -118,6 +118,10 @@ class BacktestEngine:
             strategy.required_indicators(),
             persist_to=indicators_persist,
         )
+
+        # 7.1 gap_policy 활성 (PR 16 전 prep): notify -> stdout 알림 + on_data_gap 호출.
+        # ffill 은 명시적 NotImplementedError. 이전엔 gap_reports 파일만 쌓고 정책이 무시됐음.
+        self._handle_data_gaps()
 
         # 8. Warmup
         self.warmup_bars = config.warmup_bars or self.indicator_engine.required_warmup(
@@ -308,6 +312,47 @@ class BacktestEngine:
             jsonl_path=self.run_dir / "events.jsonl",
             parquet_path=self.run_dir / "events.parquet",
         )
+
+    # ---------- gap_policy --------------------------------------------------
+
+    def _handle_data_gaps(self) -> None:
+        """``config.gap_policy`` 활성 (PR 16 전 prep, spec §5.1).
+
+        - ``notify`` (기본): GapReport 가 비어 있지 않은 (symbol, tf) 마다 verbose stdout
+          알림 + ``strategy.on_data_gap(symbol, gap_start, gap_end)`` 콜백. 콜백이 반환한
+          ``OrderIntent`` 는 알림용으로 로깅만 하고 자동 주입은 안 함 — Phase 2 한정,
+          gap-driven intent 주입은 후속 PR (event-loop 내 hook 위치 결정 필요).
+        - ``ffill``: ``NotImplementedError``. 이전엔 config 가 통과만 시키고 정책이 무시됐음.
+          본 PR 은 명시적 차단. 실제 ffill 보정은 후속 PR.
+
+        gap_reports 는 ``_fetch_all_bars()`` 가 채워둔 ``self.gap_reports`` 를 사용.
+        """
+        policy = self.config.gap_policy
+        if policy == "ffill":
+            raise NotImplementedError(
+                "gap_policy='ffill' is deferred to a subsequent PR; "
+                "use 'notify' (default) until then"
+            )
+        # notify
+        for symbol, tfs in self.gap_reports.items():
+            for tf, report in tfs.items():
+                if not report.gaps:
+                    continue
+                if self.verbose:
+                    print(
+                        f"[WARN] data gap {symbol}/{tf}: "
+                        f"{report.total_missing_bars} missing bar(s) "
+                        f"across {len(report.gaps)} gap(s)"
+                    )
+                for gap_start, gap_end in report.gaps:
+                    intents = self.strategy.on_data_gap(symbol, gap_start, gap_end)
+                    if intents and self.verbose:
+                        print(
+                            f"[INFO] strategy.on_data_gap returned "
+                            f"{len(intents)} intent(s) for {symbol}/{tf} gap "
+                            f"[{gap_start.isoformat()} .. {gap_end.isoformat()}] "
+                            f"— Phase 2: not auto-injected (deferred to subsequent PR)"
+                        )
 
     # ---------- 빌더 -------------------------------------------------------
 
@@ -508,11 +553,19 @@ class BacktestEngine:
             clock_helper=self.clock_helper,
             now=ts,
         )
+        indicators_view = IndicatorsView(
+            cache=self.indicator_engine.snapshot(),
+            timestamp_index=self.timestamp_index,
+            timestamps=self.timestamps,
+            clock_helper=self.clock_helper,
+            now=ts,
+        )
         ctx = StrategyContext(
             now=ts,
             primary_symbol=self.config.primary_symbol,
             primary_timeframe=self.config.primary_timeframe,
             bars=bars_view,
+            indicators=indicators_view,
         )
         intents = self.strategy.on_bar(ctx)
 
