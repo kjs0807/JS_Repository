@@ -68,13 +68,19 @@ class Sizer:
         ValueError.
 
         PR J: ``intent.reduce_only=True`` 또는 ``ClosePosition`` SizeSpec 은 새 반대
-        포지션을 열지 않도록 추가 검사:
-        - flat → ValueError (closing 할 게 없음)
-        - same-direction (long + buy / short + sell) → ValueError (extend 시도)
-        - oversize (close size > abs(position size)) → ValueError (1차 reject 정책)
+        포지션을 열지 않도록 추가 검사 (flat/extend/oversize reject).
+
+        PR O: ``instrument.exchange_rule`` 이 설정돼 있으면:
+        1. price_tick 검증 — limit/stop intent 의 가격 필드가 tick 정수배가 아니면
+           ValueError.
+        2. qty_step quantize (floor down) — 자동 round 금지, 결과만 floor.
+        3. min_qty / min_notional 검증 — 미달 시 ValueError.
         """
-        del instrument  # contract_multiplier 활용은 PR O exchange rules 에서.
         spec = intent.size_spec
+
+        # PR O — price_tick 검증 (sizing 전에 차단). limit/stop 의 limit_price /
+        # stop_price 가 tick 정수배가 아니면 reject.
+        self._validate_price_tick(intent, instrument)
 
         if isinstance(spec, TargetUnits):
             # Sizer 계약: 절대 거래 수량 (양수) 반환. 0/음수는 입력 자체를 거부.
@@ -83,7 +89,10 @@ class Sizer:
                     f"TargetUnits.units must be > 0 (Sizer returns absolute size); "
                     f"got {spec.units}"
                 )
-            return self._enforce_short_policy(intent, position, spec.units)
+            units = self._apply_exchange_qty_rules(
+                intent, instrument, market, spec.units
+            )
+            return self._enforce_short_policy(intent, position, units)
 
         if isinstance(spec, TargetNotional):
             if spec.notional <= 0:
@@ -95,6 +104,7 @@ class Sizer:
                     f"Cannot resolve TargetNotional with non-positive close: {market.close}"
                 )
             units = spec.notional / market.close
+            units = self._apply_exchange_qty_rules(intent, instrument, market, units)
             return self._enforce_short_policy(intent, position, units)
 
         if isinstance(spec, ClosePosition):
@@ -114,6 +124,8 @@ class Sizer:
                     f"ClosePosition on short position requires side='buy', "
                     f"got side={intent.side!r} for {intent.symbol!r}"
                 )
+            # ClosePosition 은 exchange_rule quantize / min 적용 안 함 — 보유 수량
+            # 그대로 전부 닫는다 (이미 거래소가 받아준 수량). 잔여물 round 회피.
             return abs(position.size)
 
         # PR I — Futures sizing 변종.
@@ -132,6 +144,7 @@ class Sizer:
                 )
             notional = equity * spec.margin_pct * spec.leverage
             units = notional / market.close
+            units = self._apply_exchange_qty_rules(intent, instrument, market, units)
             return self._enforce_short_policy(intent, position, units)
 
         if isinstance(spec, TargetNotionalPct):
@@ -145,6 +158,7 @@ class Sizer:
                 )
             notional = equity * spec.notional_pct
             units = notional / market.close
+            units = self._apply_exchange_qty_rules(intent, instrument, market, units)
             return self._enforce_short_policy(intent, position, units)
 
         if isinstance(spec, FullEquityNotional):
@@ -158,6 +172,7 @@ class Sizer:
                 )
             notional = equity * spec.leverage
             units = notional / market.close
+            units = self._apply_exchange_qty_rules(intent, instrument, market, units)
             return self._enforce_short_policy(intent, position, units)
 
         if isinstance(spec, (TargetWeight, FullPosition, ScaleIn)):
@@ -181,6 +196,65 @@ class Sizer:
         if intent.reduce_only:
             self._enforce_reduce_only(intent, position, units)
         return self._check_short_flip(intent, position, units)
+
+    # ---------- PR O — Exchange rule helpers --------------------------------
+
+    def _validate_price_tick(
+        self,
+        intent: OrderIntent,
+        instrument: Instrument,
+    ) -> None:
+        rule = instrument.exchange_rule
+        if rule is None:
+            return
+        if intent.limit_price is not None and not rule.is_price_aligned(
+            intent.limit_price
+        ):
+            raise ValueError(
+                f"limit_price {intent.limit_price} not aligned to price_tick "
+                f"{rule.price_tick} for {intent.symbol!r}"
+            )
+        if intent.stop_price is not None and not rule.is_price_aligned(
+            intent.stop_price
+        ):
+            raise ValueError(
+                f"stop_price {intent.stop_price} not aligned to price_tick "
+                f"{rule.price_tick} for {intent.symbol!r}"
+            )
+
+    def _apply_exchange_qty_rules(
+        self,
+        intent: OrderIntent,
+        instrument: Instrument,
+        market: MarketSnapshot,
+        units: Decimal,
+    ) -> Decimal:
+        """qty_step quantize (floor) + min_qty / min_notional 검증.
+
+        ClosePosition 은 호출하지 않음 (보유 수량 그대로 닫음).
+        """
+        rule = instrument.exchange_rule
+        if rule is None:
+            return units
+        quantized = rule.quantize_qty_floor(units)
+        if quantized < rule.min_qty:
+            raise ValueError(
+                f"computed units {units} (quantized {quantized}) below "
+                f"min_qty {rule.min_qty} for {intent.symbol!r}"
+            )
+        ref_price = (
+            intent.limit_price
+            if intent.limit_price is not None
+            else (intent.stop_price if intent.stop_price is not None else market.close)
+        )
+        if ref_price is not None and ref_price > 0:
+            notional = quantized * ref_price
+            if notional < rule.min_notional:
+                raise ValueError(
+                    f"computed notional {notional} below min_notional "
+                    f"{rule.min_notional} for {intent.symbol!r}"
+                )
+        return quantized
 
     def _enforce_reduce_only(
         self,

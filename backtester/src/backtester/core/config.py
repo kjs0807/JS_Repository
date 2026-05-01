@@ -391,8 +391,35 @@ def _fee_model_from_dict(data: dict[str, Any]) -> FeeModel:
     )
 
 
-def _instrument_to_dict(inst: Instrument) -> dict[str, Any]:
+def _exchange_rule_to_dict(rule: Any) -> dict[str, Any]:
     return {
+        "symbol": rule.symbol,
+        "price_tick": str(rule.price_tick),
+        "qty_step": str(rule.qty_step),
+        "min_qty": str(rule.min_qty),
+        "min_notional": str(rule.min_notional),
+        "max_leverage": (
+            str(rule.max_leverage) if rule.max_leverage is not None else None
+        ),
+    }
+
+
+def _exchange_rule_from_dict(data: dict[str, Any]) -> Any:
+    from backtester.instruments.base import ExchangeRule
+
+    max_lev = data.get("max_leverage")
+    return ExchangeRule(
+        symbol=data["symbol"],
+        price_tick=Decimal(data["price_tick"]),
+        qty_step=Decimal(data["qty_step"]),
+        min_qty=Decimal(data["min_qty"]),
+        min_notional=Decimal(data["min_notional"]),
+        max_leverage=Decimal(max_lev) if max_lev is not None else None,
+    )
+
+
+def _instrument_to_dict(inst: Instrument) -> dict[str, Any]:
+    out: dict[str, Any] = {
         "symbol": inst.symbol,
         "asset_class": inst.asset_class,
         "tick_size": str(inst.tick_size),
@@ -403,9 +430,13 @@ def _instrument_to_dict(inst: Instrument) -> dict[str, Any]:
         "size_unit": inst.size_unit,
         "fee_model": _fee_model_to_dict(inst.fee_model),
     }
+    if inst.exchange_rule is not None:
+        out["exchange_rule"] = _exchange_rule_to_dict(inst.exchange_rule)
+    return out
 
 
 def _instrument_from_dict(data: dict[str, Any]) -> Instrument:
+    rule_data = data.get("exchange_rule")
     return Instrument(
         symbol=data["symbol"],
         asset_class=data["asset_class"],
@@ -416,6 +447,9 @@ def _instrument_from_dict(data: dict[str, Any]) -> Instrument:
         base_currency=data["base_currency"],
         size_unit=data["size_unit"],
         fee_model=_fee_model_from_dict(data["fee_model"]),
+        exchange_rule=(
+            _exchange_rule_from_dict(rule_data) if rule_data is not None else None
+        ),
     )
 
 
