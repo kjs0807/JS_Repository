@@ -111,8 +111,8 @@ def test_orderbook_add_rejects_non_gtc_tif(tif: str) -> None:
         ob.add(intent, Decimal("1"), TS)
 
 
-def test_orderbook_add_rejects_expires_at() -> None:
-    """expires_at 이 있으면 expire_pending 이 [] 반환이라 영원히 active 로 남음 → 차단."""
+def test_orderbook_add_accepts_expires_at_in_future() -> None:
+    """PR D: ``expires_at`` 활성. ``ts < expires_at`` 이면 정상 add."""
     ob = OrderBook()
     intent = OrderIntent(
         symbol="BTCUSDT",
@@ -121,7 +121,22 @@ def test_orderbook_add_rejects_expires_at() -> None:
         size_spec=TargetUnits(units=Decimal("1")),
         expires_at=TS + timedelta(days=1),
     )
-    with pytest.raises(NotImplementedError, match="expires_at"):
+    order = ob.add(intent, Decimal("1"), TS)
+    assert order.is_active
+    assert order.intent.expires_at == TS + timedelta(days=1)
+
+
+def test_orderbook_add_rejects_expires_at_past() -> None:
+    """PR D: ``expires_at <= submit ts`` 는 ``ValueError`` (이미 만료된 주문 거부)."""
+    ob = OrderBook()
+    intent = OrderIntent(
+        symbol="BTCUSDT",
+        side="buy",
+        type="market",
+        size_spec=TargetUnits(units=Decimal("1")),
+        expires_at=TS - timedelta(seconds=1),
+    )
+    with pytest.raises(ValueError, match="expires_at"):
         ob.add(intent, Decimal("1"), TS)
 
 
@@ -386,22 +401,104 @@ def test_orderbook_fill_zero_size_raises() -> None:
         ob.fill(order.id, _fill(order.id, "0"))
 
 
-# ---------- modify (Phase 2) ------------------------------------------------
+# ---------- modify (PR D) ---------------------------------------------------
 
 
-def test_orderbook_modify_raises_not_implemented() -> None:
-    """spec §20 PR 4: modify는 Phase 2 — 호출 시 NotImplementedError."""
+def _limit_buy_intent() -> OrderIntent:
+    return OrderIntent(
+        symbol="BTCUSDT",
+        side="buy",
+        type="limit",
+        size_spec=TargetUnits(units=Decimal("1")),
+        limit_price=Decimal("50000"),
+    )
+
+
+def _stop_buy_intent() -> OrderIntent:
+    return OrderIntent(
+        symbol="BTCUSDT",
+        side="buy",
+        type="stop",
+        size_spec=TargetUnits(units=Decimal("1")),
+        stop_price=Decimal("60000"),
+    )
+
+
+def _stop_limit_buy_intent() -> OrderIntent:
+    return OrderIntent(
+        symbol="BTCUSDT",
+        side="buy",
+        type="stop_limit",
+        size_spec=TargetUnits(units=Decimal("1")),
+        limit_price=Decimal("50000"),
+        stop_price=Decimal("60000"),
+    )
+
+
+def test_orderbook_modify_limit_price() -> None:
+    ob = OrderBook()
+    order = ob.add(_limit_buy_intent(), Decimal("1"), TS)
+    assert ob.modify(order.id, limit_price=Decimal("48000")) is True
+    assert order.intent.limit_price == Decimal("48000")
+
+
+def test_orderbook_modify_stop_price() -> None:
+    ob = OrderBook()
+    order = ob.add(_stop_buy_intent(), Decimal("1"), TS)
+    assert ob.modify(order.id, stop_price=Decimal("65000")) is True
+    assert order.intent.stop_price == Decimal("65000")
+
+
+def test_orderbook_modify_stop_limit_both_prices() -> None:
+    ob = OrderBook()
+    order = ob.add(_stop_limit_buy_intent(), Decimal("1"), TS)
+    assert ob.modify(
+        order.id,
+        limit_price=Decimal("48000"),
+        stop_price=Decimal("65000"),
+    ) is True
+    assert order.intent.limit_price == Decimal("48000")
+    assert order.intent.stop_price == Decimal("65000")
+
+
+def test_orderbook_modify_market_raises() -> None:
     ob = OrderBook()
     order = ob.add(_market_buy_intent(), Decimal("1"), TS)
-    with pytest.raises(NotImplementedError, match="Phase 2"):
+    with pytest.raises(ValueError, match="market"):
         ob.modify(order.id, limit_price=Decimal("50000"))
+
+
+def test_orderbook_modify_limit_with_stop_price_raises() -> None:
+    """limit 주문에 stop_price modify 시도 → ValueError."""
+    ob = OrderBook()
+    order = ob.add(_limit_buy_intent(), Decimal("1"), TS)
+    with pytest.raises(ValueError, match="stop_price"):
+        ob.modify(order.id, stop_price=Decimal("60000"))
+
+
+def test_orderbook_modify_no_changes_returns_false() -> None:
+    ob = OrderBook()
+    order = ob.add(_limit_buy_intent(), Decimal("1"), TS)
+    assert ob.modify(order.id) is False
+
+
+def test_orderbook_modify_unknown_id_returns_false() -> None:
+    ob = OrderBook()
+    assert ob.modify("ord_99", limit_price=Decimal("100")) is False
+
+
+def test_orderbook_modify_terminal_returns_false() -> None:
+    ob = OrderBook()
+    order = ob.add(_limit_buy_intent(), Decimal("1"), TS)
+    ob.cancel(order.id, TS)
+    assert ob.modify(order.id, limit_price=Decimal("48000")) is False
 
 
 # ---------- expire_pending (Phase 1.5+) -------------------------------------
 
 
-def test_orderbook_expire_pending_returns_empty_list() -> None:
-    """spec §20 PR 4: Phase 1은 GTC + expires_at=None만 지원 → 항상 []."""
+def test_orderbook_expire_pending_no_expires_at_returns_empty() -> None:
+    """``expires_at=None`` (GTC) 주문은 영원히 active — expire_pending 영향 없음."""
     ob = OrderBook()
     ob.add(_market_buy_intent(), Decimal("1"), TS)
     ob.add(_market_buy_intent(), Decimal("1"), TS)
@@ -411,6 +508,51 @@ def test_orderbook_expire_pending_returns_empty_list() -> None:
     # 그 어떤 주문도 expired로 전이되지 않았다
     for order in ob.get_active():
         assert order.state == "pending"
+
+
+def test_orderbook_expire_pending_with_expires_at() -> None:
+    """PR D: ``expires_at <= ts`` 인 active 주문은 expired 로 전이."""
+    ob = OrderBook()
+    expires_intent = OrderIntent(
+        symbol="BTCUSDT",
+        side="buy",
+        type="limit",
+        size_spec=TargetUnits(units=Decimal("1")),
+        limit_price=Decimal("50000"),
+        expires_at=TS + timedelta(hours=1),
+    )
+    gtc_intent = _limit_buy_intent()  # expires_at=None
+    expiring = ob.add(expires_intent, Decimal("1"), TS)
+    keeping = ob.add(gtc_intent, Decimal("1"), TS)
+
+    # ts 가 expires_at 미만 → 만료 없음
+    assert ob.expire_pending(TS) == []
+    assert expiring.is_active
+
+    # ts >= expires_at → 만료
+    expired = ob.expire_pending(TS + timedelta(hours=2))
+    assert len(expired) == 1
+    assert expired[0].id == expiring.id
+    assert expiring.state == "expired"
+    assert keeping.state == "pending"
+
+
+def test_orderbook_expire_pending_idempotent() -> None:
+    """이미 expired 된 주문을 두 번째 호출 시 빈 리스트."""
+    ob = OrderBook()
+    intent = OrderIntent(
+        symbol="BTCUSDT",
+        side="buy",
+        type="limit",
+        size_spec=TargetUnits(units=Decimal("1")),
+        limit_price=Decimal("50000"),
+        expires_at=TS + timedelta(hours=1),
+    )
+    ob.add(intent, Decimal("1"), TS)
+    first = ob.expire_pending(TS + timedelta(hours=2))
+    assert len(first) == 1
+    second = ob.expire_pending(TS + timedelta(hours=3))
+    assert second == []  # 이미 expired
 
 
 # ---------- get -------------------------------------------------------------

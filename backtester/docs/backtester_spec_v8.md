@@ -1859,9 +1859,10 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
 - ~~`gap_policy='ffill'` 실제 보정~~ — PR C 에서 옵션 자체 제거 (config-level
   ConfigError). ``strict`` 모드 추가 ✅. forward-fill 실제 보정은 후속 PR (`ffill`
   옵션 자체를 다시 추가하거나 별개 기능으로 도입).
-- Order cancel / modify (`OrderAction.type in ("cancel", "modify")`,
-  `OrderBook.expire_pending`/`modify`, TIF 확장 GTC 외). 현재는 진입 체결 중심 — TP/SL,
-  trailing stop, 주문 정정 전략 본격화 시 활성.
+- ~~Order cancel / modify~~ — PR D 활성 ✅. ``OrderBook.cancel`` / ``modify`` /
+  ``expire_pending`` 모두 동작. ``OrderAction.type in ("cancel", "modify")`` Engine
+  처리 + ORDER_CANCELLED / ORDER_MODIFIED / ORDER_EXPIRED 이벤트 + SNAPSHOT
+  reason='expire'. ``expires_at`` 활성. TIF 확장 (IOC/FOK/DAY) 은 별개 후속 PR.
 - ``strategy.on_data_gap`` 콜백 반환 intent 의 event-loop 자동 주입. 현재는 로깅만.
 - ~~BBKC `_has_position` desync 보호~~ — PR A 에서 ledger 기반 `ctx.has_position`,
   `ctx.position`, `ctx.equity`, `ctx.cash`, `ctx.open_orders` read-only view 도입.

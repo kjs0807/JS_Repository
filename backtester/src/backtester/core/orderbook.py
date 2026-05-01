@@ -1,30 +1,27 @@
-"""Order + OrderBook (spec §3.9).
+"""Order + OrderBook (spec §3.9, PR D 확장).
 
 Order는 mutable dataclass — `state`/`remaining`/`fills` 등이 체결 진행에 따라 변한다.
 
-Phase 1 OrderBook 범위 (spec §20 PR 4):
-- 필수 동작 + 테스트: `add`, `cancel`, `fill`, `get_active`
-- 최소 동작만 정의 (실 사용 케이스 X):
-  - `modify`: limit/stop이 Phase 2부터 들어오므로 Phase 1에서는 호출 케이스 없음.
-    본문은 NotImplementedError("Phase 2") raise. 테스트는 raise 여부만 검증.
-  - `expire_pending`: GTC + expires_at=None만 지원하므로 항상 빈 리스트 반환.
-    실제 만료 케이스 테스트는 Phase 1.5+.
-
-Phase 2 PR 15b:
-- `add` 가 ``intent.type ∈ {market, limit, stop, stop_limit}`` 모두 허용.
+PR D 활성 lifecycle:
+- ``add`` 가 ``intent.type ∈ {market, limit, stop, stop_limit}`` 모두 허용.
 - limit/stop_limit 은 ``limit_price`` 필수, stop/stop_limit 은 ``stop_price`` 필수.
-- ``tif="GTC"`` + ``expires_at=None`` 가드는 그대로 (만료/취소 lifecycle 은 후속 PR).
-- ``modify`` / ``expire_pending`` 는 Phase 1 그대로 (TIF/expiry 도입 시 활성).
+- ``tif="GTC"`` 만 (IOC/FOK/DAY 는 별개 후속 PR — 이번엔 ``expires_at`` 기반 만료만).
+- ``expires_at`` 활성: ``add`` 가 받아들이고, ``expire_pending(ts)`` 가 ``ts >=
+  expires_at`` 인 active 주문을 ``expired`` 로 전이.
+- ``modify(order_id, *, limit_price=None, stop_price=None)``: limit/stop/stop_limit
+  주문의 가격 필드 변경. market 은 ``ValueError``. 비활성 주문은 ``False`` 반환.
+- ``cancel`` 은 PR 4 부터 동작 (active → cancelled).
 
 Risk rejection으로 인한 'rejected' state 진입은 OrderBook이 아니라 Engine 책임.
 """
 
 from __future__ import annotations
 
+import dataclasses as _dc
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Literal
 
 from backtester.core.orders import OrderIntent
 from backtester.core.types import Fill
@@ -109,12 +106,12 @@ class OrderBook:
         if intent.tif != "GTC":
             raise NotImplementedError(
                 f"OrderIntent.tif={intent.tif!r} is not supported "
-                f"(Phase 1.5+ supports 'GTC' only; IOC/FOK/DAY 후속 PR)"
+                f"(현재 'GTC' 만 — IOC/FOK/DAY 는 후속 PR)"
             )
-        if intent.expires_at is not None:
-            raise NotImplementedError(
-                f"OrderIntent.expires_at={intent.expires_at!r} is not supported "
-                f"(만료 처리는 후속 PR)"
+        # PR D: expires_at 활성 — expire_pending(ts) 가 만료 처리.
+        if intent.expires_at is not None and intent.expires_at <= ts:
+            raise ValueError(
+                f"OrderIntent.expires_at={intent.expires_at!r} must be > submit ts={ts!r}"
             )
 
         # 가격 필드 정합성
@@ -179,10 +176,52 @@ class OrderBook:
         order.state = "cancelled"
         return True
 
-    def modify(self, order_id: str, **changes: Any) -> bool:
-        """Phase 1 미구현. limit/stop 도입(Phase 2)에서 활성화."""
-        del order_id, changes
-        raise NotImplementedError("OrderBook.modify is Phase 2 (limit/stop orders)")
+    def modify(
+        self,
+        order_id: str,
+        *,
+        limit_price: Decimal | None = None,
+        stop_price: Decimal | None = None,
+    ) -> bool:
+        """active 주문의 가격 필드를 변경 (PR D).
+
+        반환:
+        - True: 변경 성공
+        - False: 주문 미존재 / 이미 terminal / 변경 사항 없음
+
+        Raises:
+        - ValueError: market 주문은 가격 필드가 없어 modify 불가. 또는 limit_price 가
+          stop/market 에, stop_price 가 limit/market 에 잘못 적용된 경우.
+        """
+        order = self._orders.get(order_id)
+        if order is None or not order.is_active:
+            return False
+        if limit_price is None and stop_price is None:
+            return False  # nothing to modify
+        if order.intent.type == "market":
+            raise ValueError(
+                "market order has no price field to modify — use cancel + new"
+            )
+        if limit_price is not None and order.intent.type not in ("limit", "stop_limit"):
+            raise ValueError(
+                f"limit_price modify only valid for limit/stop_limit; got "
+                f"{order.intent.type!r}"
+            )
+        if stop_price is not None and order.intent.type not in ("stop", "stop_limit"):
+            raise ValueError(
+                f"stop_price modify only valid for stop/stop_limit; got "
+                f"{order.intent.type!r}"
+            )
+        new_limit = (
+            limit_price if limit_price is not None else order.intent.limit_price
+        )
+        new_stop = (
+            stop_price if stop_price is not None else order.intent.stop_price
+        )
+        order.intent = _dc.replace(
+            order.intent, limit_price=new_limit, stop_price=new_stop
+        )
+        return True
 
     def get_active(self, symbol: str | None = None) -> list[Order]:
         """state ∈ {pending, partially_filled}인 주문만 반환.
@@ -195,12 +234,22 @@ class OrderBook:
         return actives
 
     def expire_pending(self, ts: datetime) -> list[Order]:
-        """Phase 1: GTC + expires_at=None만 지원하므로 만료 케이스 없음 → 항상 [].
+        """``ts >= intent.expires_at`` 인 active 주문을 ``expired`` 상태로 전이 (PR D).
 
-        Phase 1.5+에서 expires_at 도입 시 실제 만료 처리 추가.
+        반환: 만료 처리된 ``Order`` 리스트 (호출자가 EventLog 에 ORDER_EXPIRED 기록 +
+        Ledger.on_expired 로 잔여 마진 해제 등 후처리).
+        ``expires_at`` 이 None 인 주문은 영원히 active (GTC).
         """
-        del ts
-        return []
+        expired: list[Order] = []
+        for order in self._orders.values():
+            if not order.is_active:
+                continue
+            if order.intent.expires_at is None:
+                continue
+            if order.intent.expires_at <= ts:
+                order.state = "expired"
+                expired.append(order)
+        return expired
 
     def fill(self, order_id: str, fill: Fill) -> None:
         """체결 결과 반영. 누적 체결량이 sized_quantity 도달 시 'filled'로 전이.

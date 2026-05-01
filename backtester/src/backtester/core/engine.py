@@ -510,10 +510,25 @@ class BacktestEngine:
         ts = event.timestamp
         assert self._event_log is not None  # run() 안에서만 호출됨
 
-        # 1. 만료 주문 (Phase 1: 빈 리스트)
+        # 1. 만료 주문 (PR D: expires_at 활성). 각 만료 주문에 ORDER_EXPIRED 이벤트 발행
+        # + Ledger.on_expired (Phase 1 noop, Phase 2+ 마진 해제 등 활성 가능) + SNAPSHOT
+        # reason='expire'.
         expired = self.orderbook.expire_pending(ts)
-        if expired:  # Phase 1.5+에서 활성
+        for order in expired:
+            self._event_log.append(
+                Event(
+                    ts=ts,
+                    type=EventType.ORDER_EXPIRED,
+                    payload={
+                        "order_id": order.id,
+                        "symbol": order.intent.symbol,
+                        "remaining": str(order.remaining),
+                    },
+                )
+            )
+        if expired:
             self.ledger.on_expired(expired)
+            self._emit_snapshot(ts, "expire")
 
         # 2. 시장 스냅샷
         snapshots = self._build_snapshots(ts, event.bar_closes)
@@ -773,15 +788,81 @@ class BacktestEngine:
         )
 
     def _handle_action(self, action: OrderAction, ts: datetime) -> None:
+        """PR D: cancel / modify / new 모두 활성. cancel/modify 는 EventLog 에 기록."""
+        assert self._event_log is not None
         if action.type == "new":
             if action.intent is not None:
                 self._handle_intent(action.intent, ts)
             return
-        if action.type in ("cancel", "modify"):
-            raise NotImplementedError(
-                f"OrderAction.type={action.type!r} is Phase 2 "
-                f"(Phase 1: 'new'만 지원)"
-            )
+        if action.type == "cancel":
+            if action.order_id is None:
+                self._event_log.append(
+                    Event(
+                        ts=ts,
+                        type=EventType.ORDER_REJECTED,
+                        payload={"reason": "cancel: order_id is None"},
+                    )
+                )
+                return
+            cancelled = self.orderbook.cancel(action.order_id, ts)
+            if cancelled:
+                self._event_log.append(
+                    Event(
+                        ts=ts,
+                        type=EventType.ORDER_CANCELLED,
+                        payload={"order_id": action.order_id},
+                    )
+                )
+            return
+        if action.type == "modify":
+            if action.order_id is None:
+                self._event_log.append(
+                    Event(
+                        ts=ts,
+                        type=EventType.ORDER_REJECTED,
+                        payload={"reason": "modify: order_id is None"},
+                    )
+                )
+                return
+            try:
+                ok = self.orderbook.modify(
+                    action.order_id,
+                    limit_price=action.modify_limit_price,
+                    stop_price=action.modify_stop_price,
+                )
+            except ValueError as e:
+                self._event_log.append(
+                    Event(
+                        ts=ts,
+                        type=EventType.ORDER_REJECTED,
+                        payload={
+                            "order_id": action.order_id,
+                            "reason": f"modify: {e}",
+                        },
+                    )
+                )
+                return
+            if ok:
+                self._event_log.append(
+                    Event(
+                        ts=ts,
+                        type=EventType.ORDER_MODIFIED,
+                        payload={
+                            "order_id": action.order_id,
+                            "limit_price": (
+                                str(action.modify_limit_price)
+                                if action.modify_limit_price is not None
+                                else None
+                            ),
+                            "stop_price": (
+                                str(action.modify_stop_price)
+                                if action.modify_stop_price is not None
+                                else None
+                            ),
+                        },
+                    )
+                )
+            return
         raise NotImplementedError(  # pragma: no cover
             f"Unknown OrderAction.type: {action.type!r}"
         )

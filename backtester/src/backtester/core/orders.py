@@ -93,14 +93,21 @@ class OrderIntent:
 
 @dataclass(frozen=True)
 class OrderAction:
-    """전략의 OrderBook 변경 요청 (spec §4.2).
+    """전략의 OrderBook 변경 요청 (spec §4.2, PR D 확장).
 
-    Engine이 strategy.on_bar에서 받은 OrderIntent들을 `OrderAction(type='new', intent=...)`로
-    감싸고, 추가로 strategy.on_pending_orders가 반환한 cancel/modify 액션과 합쳐 처리한다.
+    Engine 이 strategy.on_bar 에서 받은 OrderIntent 들을 ``OrderAction(type='new',
+    intent=...)`` 로 감싸고, 추가로 strategy.on_pending_orders 가 반환한 cancel/modify
+    액션과 합쳐 처리한다.
 
-    Phase 1 지원: `type='new'`만 (intent 필수). `cancel`/`modify`는 Phase 2+.
+    PR D 활성:
+    - ``type='new'``: ``intent`` 필수.
+    - ``type='cancel'``: ``order_id`` 필수. 활성 주문이면 cancelled 상태로 전이.
+    - ``type='modify'``: ``order_id`` + ``modify_limit_price`` 또는 ``modify_stop_price``
+      중 하나 이상 필요. limit/stop/stop_limit 만 modify 가능 (market 은 ValueError).
     """
 
     type: Literal["new", "cancel", "modify"]
     intent: OrderIntent | None = None  # type='new'에서 필수
     order_id: str | None = None  # type='cancel'/'modify'에서 필수
+    modify_limit_price: Decimal | None = None  # type='modify' 에서 사용
+    modify_stop_price: Decimal | None = None  # type='modify' 에서 사용
