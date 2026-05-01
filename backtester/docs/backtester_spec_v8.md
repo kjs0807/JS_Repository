@@ -1930,7 +1930,7 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
 |------|-----------|----------------|-----------|-----------|
 | **로깅 라이브러리** | Phase 1 PR 1 전 | 표준 `logging` 우선 | 테스트 캡처 용이성, 의존성 최소화 | core, cli |
 | **자체 메트릭 vs quantstats 비율** | Phase 2 시작 전 | 핵심 메트릭 자체 구현, quantstats 보조 | 재현성, 커스터마이즈 자유도 | viz/metrics, viz/report |
-| **Walk-forward 기본 분할 방식** | Phase 2 시작 전 | rolling / expanding 둘 다 후보 유지 | 전략 검증 목적, 데이터 길이 | analysis/walkforward |
+| **Walk-forward 기본 분할 방식** | ✅ PR 17 확정 | **rolling + expanding 양쪽 채택** — `WalkforwardSplitter(mode='rolling'\|'expanding')` 으로 caller 선택. test 구간은 양 모드 동일 (back-to-back OOS). rolling 은 train 도 동기 슬라이드, expanding 은 train 시작 고정 + 길이 누적 | 전략 검증 목적, 데이터 길이 | analysis/walkforward |
 | **파라미터 스윕 병렬화** | Phase 4 시작 전 | `concurrent.futures.ProcessPoolExecutor` 우선 | Windows 호환성, 단순성, joblib 의존성 | sweep, cli |
 | **이벤트 로그 resume** | Phase 4 전 | 미지원 (fail/overwrite/auto_suffix/archive만) | 복잡도 대비 실 필요성 | events, engine |
 | **차트 색상 팔레트** | Phase 1.5 PR 11 전 | long=green / short=red / neutral=gray (§11.7) | 블로그 임베드 가독성, 색맹 접근성 | viz/run_chart, viz/report |
