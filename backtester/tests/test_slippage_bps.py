@@ -177,7 +177,7 @@ def _engine_with_execution_model(
         end=base.replace(hour=23),
         initial_equity=Decimal("100000"),
         output_dir=tmp_path / "runs",
-        execution_model=execution_model,  # type: ignore[arg-type] — test allows passing arbitrary strings
+        execution_model=execution_model,  # type: ignore[arg-type]
         slippage_bps=slippage_bps,
     )
 

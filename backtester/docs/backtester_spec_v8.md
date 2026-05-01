@@ -1003,8 +1003,10 @@ class BacktestConfig:
     end: datetime
     gap_policy: Literal["notify", "ffill"] = "notify"
 
-    # 실행
-    execution_model: Literal["next_bar_open", "slippage_bps", "atr_slippage"]
+    # 실행 — ``atr_slippage`` 는 PR 16 prep 2차에서 config-level 차단 (atr_provider
+    # 표현 방식 미결). ``execution/slippage_atr.py`` 의 ``AtrSlippageExecution`` 클래스는
+    # 직접 사용 가능. 후속 PR 에서 config schema 추가 시 Literal 에 다시 포함.
+    execution_model: Literal["next_bar_open", "slippage_bps"]
     bar_path_model: BarPathModel = BarPathModel.PESSIMISTIC
     slippage_bps: float = 0.0
     fee_override: Optional[FeeOverride] = None
@@ -1106,11 +1108,11 @@ class BacktestConfig:
                 f"gap_policy must be one of {{'notify','ffill'}}, "
                 f"got {self.gap_policy!r}"
             )
-        # execution_model
-        if self.execution_model not in ("next_bar_open", "slippage_bps", "atr_slippage"):
+        # execution_model — atr_slippage 는 config-level 차단 (PR 16 prep 2차).
+        if self.execution_model not in ("next_bar_open", "slippage_bps"):
             raise ConfigError(
                 f"execution_model must be one of "
-                f"{{'next_bar_open','slippage_bps','atr_slippage'}}, "
+                f"{{'next_bar_open','slippage_bps'}}, "
                 f"got {self.execution_model!r}"
             )
 
@@ -1143,7 +1145,7 @@ class BacktestConfig:
 | `persist_run_data` | `{copy, symlink, none}` 중 하나 | `ConfigError` |
 | `bar_path_model` | `BarPathModel` enum 멤버 | `ConfigError` |
 | `gap_policy` | `{notify, ffill}` 중 하나 | `ConfigError` |
-| `execution_model` | `{next_bar_open, slippage_bps, atr_slippage}` 중 하나 | `ConfigError` |
+| `execution_model` | `{next_bar_open, slippage_bps}` 중 하나 (atr_slippage 는 PR 16 prep 2차에서 config-level 차단 — 직접 `AtrSlippageExecution` injection 만 가능) | `ConfigError` |
 
 **enum 검증**: `Literal[...]` 필드는 dataclass 단계에서 타입 체크가 안 되므로 `__post_init__`에서 명시 검증.
 
@@ -2186,7 +2188,7 @@ BB-KC 포팅 경계 (절대 위반 금지):
 - ``execution/slippage_atr.py`` — ``AtrSlippageExecution(*, atr_multiplier, atr_provider)``. PR 15a minimum testable interface — ``atr_provider`` 외부 주입식 (IndicatorEngine 자동 wiring 은 후속). market only, limit/stop 은 PR 15b.
 - ``execution/next_bar.py`` — ``slippage_bps`` 파라미터 추가 (default 0 → Phase 1 호환). market = taker 명시.
 - ``instruments/base.py`` — ``FeeModel.compute_fee(notional, is_maker)`` maker/taker 분기 실제 활성. ``is_maker=True`` → ``maker`` rate, default → ``taker`` rate.
-- Engine ``_build_execution_model`` — ``execution_model='slippage_bps'`` 분기 추가 (``config.slippage_bps`` 를 NextBarOpen 에 주입). ``'atr_slippage'`` 는 명시적 NotImplementedError (atr_provider 주입이 필요해 자동 wiring 보류).
+- Engine ``_build_execution_model`` — ``execution_model='slippage_bps'`` 분기 추가 (``config.slippage_bps`` 를 NextBarOpen 에 주입). ``'atr_slippage'`` 는 PR 16 prep 2차에서 config-level fail-fast (ConfigError) — atr_provider 표현 방식이 결정되면 후속 PR 에서 다시 추가.
 - limit maker/taker 판단, ``StopLimit``, ``BarPathModel`` 4종 = PR 15b/15c 후속.
 
 **PR 15b — Limit / Stop / StopLimit 주문 (Phase 2 완료)**

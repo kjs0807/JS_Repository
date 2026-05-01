@@ -115,6 +115,13 @@ class IndicatorsView:
 
     빈 ``IndicatorsView`` (cache empty) 는 모든 (symbol, tf) 에서 ``KeyError`` 를
     낸다 — 테스트 fixture 가 BarsView 만 만들고 indicators 를 안 쓰는 경우 대비.
+
+    **읽기 전용 계약** (PR 16 prep 2차): 반환되는 ``pl.DataFrame`` 은 IndicatorEngine
+    cache 와 같은 객체를 공유한다. 전략 코드는 ``df.with_columns(...)`` 로 새 DataFrame 을
+    파생해 사용해야 하며, in-place mutate (``df[col] = ...`` 같은 시도) 또는 cache 의
+    DataFrame 을 직접 변경해서는 안 된다. polars 가 immutable lazy/eager 모델이라 실수로
+    mutate 하기는 어렵지만, 명시 계약으로 못박아 두는 편이 안전하다. cache dict 자체는
+    ``MappingProxyType`` 으로 보호 (``IndicatorEngine.snapshot()``).
     """
 
     def __init__(
