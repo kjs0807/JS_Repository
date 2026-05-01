@@ -1875,6 +1875,10 @@ C:\Users\IBKS\Desktop\python\backtester\         # 독립 프로젝트 루트
 - ~~EventLog byte-identical replay 회귀 게이트~~ — PR B 완료 ✅. canonical JSON +
   ``order_id`` deterministic sequence + ``serialize_event_payload`` set/frozenset
   정렬 + 두 번 실행 byte-identical 검증 + rebuild_results 동일 equity_curve.
+- **PR F (전략 회귀 harness)** ✅ — ``tests/_strategy_harness.py`` 의 ``StrategyHarness``
+  가 5 contracts 일괄 검증: no-lookahead / deterministic events / position state sync
+  (FILL ↔ SNAPSHOT positions) / chart 렌더 가능 / rebuild_results 정합성. BBKC 가
+  첫 통과 사례. FRAMA 등 신규 전략은 동일 harness 로 같은 5 검증을 통과해야 한다.
 
 ### Phase 3 — 자산군 확장 + 비교 시각화 (1-2주)
 
