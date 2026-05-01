@@ -57,6 +57,10 @@ class Order:
     sized_quantity: Decimal
     remaining: Decimal
     fills: list[Fill] = field(default_factory=list)
+    # PR K — bracket parent/child relationship. parent entry fill 후 Engine 이 자동
+    # 으로 reduce-only TP/SL child 를 생성. children 은 같은 oco_group_id 를 공유.
+    parent_order_id: str | None = None
+    oco_group_id: str | None = None
 
     @property
     def is_active(self) -> bool:
@@ -79,6 +83,9 @@ class OrderBook:
         intent: OrderIntent,
         sized_quantity: Decimal,
         ts: datetime,
+        *,
+        parent_order_id: str | None = None,
+        oco_group_id: str | None = None,
     ) -> Order:
         """새 주문을 'pending' 상태로 등록.
 
@@ -158,6 +165,8 @@ class OrderBook:
             submitted_at=ts,
             sized_quantity=sized_quantity,
             remaining=sized_quantity,
+            parent_order_id=parent_order_id,
+            oco_group_id=oco_group_id,
         )
         self._orders[order_id] = order
         return order

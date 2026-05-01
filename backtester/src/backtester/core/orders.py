@@ -92,6 +92,34 @@ class FullEquityNotional:
     leverage: Decimal
 
 
+# ---------- Bracket / OCO (PR K) --------------------------------------------
+
+
+@dataclass(frozen=True)
+class BracketSpec:
+    """Entry intent 에 부착하는 TP/SL/time_stop 후속 child order 명세 (PR K).
+
+    Engine 이 entry fill 직후 다음 child 를 자동 생성:
+    - ``take_profit_price``: reduce-only limit (long entry → sell limit, short entry → buy limit).
+    - ``stop_loss_price``: reduce-only stop (long entry → sell stop, short entry → buy stop).
+    - ``time_stop_bars``: PR N 에서 활성. PR K 는 필드만 보존.
+
+    Children 은 같은 ``oco_group_id`` 를 갖고, 한쪽이 체결되면 sibling 자동 cancel
+    (PR L). ``parent_order_id`` 는 entry 주문 id.
+    """
+
+    take_profit_price: Decimal | None = None
+    stop_loss_price: Decimal | None = None
+    time_stop_bars: int | None = None
+
+    def has_any(self) -> bool:
+        return (
+            self.take_profit_price is not None
+            or self.stop_loss_price is not None
+            or self.time_stop_bars is not None
+        )
+
+
 SizeSpec = (
     TargetWeight
     | TargetNotional
@@ -137,6 +165,8 @@ class OrderIntent:
     # flat 또는 같은 방향 (extend) 시도는 Sizer 가 reject. ClosePosition 은 본질적으로
     # reduce-only — 별도 표기 없이도 동일 의미로 처리.
     reduce_only: bool = False
+    # PR K — entry intent 가 채워지면 Engine 이 reduce-only TP/SL child 자동 생성.
+    bracket: BracketSpec | None = None
 
 
 # ---------- OrderAction -----------------------------------------------------

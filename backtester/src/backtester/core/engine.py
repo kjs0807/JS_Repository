@@ -30,7 +30,7 @@ from dataclasses import fields as dc_fields
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import polars as pl
 
@@ -51,7 +51,7 @@ from backtester.core.context import (
     StrategyContext,
 )
 from backtester.core.errors import RunDirectoryError
-from backtester.core.orderbook import OrderBook
+from backtester.core.orderbook import Order, OrderBook
 from backtester.core.orders import OrderAction, OrderIntent
 from backtester.core.result import BacktestResult
 from backtester.core.snapshot import MarketSnapshot
@@ -558,7 +558,11 @@ class BacktestEngine:
         # 3. PR G: 활성 주문 체결 — 봉 open 가격으로 (NextBarOpenExecution).
         # mark/funding 보다 먼저 처리 → 같은 봉에서 fill 된 포지션이 같은 봉의 mark
         # 와 funding 계산에 반영된다.
-        for order in self.orderbook.get_active():
+        # PR K: 체결 후 entry 가 ``intent.bracket`` 을 가지면 reduce-only TP/SL child
+        # 자동 생성. children 도 같은 봉의 후속 체결 시도가 일어날 수 있도록 같은
+        # iteration 의 snapshot list 만 사용하여 무한 루프 방지.
+        active_at_start = self.orderbook.get_active()
+        for order in active_at_start:
             snap = snapshots.get(order.intent.symbol)
             if snap is None:
                 continue
@@ -571,6 +575,15 @@ class BacktestEngine:
             self._fill_count += 1
             self._event_log.append(Event(ts=ts, type=EventType.FILL, payload=fill))
             self._emit_snapshot(ts, "fill")  # implicit, 주기 무관
+
+            # PR K: bracket child 생성 (entry 만, 즉 parent_order_id is None).
+            if (
+                order.state == "filled"
+                and order.parent_order_id is None
+                and order.intent.bracket is not None
+                and order.intent.bracket.has_any()
+            ):
+                self._spawn_bracket_children(order, fill, ts)
 
         # 4. mark-to-market — post-fill 포지션을 봉 close 로 mark + equity_history 적재.
         self.ledger.on_market(snapshots)
@@ -835,17 +848,94 @@ class BacktestEngine:
             return
 
         order = self.orderbook.add(intent, sized_quantity, ts)
+        self._emit_order_added(order, sized_quantity, ts)
+
+    def _emit_order_added(
+        self,
+        order: Order,
+        sized_quantity: Decimal,
+        ts: datetime,
+    ) -> None:
+        """ORDER_ADDED 이벤트 발행. PR K: parent_order_id / oco_group_id payload 포함."""
+        assert self._event_log is not None
         self._event_log.append(
             Event(
                 ts=ts,
                 type=EventType.ORDER_ADDED,
                 payload={
                     "order_id": order.id,
-                    "intent": intent,
+                    "intent": order.intent,
                     "sized_quantity": sized_quantity,
+                    "parent_order_id": order.parent_order_id,
+                    "oco_group_id": order.oco_group_id,
                 },
             )
         )
+
+    def _spawn_bracket_children(
+        self,
+        parent_order: Order,
+        parent_fill: Any,
+        ts: datetime,
+    ) -> None:
+        """PR K: entry fill 직후 reduce-only TP/SL child 생성.
+
+        - long entry (buy fill): TP = sell limit, SL = sell stop. 둘 다 reduce_only=True.
+        - short entry (sell fill): TP = buy limit, SL = buy stop.
+        - children 은 같은 ``oco_group_id = "oco_{parent.id}"`` 공유 — PR L 에서 한쪽
+          체결 시 sibling 자동 cancel.
+        - child size = ``parent_fill.size`` (전체 부분체결 수량).
+        - reason = ``"bracket_tp:{parent.id}" / "bracket_sl:{parent.id}"``.
+        """
+        from backtester.core.orders import OrderIntent, TargetUnits
+
+        bracket = parent_order.intent.bracket
+        assert bracket is not None
+        symbol = parent_order.intent.symbol
+        # close 방향: parent buy → sell child / parent sell → buy child.
+        close_side: Literal["buy", "sell"] = (
+            "sell" if parent_fill.side == "buy" else "buy"
+        )
+        qty = abs(parent_fill.size)
+        oco_group_id = f"oco_{parent_order.id}"
+
+        if bracket.take_profit_price is not None:
+            tp_intent = OrderIntent(
+                symbol=symbol,
+                side=close_side,
+                type="limit",
+                size_spec=TargetUnits(units=qty),
+                limit_price=bracket.take_profit_price,
+                reason=f"bracket_tp:{parent_order.id}",
+                reduce_only=True,
+            )
+            tp_order = self.orderbook.add(
+                tp_intent,
+                qty,
+                ts,
+                parent_order_id=parent_order.id,
+                oco_group_id=oco_group_id,
+            )
+            self._emit_order_added(tp_order, qty, ts)
+
+        if bracket.stop_loss_price is not None:
+            sl_intent = OrderIntent(
+                symbol=symbol,
+                side=close_side,
+                type="stop",
+                size_spec=TargetUnits(units=qty),
+                stop_price=bracket.stop_loss_price,
+                reason=f"bracket_sl:{parent_order.id}",
+                reduce_only=True,
+            )
+            sl_order = self.orderbook.add(
+                sl_intent,
+                qty,
+                ts,
+                parent_order_id=parent_order.id,
+                oco_group_id=oco_group_id,
+            )
+            self._emit_order_added(sl_order, qty, ts)
 
     def _handle_action(self, action: OrderAction, ts: datetime) -> None:
         """PR D: cancel / modify / new 모두 활성. cancel/modify 는 EventLog 에 기록."""
