@@ -24,6 +24,7 @@ from backtester.core.engine import BacktestEngine
 from backtester.core.errors import ConfigError, RunDirectoryError
 from backtester.strategies.registry import build_strategy
 from backtester.viz.report import render_metrics_report
+from backtester.viz.result_browser import render_result_browser
 from backtester.viz.run_chart import render_run_chart
 from backtester.viz.trade_review import render_trade_review
 
@@ -89,6 +90,29 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     metrics.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress INFO output (HTML output path).",
+    )
+
+    browser = sub.add_parser(
+        "browser",
+        help=(
+            "Render run_dir/charts/index.html as a landing page linking all "
+            "artifacts (PR Y)."
+        ),
+        description=(
+            "Render run_dir/charts/index.html — summary metrics, per-symbol "
+            "activity, mini equity chart, and links to other charts/exports."
+        ),
+    )
+    browser.add_argument(
+        "run_dir",
+        type=Path,
+        help="Path to runs/{run_id}/.",
+    )
+    browser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -253,6 +277,27 @@ def cmd_metrics(
     return 0
 
 
+def cmd_browser(run_dir: Path, *, quiet: bool) -> int:
+    """``backtester browser`` — charts/index.html 랜딩 페이지 생성."""
+    if not run_dir.exists() or not run_dir.is_dir():
+        print(f"[error] run dir not found: {run_dir}", file=sys.stderr)
+        return 2
+    if not (run_dir / "events.jsonl").exists():
+        print(
+            f"[error] events.jsonl missing in {run_dir} — not a valid run directory",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        output = render_result_browser(run_dir)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"[error] render: {e}", file=sys.stderr)
+        return 2
+    if not quiet:
+        print(f"[INFO] Wrote {output}")
+    return 0
+
+
 def cmd_trade_review(
     run_dir: Path,
     *,
@@ -338,6 +383,8 @@ def main(argv: list[str] | None = None) -> int:
             periods_per_year=args.periods_per_year,
             quiet=args.quiet,
         )
+    if args.cmd == "browser":
+        return cmd_browser(args.run_dir, quiet=args.quiet)
     if args.cmd == "trade-review":
         return cmd_trade_review(
             args.run_dir,
