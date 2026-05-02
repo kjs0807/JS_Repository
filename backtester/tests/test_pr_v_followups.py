@@ -282,6 +282,7 @@ def test_load_preset_yaml_crypto_perp(tmp_path: Path) -> None:
     assert cfg.primary_timeframe == "1h"
     assert cfg.initial_equity == Decimal("50000")
     assert cfg.allow_short is True
+    assert cfg.slippage_bps == 3.0
     assert cfg.strategy_name == "bbkc_legacy_compat"
     assert cfg.strategy_params == {"leverage": "3", "tp_pct": "0.06"}
     # preset instrument 자동

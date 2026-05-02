@@ -29,7 +29,7 @@ strategy_params:
 # 옵션:
 # initial_equity: "50000"
 # allow_short: true
-# slippage_bps: 2.0
+# slippage_bps: 3.0
 # extra_timeframes: [4h]
 # funding:
 #   interval_hours: 8
@@ -100,7 +100,7 @@ def _crypto_perp_from_dict(data: dict[str, Any]) -> BacktestConfig:
     extra_tfs = data.get("extra_timeframes")
     initial_equity = data.get("initial_equity")
     allow_short = _strict_bool(data.get("allow_short", True), key="allow_short")
-    slippage_bps = float(data.get("slippage_bps", 2.0))
+    slippage_bps = float(data.get("slippage_bps", 3.0))
     bar_path = data.get("bar_path_model", "pessimistic")
     on_run_exists = data.get("on_run_exists", "auto_suffix")
     snapshot_every_bars = int(data.get("snapshot_every_bars", 1))

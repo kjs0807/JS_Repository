@@ -114,8 +114,8 @@ def test_bybit_xrpusdt_preset_values() -> None:
 
 def test_preset_fee_model_default_values() -> None:
     inst = bybit_btcusdt_perp()
-    assert inst.fee_model.taker == Decimal("0.0006")
-    assert inst.fee_model.maker == Decimal("0.0001")
+    assert inst.fee_model.taker == Decimal("0.00055")
+    assert inst.fee_model.maker == Decimal("0.0002")
     assert inst.fee_model.type == "flat"
 
 

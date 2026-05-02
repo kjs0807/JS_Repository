@@ -9,7 +9,7 @@ preset + crypto-friendly default 를 묶는다.
 - ``allow_short = True``.
 - ``on_run_exists = "auto_suffix"`` — 같은 run_id 충돌 시 자동 increment.
 - ``persist_run_data = "copy"`` — run_dir self-contained.
-- ``execution_model = "next_bar_open"`` + ``slippage_bps = 2``.
+- ``execution_model = "next_bar_open"`` + ``slippage_bps = 3``.
 - ``bar_path_model = PESSIMISTIC`` (보수).
 - ``snapshot_every_bars = 1``.
 - ``risk_limits``: ``max_leverage=10``, ``max_orders_per_symbol=10`` (보수). 명시
@@ -63,7 +63,7 @@ def crypto_perp_backtest_config(
     risk_limits: RiskLimits | None = None,
     extra_timeframes: list[str] | None = None,
     allow_short: bool = True,
-    slippage_bps: float = 2.0,
+    slippage_bps: float = 3.0,
     bar_path_model: BarPathModel = BarPathModel.PESSIMISTIC,
     snapshot_every_bars: int = 1,
     on_run_exists: str = "auto_suffix",

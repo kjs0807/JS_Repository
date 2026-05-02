@@ -76,6 +76,7 @@ def test_factory_default_initial_equity_50k(tmp_path: Path) -> None:
     assert cfg.persist_run_data == "copy"
     assert cfg.bar_path_model.value == "pessimistic"
     assert cfg.snapshot_every_bars == 1
+    assert cfg.slippage_bps == 3.0
     # default risk limits — max_leverage=10, max_orders_per_symbol=10
     assert cfg.risk_limits.max_leverage == Decimal("10")
     assert cfg.risk_limits.max_orders_per_symbol == 10
@@ -96,7 +97,7 @@ def test_factory_uses_preset_instrument(tmp_path: Path) -> None:
     )
     inst = cfg.instruments[0]
     assert inst.symbol == "ETHUSDT"
-    assert inst.fee_model.taker == Decimal("0.0006")
+    assert inst.fee_model.taker == Decimal("0.00055")
     assert inst.exchange_rule is not None
     assert inst.exchange_rule.price_tick == Decimal("0.01")
     assert inst.margin_model is not None

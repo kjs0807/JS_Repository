@@ -9,7 +9,7 @@
 - max_leverage: legacy default 100 (DB 에 None). 실제 거래는 위험 한도 ``RiskLimits
   .max_leverage`` 로 제한 권장.
 - fee: Bybit linear perp 표준 taker 0.055% / maker -0.005~0.02%. 보수적으로 taker
-  0.06% (0.0006) / maker 0.01% (0.0001).
+  0.055% (0.00055) / maker 0.02% (0.0002).
 - maintenance_margin_rate: 일반 0.5%. 0.005.
 - liquidation_fee_rate: ~0.06%. 0.0006.
 
@@ -101,8 +101,8 @@ _BYBIT_LINEAR_PERP_TABLE: dict[str, dict[str, str]] = {
 # 심볼 공통 default — Bybit linear perp 표준 + legacy ProductSpec.
 _DEFAULT_MIN_NOTIONAL = Decimal("5")
 _DEFAULT_MAX_LEVERAGE = Decimal("100")
-_DEFAULT_TAKER_FEE = Decimal("0.0006")  # 0.06%
-_DEFAULT_MAKER_FEE = Decimal("0.0001")  # 0.01%
+_DEFAULT_TAKER_FEE = Decimal("0.00055")  # Crypto/Bybit_Trading demo config
+_DEFAULT_MAKER_FEE = Decimal("0.0002")  # Crypto/Bybit_Trading demo config
 _DEFAULT_MMR = Decimal("0.005")
 _DEFAULT_LIQ_FEE = Decimal("0.0006")
 
@@ -117,7 +117,7 @@ def bybit_linear_perp(symbol: str) -> Instrument:
 
     포함:
     - ``asset_class="crypto_perp"``, ``size_unit="base_asset"``, ``quote_currency="USDT"``.
-    - ``FeeModel(taker=0.0006, maker=0.0001)`` — Bybit 표준 보수.
+    - ``FeeModel(taker=0.00055, maker=0.0002)`` — Bybit_Trading demo parity.
     - ``ExchangeRule(price_tick, qty_step, min_qty, min_notional=5, max_leverage=100)``.
     - ``MarginModel(maintenance_margin_rate=0.005, liquidation_fee_rate=0.0006)``.
 

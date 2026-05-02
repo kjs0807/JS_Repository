@@ -70,13 +70,13 @@ class BBKCLegacyCompatStrategy(BaseStrategy):
         # PR U 후속 정정 — legacy ``max_position_pct=0.05`` 기본값 일치. 0.1 이면
         # 같은 leverage 에서 포지션이 2 배 커진다.
         margin_pct: Decimal = Decimal("0.05"),
-        exit_mode: ExitMode = "fixed",
-        trail_be_at_tp_frac: Decimal = Decimal("0.5"),
-        trail_start_at_tp_frac: Decimal = Decimal("0.8"),
+        exit_mode: ExitMode = "be_trail",
+        trail_be_at_tp_frac: Decimal = Decimal("0.25"),
+        trail_start_at_tp_frac: Decimal = Decimal("0.60"),
         trail_distance_tp_frac: Decimal = Decimal("0.3"),
         drop_tp: bool = False,
-        time_stop_bars: int | None = None,
-        allow_short: bool = False,
+        time_stop_bars: int | None = 0,
+        allow_short: bool = True,
     ) -> None:
         self._bb = BollingerBands(period=bb_period, num_std=bb_std)
         self._kc = KeltnerChannel(
@@ -96,7 +96,9 @@ class BBKCLegacyCompatStrategy(BaseStrategy):
         self.trail_start_at_tp_frac = Decimal(str(trail_start_at_tp_frac))
         self.trail_distance_tp_frac = Decimal(str(trail_distance_tp_frac))
         self.drop_tp = drop_tp
-        self.time_stop_bars = time_stop_bars
+        self.time_stop_bars = (
+            None if time_stop_bars is None or time_stop_bars <= 0 else time_stop_bars
+        )
         self.allow_short = allow_short
         # PR U: be_trail 내부 상태 (per-symbol) — legacy _pos_meta 동등.
         self._meta: dict[str, dict[str, Any]] = {}
