@@ -11,10 +11,12 @@ from typing import Any
 from backtester.core.errors import ConfigError
 from backtester.strategies.base import BaseStrategy
 from backtester.strategies.bbkc_legacy_compat import BBKCLegacyCompatStrategy
+from backtester.strategies.bbkc_multi_legacy_compat import BBKCMultiLegacyCompatStrategy
 from backtester.strategies.bbkc_squeeze import BBKCSqueezeStrategy
 
 STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     "bbkc_legacy_compat": BBKCLegacyCompatStrategy,
+    "bbkc_multi_legacy_compat": BBKCMultiLegacyCompatStrategy,
     "bbkc_squeeze": BBKCSqueezeStrategy,
 }
 
