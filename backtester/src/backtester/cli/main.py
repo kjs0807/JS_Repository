@@ -17,6 +17,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from backtester.analysis.export import export_run_data
 from backtester.analysis.rebuild import rebuild_results
 from backtester.core.config import BacktestConfig
 from backtester.core.engine import BacktestEngine
@@ -91,6 +92,29 @@ def _build_parser() -> argparse.ArgumentParser:
         "--quiet",
         action="store_true",
         help="Suppress INFO output (HTML output path).",
+    )
+
+    export = sub.add_parser(
+        "export",
+        help=(
+            "Export human-readable CSV / JSON to run_dir/exports/ "
+            "(fills, intents, orders, equity_curve, summary)."
+        ),
+        description=(
+            "Export human-readable CSV / JSON to run_dir/exports/ "
+            "(PR Z) — for users without parquet tooling."
+        ),
+    )
+    export.add_argument(
+        "run_dir",
+        type=Path,
+        help="Path to runs/{run_id}/.",
+    )
+    export.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress INFO output (output paths).",
     )
 
     rebuild = sub.add_parser(
@@ -194,6 +218,28 @@ def cmd_metrics(
     return 0
 
 
+def cmd_export(run_dir: Path, *, quiet: bool) -> int:
+    """``backtester export`` — events.jsonl 을 사람이 읽기 쉬운 CSV / JSON 으로."""
+    if not run_dir.exists() or not run_dir.is_dir():
+        print(f"[error] run dir not found: {run_dir}", file=sys.stderr)
+        return 2
+    if not (run_dir / "events.jsonl").exists():
+        print(
+            f"[error] events.jsonl missing in {run_dir} — not a valid run directory",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        outputs = export_run_data(run_dir)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"[error] export: {e}", file=sys.stderr)
+        return 2
+    if not quiet:
+        for name, path in outputs.items():
+            print(f"[INFO] Exported {name}: {path}")
+    return 0
+
+
 def cmd_rebuild_results(run_dir: Path, *, quiet: bool) -> int:
     """``backtester rebuild-results`` 본체 — events.jsonl 로 results/ 캐시 재생성."""
     if not run_dir.exists() or not run_dir.is_dir():
@@ -228,6 +274,8 @@ def main(argv: list[str] | None = None) -> int:
             periods_per_year=args.periods_per_year,
             quiet=args.quiet,
         )
+    if args.cmd == "export":
+        return cmd_export(args.run_dir, quiet=args.quiet)
     if args.cmd == "rebuild-results":
         return cmd_rebuild_results(args.run_dir, quiet=args.quiet)
     # argparse `required=True` 가 차단하지만 방어적으로
