@@ -1,0 +1,122 @@
+run_id: frama_btc_eth_avax_1h_demo
+data_source:
+  base_dir: data\bybit_demo_multi
+  type: parquet
+instruments:
+- symbol: BTCUSDT
+  asset_class: crypto_perp
+  tick_size: '0.1'
+  tick_value: '0.1'
+  contract_multiplier: '1'
+  quote_currency: USDT
+  base_currency: BTC
+  size_unit: base_asset
+  fee_model:
+    type: flat
+    taker: '0.00055'
+    maker: '0.0002'
+  exchange_rule:
+    symbol: BTCUSDT
+    price_tick: '0.1'
+    qty_step: '0.001'
+    min_qty: '0.001'
+    min_notional: '5'
+    max_leverage: '100'
+  margin_model:
+    maintenance_margin_rate: '0.005'
+    liquidation_fee_rate: '0.0006'
+- symbol: ETHUSDT
+  asset_class: crypto_perp
+  tick_size: '0.01'
+  tick_value: '0.01'
+  contract_multiplier: '1'
+  quote_currency: USDT
+  base_currency: ETH
+  size_unit: base_asset
+  fee_model:
+    type: flat
+    taker: '0.00055'
+    maker: '0.0002'
+  exchange_rule:
+    symbol: ETHUSDT
+    price_tick: '0.01'
+    qty_step: '0.01'
+    min_qty: '0.01'
+    min_notional: '5'
+    max_leverage: '100'
+  margin_model:
+    maintenance_margin_rate: '0.005'
+    liquidation_fee_rate: '0.0006'
+- symbol: AVAXUSDT
+  asset_class: crypto_perp
+  tick_size: '0.001'
+  tick_value: '0.001'
+  contract_multiplier: '1'
+  quote_currency: USDT
+  base_currency: AVAX
+  size_unit: base_asset
+  fee_model:
+    type: flat
+    taker: '0.00055'
+    maker: '0.0002'
+  exchange_rule:
+    symbol: AVAXUSDT
+    price_tick: '0.001'
+    qty_step: '0.1'
+    min_qty: '0.1'
+    min_notional: '5'
+    max_leverage: '100'
+  margin_model:
+    maintenance_margin_rate: '0.005'
+    liquidation_fee_rate: '0.0006'
+timeframes_per_symbol:
+  BTCUSDT:
+  - 1h
+  ETHUSDT:
+  - 1h
+  AVAXUSDT:
+  - 1h
+primary_symbol: BTCUSDT
+primary_timeframe: 1h
+start: '2026-01-01T00:00:00+00:00'
+end: '2026-05-01T00:00:00+00:00'
+gap_policy: notify
+execution_model: slippage_bps
+bar_path_model: pessimistic
+slippage_bps: 3.0
+initial_equity: '50000'
+risk_limits:
+  max_orders_per_symbol: 10
+  blacklist_symbols: []
+  max_position_size: null
+  max_total_exposure: null
+  max_leverage: '10'
+  max_drawdown_halt: null
+warmup_bars: 0
+random_seed: 0
+output_dir: runs
+log_level: INFO
+persist_run_data: copy
+snapshot_every_bars: 1
+on_run_exists: auto_suffix
+strategy_name: frama_multi_ema200_channel
+strategy_params:
+  symbols:
+  - BTCUSDT
+  - ETHUSDT
+  - AVAXUSDT
+  timeframe: 1h
+  child_params:
+    length: 26
+    distance: '1.5'
+    smoothing: 5
+    volatility_window: 200
+    ema_period: 200
+    allow_short: true
+    leverage: '3'
+    margin_pct: '0.03'
+    sl_pct: null
+funding_models: {}
+allow_short: true
+allow_flip: false
+funding_source_dir: null

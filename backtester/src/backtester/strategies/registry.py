@@ -13,11 +13,21 @@ from backtester.strategies.base import BaseStrategy
 from backtester.strategies.bbkc_legacy_compat import BBKCLegacyCompatStrategy
 from backtester.strategies.bbkc_multi_legacy_compat import BBKCMultiLegacyCompatStrategy
 from backtester.strategies.bbkc_squeeze import BBKCSqueezeStrategy
+from backtester.strategies.frama_channel import FRAMAChannelStrategy
+from backtester.strategies.frama_ema200_channel import (
+    FRAMAEMA200ChannelStrategy,
+    FRAMAMultiEMA200ChannelStrategy,
+)
+from backtester.strategies.frama_multi_channel import FRAMAMultiChannelStrategy
 
 STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     "bbkc_legacy_compat": BBKCLegacyCompatStrategy,
     "bbkc_multi_legacy_compat": BBKCMultiLegacyCompatStrategy,
     "bbkc_squeeze": BBKCSqueezeStrategy,
+    "frama_channel": FRAMAChannelStrategy,
+    "frama_ema200_channel": FRAMAEMA200ChannelStrategy,
+    "frama_multi_ema200_channel": FRAMAMultiEMA200ChannelStrategy,
+    "frama_multi_channel": FRAMAMultiChannelStrategy,
 }
 
 
