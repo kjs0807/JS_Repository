@@ -51,18 +51,16 @@ log_level: INFO
 persist_run_data: copy
 snapshot_every_bars: 1
 on_run_exists: auto_suffix
-strategy_name: frama_ema200_channel
+strategy_name: frama_pullback_channel
 strategy_params:
   length: 26
   distance: '1.5'
   smoothing: 5
   volatility_window: 200
-  ema_period: 200
   timeframe: 4h
   allow_short: true
   leverage: '3'
   margin_pct: '0.03'
-  sl_pct: null
 funding_models: {}
 allow_short: true
 allow_flip: false

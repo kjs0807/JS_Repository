@@ -10,6 +10,10 @@ from backtester.strategies.frama_ema200_channel import (
     FRAMAMultiEMA200ChannelStrategy,
 )
 from backtester.strategies.frama_multi_channel import FRAMAMultiChannelStrategy
+from backtester.strategies.frama_pullback_channel import (
+    FRAMAChannelPullbackStrategy,
+    FRAMAMultiChannelPullbackStrategy,
+)
 from backtester.strategies.registry import STRATEGY_REGISTRY, build_strategy
 
 __all__ = [
@@ -18,9 +22,11 @@ __all__ = [
     "BBKCMultiLegacyCompatStrategy",
     "BBKCSqueezeStrategy",
     "BaseStrategy",
+    "FRAMAChannelPullbackStrategy",
     "FRAMAChannelStrategy",
     "FRAMAEMA200ChannelStrategy",
-    "FRAMAMultiEMA200ChannelStrategy",
+    "FRAMAMultiChannelPullbackStrategy",
     "FRAMAMultiChannelStrategy",
+    "FRAMAMultiEMA200ChannelStrategy",
     "build_strategy",
 ]
