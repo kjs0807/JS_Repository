@@ -365,7 +365,12 @@ def test_opposite_signal_preempts_pullback_trigger() -> None:
 # ---------- 8. exit on opposite signal while in position --------------------
 
 
-def test_long_position_exits_on_break_dn() -> None:
+def test_long_position_exits_on_break_dn_AND_arms_short_pending() -> None:
+    """Regression for the swing-flip bug: when long + break_dn fires, we
+    must (a) emit a ClosePosition reduce_only intent and (b) immediately
+    arm a short pending using THIS bar's high. Otherwise the swing-reversal
+    setup announced by the very same signal is lost.
+    """
     bars = _bars_from_hlc([(101.0, 99.5, 100.5)])
     ind = _ind(1, break_dn_at=[0])
     s = FRAMAChannelPullbackStrategy()
@@ -381,9 +386,15 @@ def test_long_position_exits_on_break_dn() -> None:
     assert isinstance(intents[0].size_spec, ClosePosition)
     assert intents[0].reduce_only is True
     assert intents[0].reason == "frama_pullback_exit_long_break_dn"
+    pending = s._get_pending("BTCUSDT")
+    assert pending is not None
+    assert pending.direction == "short"
+    assert pending.sl_price == Decimal("101.0")
+    assert pending.signal_ts == bars["timestamp"][0]
 
 
-def test_short_position_exits_on_break_up() -> None:
+def test_short_position_exits_on_break_up_AND_arms_long_pending() -> None:
+    """Mirror of the long-flip test."""
     bars = _bars_from_hlc([(101.0, 99.0, 100.5)])
     ind = _ind(1, break_up_at=[0])
     s = FRAMAChannelPullbackStrategy()
@@ -397,6 +408,98 @@ def test_short_position_exits_on_break_up() -> None:
     assert len(intents) == 1
     assert intents[0].side == "buy"
     assert isinstance(intents[0].size_spec, ClosePosition)
+    pending = s._get_pending("BTCUSDT")
+    assert pending is not None
+    assert pending.direction == "long"
+    assert pending.sl_price == Decimal("99.0")
+    assert pending.signal_ts == bars["timestamp"][0]
+
+
+def test_entry_bar_does_not_register_new_pending_for_same_direction_signal() -> None:
+    """Regression for the stale-pending bug: when bar N triggers pullback
+    entry from a prior pending AND that same bar also fires a fresh
+    same-direction break, we must NOT register a new pending. The old code
+    did, which left a stale setup that would fire after the position later
+    closed naturally.
+    """
+    bars = _bars_from_hlc(
+        [
+            (103.0, 99.5, 102.5),   # break_up #1: arm long pending sl=99.5
+            (104.0, 100.0, 103.5),  # bar.low at mid → entry trigger,
+                                    # AND break_up #2 fires same bar
+        ]
+    )
+    ind = _ind(2, break_up_at=[0, 1])
+    s = FRAMAChannelPullbackStrategy()
+    intents = _run_bars(s, bars_df=bars, ind_df=ind)
+    assert intents[0] == []
+    assert len(intents[1]) == 1
+    assert intents[1][0].side == "buy"
+    # CRITICAL: pending must be None after entry, not re-registered from
+    # the fresh same-bar break_up signal.
+    assert s._get_pending("BTCUSDT") is None
+
+
+def test_lifecycle_no_stale_pending_after_natural_exit() -> None:
+    """Walks: arm → entry → in-position → opposite-signal exit → flat.
+    Drives the strategy directly, toggling has_position on the bar after
+    the entry intent and back to False after the close intent — exercises
+    the full swing-flip lifecycle that ``_run_bars`` (fixed has_position)
+    cannot represent.
+
+    Regression target: after the natural exit, the only pending in flight
+    should be the fresh short pending armed by the exit signal — NOT a
+    stale long pending re-registered on the entry bar.
+    """
+    bars = _bars_from_hlc(
+        [
+            (103.0, 99.5, 102.5),   # bar 0: break_up #1 — arm long
+            (104.0, 100.0, 103.5),  # bar 1: pullback + break_up #2 — entry
+            (104.5, 102.0, 103.0),  # bar 2: position open, no signal
+            (102.0, 99.0, 99.5),    # bar 3: position open, break_dn → exit + arm short
+        ]
+    )
+    ind = _ind(4, break_up_at=[0, 1], break_dn_at=[3])
+    s = FRAMAChannelPullbackStrategy()
+    has_pos = False
+    pos_size = Decimal("0")
+
+    intents_per_bar: list[list[OrderIntent]] = []
+    for i in range(bars.height):
+        ctx = _ctx_from_indicator_df(
+            bars_df=bars.head(i + 1),
+            ind_df=ind.head(i + 1),
+            has_position=has_pos,
+            position_size=pos_size,
+        )
+        out = s.on_bar(ctx)
+        intents_per_bar.append(out)
+        # Mimic engine fill timing: market intent on bar N fills on bar
+        # N+1 open, so position state flips for the NEXT iteration.
+        for it in out:
+            if isinstance(it.size_spec, ClosePosition):
+                has_pos = False
+                pos_size = Decimal("0")
+            elif isinstance(it.size_spec, TargetMarginPct):
+                has_pos = True
+                pos_size = Decimal("1") if it.side == "buy" else Decimal("-1")
+
+    # bar 0: arm only — no intent
+    assert intents_per_bar[0] == []
+    # bar 1: long entry intent
+    assert len(intents_per_bar[1]) == 1
+    assert intents_per_bar[1][0].side == "buy"
+    # bar 2: position open, no signal → no intent
+    assert intents_per_bar[2] == []
+    # bar 3: opposite signal → close + arm short
+    assert len(intents_per_bar[3]) == 1
+    assert intents_per_bar[3][0].side == "sell"
+    assert isinstance(intents_per_bar[3][0].size_spec, ClosePosition)
+    pending = s._get_pending("BTCUSDT")
+    assert pending is not None
+    assert pending.direction == "short"
+    assert pending.sl_price == Decimal("102.0")  # bar 3's high
+    assert pending.signal_ts == bars["timestamp"][3]
 
 
 def test_in_position_no_break_means_no_intent() -> None:

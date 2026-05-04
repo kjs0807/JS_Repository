@@ -29,8 +29,12 @@ setup anyway.
 
 Same-bar logic order, executed every ``on_bar`` call:
 
-1. If currently in a position: opposite FRAMA signal → market close (and
-   return early — pending state is left untouched until next bar).
+1. If currently in a position: opposite FRAMA signal → market close
+   (reduce_only) AND immediately arm an opposite-direction pending using
+   THIS bar's wick. The same-bar entry-block guard then prevents that new
+   pending from firing on this bar; the next bar onwards reads the new
+   setup naturally. Without this swing-flip arming we'd miss every reversal
+   trade the exit signal itself reported.
 2. Otherwise (flat): SL pre-touch invalidation of any existing pending.
 3. Opposite-signal preempt: if this bar fires the opposite-direction
    FRAMA signal vs the current pending, drop the pending. This blocks the
@@ -38,9 +42,10 @@ Same-bar logic order, executed every ``on_bar`` call:
    firing an entry the new signal would have warned us against.
 4. Pullback entry trigger from the *surviving* prior pending only —
    pending registered this same bar cannot trigger entry on the same bar.
-5. Register/refresh pending from this bar's break_up / break_dn signal.
-   Same direction = SL/timestamp refresh; opposite (after step 3 dropped
-   prior) = direction flip.
+5. Register/refresh pending from this bar's break_up / break_dn signal —
+   ONLY if step 4 did not emit an entry. Otherwise the freshly cleared
+   pending would be re-registered and sit frozen while the engine fills
+   the entry next bar; after eventual close we'd act on a stale setup.
 """
 
 from __future__ import annotations
@@ -211,6 +216,16 @@ class FRAMAChannelPullbackStrategy(BaseStrategy):
                         reduce_only=True,
                     )
                 )
+                # Arm the opposite-direction pending using THIS bar's wick.
+                # The same-bar guard in step 4 prevents instant entry; the
+                # next on_bar call (after the close fill) sees the setup as
+                # if it were freshly registered.
+                self._set_pending(
+                    symbol,
+                    direction="short",
+                    sl_price=bar_high,
+                    signal_ts=bar_ts,
+                )
             elif pos.size < 0 and break_up:
                 intents.append(
                     OrderIntent(
@@ -222,9 +237,13 @@ class FRAMAChannelPullbackStrategy(BaseStrategy):
                         reduce_only=True,
                     )
                 )
-            # While in a position pending state is left frozen — exit fills
-            # at the next bar open, after which the next on_bar call (already
-            # flat) will register / refresh / trigger pending normally.
+                self._set_pending(
+                    symbol,
+                    direction="long",
+                    sl_price=bar_low,
+                    signal_ts=bar_ts,
+                )
+            # In-position branch never falls through to flat-only steps 2–5.
             return intents
 
         # ---- 2. SL pre-touch invalidation of any prior pending -----------
@@ -289,24 +308,35 @@ class FRAMAChannelPullbackStrategy(BaseStrategy):
                     )
                 )
                 self._clear_pending(symbol)
+                emitted_entry = True
+            else:
+                emitted_entry = False
+        else:
+            emitted_entry = False
 
         # ---- 5. Register / refresh pending from this bar's signal --------
+        # Skip when an entry intent was just emitted: the engine will fill
+        # next bar and we don't want a stale pending sitting around during
+        # the now-open position. Without this guard, a same-bar entry-trigger
+        # plus fresh break would re-register the pending and fire a stale
+        # entry after the position later closes.
         # ``elif`` so that on the rare same-bar break_up + break_dn case
         # break_up wins (matches the FRAMA indicator computation order).
-        if break_up:
-            self._set_pending(
-                symbol,
-                direction="long",
-                sl_price=bar_low,
-                signal_ts=bar_ts,
-            )
-        elif break_dn:
-            self._set_pending(
-                symbol,
-                direction="short",
-                sl_price=bar_high,
-                signal_ts=bar_ts,
-            )
+        if not emitted_entry:
+            if break_up:
+                self._set_pending(
+                    symbol,
+                    direction="long",
+                    sl_price=bar_low,
+                    signal_ts=bar_ts,
+                )
+            elif break_dn:
+                self._set_pending(
+                    symbol,
+                    direction="short",
+                    sl_price=bar_high,
+                    signal_ts=bar_ts,
+                )
 
         return intents
 
