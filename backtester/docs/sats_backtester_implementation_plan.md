@@ -365,21 +365,32 @@ class SATSIndicator:
 
 ```python
 def wilder_rma(values: np.ndarray, length: int) -> np.ndarray:
+    """Wilder RMA tolerant of NaN gaps in ``values``.
+
+    Tracks the most recent valid output as ``prev_valid`` instead of reading
+    ``out[i - 1]``. This matters when the input is itself a derived series
+    (e.g. efficiency ratio, true range during warmup) that has NaN holes:
+    naive ``out[i - 1]`` would propagate NaN forever once the previous bar
+    was skipped, even if Pine's stateful ``ta.rma`` would have kept its
+    internal value across the gap.
+    """
     out = np.full(len(values), np.nan, dtype=np.float64)
     acc = 0.0
     count = 0
+    prev_valid: float | None = None
 
     for i, value in enumerate(values):
         if math.isnan(value):
             continue
-        if count < length:
+        if prev_valid is None:
             acc += value
             count += 1
             if count == length:
                 out[i] = acc / length
+                prev_valid = out[i]
             continue
-        prev = out[i - 1]
-        out[i] = (prev * (length - 1) + value) / length
+        out[i] = (prev_valid * (length - 1) + value) / length
+        prev_valid = out[i]
 
     return out
 
@@ -436,7 +447,7 @@ single_tp_level = "tp3"
 
 주의: `single_tp_level="tp3"`는 신호와 SL/TP 산출 smoke test용 기본값이다. 전체 수량을 TP3에서 청산하므로 Pine의 `(TP1 + TP2 + TP3) / 3` 분할익절 모델보다 수익/손실 분포가 훨씬 공격적으로 바뀐다. 성과 비교에는 사용하지 말고, Pine 유사 성과 비교는 Phase 3 multi-leg TP 또는 별도 post-hoc 분석기로 수행한다.
 
-이 경우 전략은 하나의 `BracketSpec`만 붙인다. 단, 현재 엔진은 `BracketSpec.time_stop_bars`를 자동 처리하지 않는다. timeout 청산은 strategy `on_bar()`에서 `ctx.bars_held()`를 검사해 직접 `ClosePosition()` intent를 발행해야 한다.
+이 경우 전략은 하나의 `BracketSpec`만 붙인다. 단, 현재 엔진은 `BracketSpec.time_stop_bars`를 자동 처리하지 않는다. timeout 청산은 strategy `on_bar()`에서 `ctx.bars_held()`를 검사해 직접 `ClosePosition()` intent를 발행해야 한다. **권장: SATS의 `BracketSpec`에는 `time_stop_bars`를 채우지 마라.** 일부 기존 전략(`BBKCLegacyCompatStrategy`)은 호환성 메타데이터로 필드를 채워두지만, 엔진이 무시하는 값이 spec에 살아 있으면 이중 진실 소스가 된다. SATS는 timeout 책임을 strategy 단일 경로(`ctx.bars_held()` + `ClosePosition()`)로 통일한다.
 
 ```python
 from decimal import Decimal
