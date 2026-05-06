@@ -11,6 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 TIMEFRAME_TABLE: Dict[str, str] = {
+    "5": "ohlcv_5m", "5m": "ohlcv_5m",
     "15": "ohlcv_15m", "15m": "ohlcv_15m",
     "30": "ohlcv_30m", "30m": "ohlcv_30m",
     "60": "ohlcv_1h", "1h": "ohlcv_1h",

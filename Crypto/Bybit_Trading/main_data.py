@@ -33,7 +33,7 @@ def build_parser():
 
 def cmd_collect(args, db, config):
     client = BybitRestClient(config.app.api_key, config.app.api_secret, config.app.base_url)
-    interval_map = {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
+    interval_map = {"5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d": "D"}
     interval = interval_map.get(args.tf, "60")
     now_ms = int(time.time() * 1000)
     start_ms = now_ms - args.days * 86400000
