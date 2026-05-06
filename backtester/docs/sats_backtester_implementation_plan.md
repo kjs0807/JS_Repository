@@ -553,7 +553,7 @@ class SATSStrategy(BaseStrategy):
         *,
         preset: str = "Auto",
         timeframe_minutes: int = 60,
-        margin_pct: Decimal | float | str = Decimal("0.05"),
+        notional_pct: Decimal | float | str = Decimal("0.05"),
         single_tp_level: Literal["tp1", "tp2", "tp3"] = "tp3",
         allow_short: bool = True,
         trade_max_age_bars: int | None = 100,
@@ -568,7 +568,7 @@ class SATSStrategy(BaseStrategy):
         # Implementation rule: expose every SATSConfig tuning field as a primitive
         # kwarg here, or group them under one validated dict before constructing SATSConfig.
     ) -> None:
-        self.margin_pct = Decimal(str(margin_pct))
+        self.notional_pct = Decimal(str(notional_pct))
         self.single_tp_level = single_tp_level
         self.allow_short = allow_short
         self.trade_max_age_bars = trade_max_age_bars
@@ -644,7 +644,7 @@ class SATSStrategy(BaseStrategy):
                 symbol=symbol,
                 side=side,
                 type="market",
-                size_spec=TargetNotionalPct(self.margin_pct),
+                size_spec=TargetNotionalPct(self.notional_pct),
                 reason=f"sats_{'buy' if signal == 1 else 'sell'}",
                 bracket=BracketSpec(
                     take_profit_price=Decimal(str(tp_price)),

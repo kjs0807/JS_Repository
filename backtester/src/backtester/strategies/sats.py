@@ -17,12 +17,13 @@ Phase 1 simplifications versus the full SATS doc plan:
   ``tp1``/``tp2``/``tp3`` as the bracket TP — the doc flags TP3 as a smoke
   default that does not match Pine's 1/3 split P&L.
 
-Sizing uses ``TargetNotionalPct(notional_pct=margin_pct)`` to match the doc
-example. ``RiskManager`` enforces the ``max_total_exposure`` ceiling
-separately. Leverage is not modelled here — pass ``margin_pct`` small enough
-that the desired notional matches your account margin × leverage budget, or
-use ``BBKCLegacyCompatStrategy``'s ``TargetMarginPct`` pattern as a template
-when leverage-aware sizing becomes needed.
+Sizing uses ``TargetNotionalPct(notional_pct=...)`` directly. The kwarg is
+exposed on the strategy as ``notional_pct`` (not ``margin_pct``) so the name
+matches the underlying SizeSpec — leverage is not modelled here, and
+``RiskManager`` enforces ``max_total_exposure`` separately. When
+leverage-aware sizing becomes needed, follow ``BBKCLegacyCompatStrategy``'s
+``TargetMarginPct(margin_pct=, leverage=)`` pattern (separate fields,
+distinct semantics) rather than overloading ``notional_pct``.
 """
 
 from __future__ import annotations
@@ -114,7 +115,7 @@ class SATSStrategy(BaseStrategy):
         # ── Strategy-only kwargs ─────────────────────────────────────────
         single_tp_level: str = "tp3",
         allow_short: bool = True,
-        margin_pct: Decimal | float | str = Decimal("0.05"),
+        notional_pct: Decimal | float | str = Decimal("0.05"),
         trade_max_age_bars: int | None = 100,
     ) -> None:
         if preset not in _VALID_PRESETS:
@@ -130,9 +131,9 @@ class SATSStrategy(BaseStrategy):
                 f"single_tp_level must be one of {_VALID_SINGLE_TP}, "
                 f"got {single_tp_level!r}"
             )
-        margin = Decimal(str(margin_pct))
-        if margin <= 0:
-            raise ValueError(f"margin_pct must be > 0, got {margin}")
+        notional = Decimal(str(notional_pct))
+        if notional <= 0:
+            raise ValueError(f"notional_pct must be > 0, got {notional}")
         if trade_max_age_bars is not None and trade_max_age_bars <= 0:
             # Treat 0 / negative as disabled, matching BBKCLegacy convention.
             trade_max_age_bars = None
@@ -185,7 +186,7 @@ class SATSStrategy(BaseStrategy):
             Literal["tp1", "tp2", "tp3"], single_tp_level
         )
         self.allow_short = allow_short
-        self.margin_pct = margin
+        self.notional_pct = notional
         self.trade_max_age_bars = trade_max_age_bars
 
     def required_indicators(self) -> list[Indicator]:
@@ -245,7 +246,7 @@ class SATSStrategy(BaseStrategy):
                 symbol=symbol,
                 side=side,
                 type="market",
-                size_spec=TargetNotionalPct(notional_pct=self.margin_pct),
+                size_spec=TargetNotionalPct(notional_pct=self.notional_pct),
                 reason="sats_buy" if signal == 1 else "sats_sell",
                 bracket=BracketSpec(
                     take_profit_price=Decimal(str(tp_raw)),

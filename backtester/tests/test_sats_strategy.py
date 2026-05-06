@@ -6,7 +6,7 @@ Coverage:
    the constructor params.
 2. signal=+1 + ready=True + flat → long market intent with ``BracketSpec``
    carrying TP3/SL prices from the indicator row, sized via
-   ``TargetNotionalPct(margin_pct)``.
+   ``TargetNotionalPct(notional_pct)``.
 3. signal=-1 + ready=True + flat → short market intent (mirror).
 4. ``allow_short=False`` → short signals are dropped silently.
 5. Already-in-position → no entry intent (Phase 1 ``ignore_while_position``).
@@ -22,7 +22,7 @@ Coverage:
 12. Registry: ``build_strategy("sats", {...})`` returns SATSStrategy;
     invalid params raise ``ConfigError``.
 13. Constructor validation rejects bad ``preset``/``tp_mode``/
-    ``single_tp_level``/non-positive ``margin_pct``.
+    ``single_tp_level``/non-positive ``notional_pct``.
 14. End-to-end smoke: BacktestEngine on a synthetic flat-then-breakout
     parquet produces at least one fill via the ``"sats"`` registry name.
 """
@@ -233,7 +233,7 @@ def test_long_signal_emits_long_market_intent_with_bracket() -> None:
     bars = _bars_from_close([100.0] * 30)
     ind = _make_sats_df(30, last_signal=1)
     ctx = _ctx(bars_df=bars, ind_df=ind)
-    s = SATSStrategy(margin_pct=Decimal("0.07"), single_tp_level="tp3")
+    s = SATSStrategy(notional_pct=Decimal("0.07"), single_tp_level="tp3")
     intents = s.on_bar(ctx)
     assert len(intents) == 1
     intent = intents[0]
@@ -429,12 +429,12 @@ def test_registry_builds_sats_with_primitive_params() -> None:
             "timeframe_minutes": 60,
             "atr_len": 12,
             "single_tp_level": "tp2",
-            "margin_pct": "0.05",
+            "notional_pct": "0.05",
         },
     )
     assert isinstance(s, SATSStrategy)
     assert s.single_tp_level == "tp2"
-    assert s.margin_pct == Decimal("0.05")
+    assert s.notional_pct == Decimal("0.05")
 
 
 def test_registry_rejects_unknown_kwarg_with_config_error() -> None:
@@ -458,8 +458,8 @@ def test_registry_rejects_invalid_preset_with_config_error() -> None:
         {"preset": "Nonsense"},
         {"tp_mode": "Whatever"},
         {"single_tp_level": "tp9"},
-        {"margin_pct": "0"},
-        {"margin_pct": "-0.01"},
+        {"notional_pct": "0"},
+        {"notional_pct": "-0.01"},
     ],
 )
 def test_constructor_rejects_invalid(kwargs: dict[str, Any]) -> None:
@@ -577,7 +577,7 @@ def test_engine_run_produces_fills_via_registry(tmp_path: Path) -> None:
             "rsi_len": 14,
             "sl_atr_mult": 1.5,
             "single_tp_level": "tp3",
-            "margin_pct": "0.05",
+            "notional_pct": "0.05",
         },
     )
     result = BacktestEngine(cfg, strategy, verbose=False).run()
