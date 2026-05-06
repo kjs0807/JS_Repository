@@ -23,6 +23,7 @@ from backtester.strategies.frama_pullback_channel import (
     FRAMAChannelPullbackStrategy,
     FRAMAMultiChannelPullbackStrategy,
 )
+from backtester.strategies.sats import SATSStrategy
 
 STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     "bbkc_legacy_compat": BBKCLegacyCompatStrategy,
@@ -34,6 +35,7 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     "frama_multi_channel": FRAMAMultiChannelStrategy,
     "frama_pullback_channel": FRAMAChannelPullbackStrategy,
     "frama_multi_pullback_channel": FRAMAMultiChannelPullbackStrategy,
+    "sats": SATSStrategy,
 }
 
 
