@@ -104,6 +104,8 @@ class SATSConfig:
     preset: Literal["Auto", "Custom", "Scalping", "Default", "Swing", "Crypto 24/7"] = "Auto"
     timeframe_minutes: int = 60
 
+    # The raw input values below are used only when preset == "Custom".
+    # Auto/Scalping/Default/Swing/Crypto 24/7 resolve effective values from the preset table.
     atr_len: int = 13
     base_mult: float = 2.0
     source_col: str = "close"
@@ -212,12 +214,13 @@ def resolve_sats_preset(cfg: SATSConfig) -> tuple[int, float, int, int, float]:
 
 ## 5. Indicator 구현 예시
 
-현재 백테스터의 `Indicator` 프로토콜은 Polars DataFrame을 받는다. SATS는 이전 bar 상태에 강하게 의존하므로 내부에서는 list로 뽑아 순차 계산하는 방식이 적합하다.
+현재 백테스터의 `Indicator` 프로토콜은 Polars DataFrame을 받는다. SATS는 이전 bar 상태에 강하게 의존하므로 내부에서는 numpy array로 뽑아 순차 계산하는 방식이 적합하다. 기존 `FRAMAChannel`처럼 `to_numpy().astype(np.float64, copy=False)` 후 `_compute_sats_recursive(...)` helper에서 상태 루프를 돌리는 컨벤션을 따른다.
 
 ```python
 import math
 from dataclasses import dataclass
 
+import numpy as np
 import polars as pl
 
 
@@ -256,11 +259,15 @@ class SATSIndicator:
         ) + 10
 
     def compute(self, bars: pl.DataFrame) -> pl.DataFrame:
-        high = bars["high"].to_list()
-        low = bars["low"].to_list()
-        close = bars["close"].to_list()
-        volume = bars["volume"].to_list() if "volume" in bars.columns else [0.0] * bars.height
-        source = bars[self.cfg.source_col].to_list()
+        high = bars["high"].to_numpy().astype(np.float64, copy=False)
+        low = bars["low"].to_numpy().astype(np.float64, copy=False)
+        close = bars["close"].to_numpy().astype(np.float64, copy=False)
+        volume = (
+            bars["volume"].to_numpy().astype(np.float64, copy=False)
+            if "volume" in bars.columns
+            else np.zeros(bars.height, dtype=np.float64)
+        )
+        source = bars[self.cfg.source_col].to_numpy().astype(np.float64, copy=False)
 
         n = bars.height
         out = {
@@ -269,6 +276,12 @@ class SATSIndicator:
             "sats_er": [None] * n,
             "sats_vol_ratio": [None] * n,
             "sats_tqi": [None] * n,
+            "sats_tqi_er": [None] * n,
+            "sats_tqi_vol": [None] * n,
+            "sats_tqi_struct": [None] * n,
+            "sats_tqi_mom": [None] * n,
+            "sats_active_mult": [None] * n,
+            "sats_passive_mult": [None] * n,
             "sats_lower_band": [None] * n,
             "sats_upper_band": [None] * n,
             "sats_trend": [1] * n,
@@ -285,7 +298,13 @@ class SATSIndicator:
             "sats_ready": [False] * n,
         }
 
-        # TODO: implement Wilder ATR, RSI, pivot-high/low helpers.
+        # TODO Phase 1 helper implementations:
+        # - wilder_rsi(close, length)
+        # - efficiency_ratio(close, length)
+        # - volume_zscore(volume, length)
+        # - pivot_high(high, left, right) / pivot_low(low, left, right)
+        # - rolling highest/lowest helpers for TQI structure
+        # Existing stateless ATR uses SMA, so SATS must keep its own Wilder ATR helper.
         raw_atr = wilder_atr(high, low, close, length=resolve_sats_preset(self.cfg)[0])
         rsi = wilder_rsi(close, length=resolve_sats_preset(self.cfg)[3])
 
@@ -310,19 +329,48 @@ class SATSIndicator:
             # Pine의 series[i]와 var 상태를 맞추기 위해 이 루프 안에서 이전 값을 직접 참조한다.
             out["sats_ready"][i] = i >= warmup
 
-        return pl.DataFrame(out)
+        return pl.DataFrame(
+            out,
+            schema={
+                "sats_atr": pl.Float64,
+                "sats_raw_atr": pl.Float64,
+                "sats_er": pl.Float64,
+                "sats_vol_ratio": pl.Float64,
+                "sats_tqi": pl.Float64,
+                "sats_tqi_er": pl.Float64,
+                "sats_tqi_vol": pl.Float64,
+                "sats_tqi_struct": pl.Float64,
+                "sats_tqi_mom": pl.Float64,
+                "sats_active_mult": pl.Float64,
+                "sats_passive_mult": pl.Float64,
+                "sats_lower_band": pl.Float64,
+                "sats_upper_band": pl.Float64,
+                "sats_trend": pl.Int8,
+                "sats_st_line": pl.Float64,
+                "sats_signal": pl.Int8,
+                "sats_entry_price": pl.Float64,
+                "sats_sl_price": pl.Float64,
+                "sats_tp1_price": pl.Float64,
+                "sats_tp2_price": pl.Float64,
+                "sats_tp3_price": pl.Float64,
+                "sats_tp1_r": pl.Float64,
+                "sats_tp2_r": pl.Float64,
+                "sats_tp3_r": pl.Float64,
+                "sats_ready": pl.Boolean,
+            },
+        )
 ```
 
-보조 지표는 TradingView parity를 위해 Pine과 같은 smoothing을 사용한다.
+보조 지표는 TradingView parity를 위해 Pine과 같은 smoothing을 사용한다. 아래는 일부 helper 예시이며, Phase 1 구현에는 위 TODO helper 전체가 필요하다.
 
 ```python
-def wilder_rma(values: list[float | None], length: int) -> list[float | None]:
-    out: list[float | None] = [None] * len(values)
+def wilder_rma(values: np.ndarray, length: int) -> np.ndarray:
+    out = np.full(len(values), np.nan, dtype=np.float64)
     acc = 0.0
     count = 0
 
     for i, value in enumerate(values):
-        if value is None or math.isnan(value):
+        if math.isnan(value):
             continue
         if count < length:
             acc += value
@@ -331,19 +379,18 @@ def wilder_rma(values: list[float | None], length: int) -> list[float | None]:
                 out[i] = acc / length
             continue
         prev = out[i - 1]
-        assert prev is not None
         out[i] = (prev * (length - 1) + value) / length
 
     return out
 
 
 def wilder_atr(
-    high: list[float],
-    low: list[float],
-    close: list[float],
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
     length: int,
-) -> list[float | None]:
-    tr: list[float | None] = [None] * len(close)
+) -> np.ndarray:
+    tr = np.full(len(close), np.nan, dtype=np.float64)
     for i in range(len(close)):
         if i == 0:
             tr[i] = high[i] - low[i]
@@ -493,26 +540,39 @@ class SATSStrategy(BaseStrategy):
     def __init__(
         self,
         *,
-        timeframe: str = "1h",
         preset: str = "Auto",
         timeframe_minutes: int = 60,
         margin_pct: Decimal | float | str = Decimal("0.05"),
         single_tp_level: Literal["tp1", "tp2", "tp3"] = "tp3",
         allow_short: bool = True,
-        reverse_signal_policy: Literal["ignore_while_position", "close_then_reverse"] = "ignore_while_position",
         trade_max_age_bars: int | None = 100,
-        # Add the rest of SATSConfig params here as primitive kwargs.
+        atr_len: int = 13,
+        base_mult: float = 2.0,
+        er_length: int = 20,
+        quality_strength: float = 0.4,
+        sl_atr_mult: float = 1.5,
+        tp1_r: float = 1.0,
+        tp2_r: float = 2.0,
+        tp3_r: float = 3.0,
+        # Implementation rule: expose every SATSConfig tuning field as a primitive
+        # kwarg here, or group them under one validated dict before constructing SATSConfig.
     ) -> None:
-        self.timeframe = timeframe
         self.margin_pct = Decimal(str(margin_pct))
         self.single_tp_level = single_tp_level
         self.allow_short = allow_short
-        self.reverse_signal_policy = reverse_signal_policy
         self.trade_max_age_bars = trade_max_age_bars
         self._sats = SATSIndicator(
             SATSConfig(
                 preset=preset,  # type: ignore[arg-type] if Literal narrowing is not added
                 timeframe_minutes=timeframe_minutes,
+                atr_len=atr_len,
+                base_mult=base_mult,
+                er_length=er_length,
+                quality_strength=quality_strength,
+                sl_atr_mult=sl_atr_mult,
+                tp1_r=tp1_r,
+                tp2_r=tp2_r,
+                tp3_r=tp3_r,
                 trade_max_age_bars=trade_max_age_bars or 0,
             )
         )
@@ -522,7 +582,7 @@ class SATSStrategy(BaseStrategy):
 
     def on_bar(self, ctx: StrategyContext) -> list[OrderIntent]:
         symbol = ctx.primary_symbol
-        tf = self.timeframe or ctx.primary_timeframe
+        tf = ctx.primary_timeframe
 
         if self.trade_max_age_bars is not None and ctx.has_position(symbol):
             held = ctx.bars_held(symbol)
@@ -550,7 +610,7 @@ class SATSStrategy(BaseStrategy):
 
         signal = int(row["sats_signal"])
         has_pos = ctx.has_position(symbol)
-        if has_pos and self.reverse_signal_policy == "ignore_while_position":
+        if has_pos:
             return []
 
         if signal == -1 and not self.allow_short:
@@ -585,7 +645,7 @@ class SATSStrategy(BaseStrategy):
 
 Multi-leg 최종형에서는 `BracketSpec` 대신 `MultiBracketSpec`를 쓰거나, 엔진 확장 전 임시로 전략이 포지션 확인 후 reduce-only limit/stop을 직접 생성하는 방식을 선택할 수 있다. 다만 후자는 OCO 그룹, SL 수량 축소, TP sibling cancel을 전략이 직접 관리해야 하므로 엔진 확장보다 복잡해지기 쉽다.
 
-위 예시는 구조 설명용이다. `reverse_signal_policy="close_then_reverse"`는 실제 구현에서 기존 포지션 close intent와 신규 entry intent의 순서, `allow_flip` 설정, 같은 봉 처리 정책을 함께 확정한 뒤 추가한다. `preset` Literal 타입 처리는 `SATSConfig` 생성 전에 별도 validator로 정리하는 편이 좋다.
+위 예시는 구조 설명용이다. 실제 구현에서는 `SATSConfig`의 모든 튜닝 필드를 primitive kwarg로 노출하거나, `sats_params: dict[str, Any]`를 받아 validator로 검증한 뒤 `SATSConfig(**validated)`로 넘긴다. 일부 필드만 forward하면 YAML에서 튜닝할 수 없는 숨은 기본값이 생긴다. Phase 1은 `ignore_while_position`만 지원한다. `close_then_reverse`는 기존 포지션 close intent와 신규 entry intent의 순서, `allow_flip` 설정, 같은 봉 처리 정책을 함께 확정한 뒤 Phase 2 이후 추가한다. `preset` Literal 타입 처리는 `SATSConfig` 생성 전에 별도 validator로 정리하는 편이 좋다.
 
 ## 8. Pine parity 체크리스트
 
@@ -599,6 +659,7 @@ TradingView와 신호를 최대한 맞추려면 다음 항목을 고정한다.
 - `barstate.isconfirmed`는 백테스터가 닫힌 봉만 전달한다고 가정한다.
 - signal entry price는 우선 Pine과 동일하게 signal candle close로 산출한다.
 - 실제 체결은 BacktestEngine 정책을 따른다. 기본 `next_bar_open`이면 Pine label 가격과 체결 가격이 다를 수 있다.
+- 현재 엔진은 entry가 체결된 같은 봉의 high/low로 bracket TP/SL 체결을 즉시 시도한다. 타이트한 SL/TP, 5m 이하 timeframe에서는 진입 봉에서 바로 stop-out 또는 TP 체결이 발생할 수 있으며, TradingView 시각화와 체감상 차이가 날 수 있다.
 - 동일 봉 TP/SL 충돌은 `BarPathModel.PESSIMISTIC`를 기본값으로 둔다.
 
 ## 9. 구현 단계
@@ -608,6 +669,7 @@ TradingView와 신호를 최대한 맞추려면 다음 항목을 고정한다.
 - `backtester/src/backtester/indicators/stateful/sats.py` 추가
 - `SATSConfig`, `SATSIndicator` 구현
 - ATR, RSI, ER, volume z-score, pivot helper 구현
+- 출력 컬럼과 dtype은 Section 3 스키마와 Section 5 `pl.DataFrame(schema=...)`를 일치시킨다.
 - TQI, adaptive multiplier, asymmetric SuperTrend 구현
 - `sats_signal`, `sats_sl_price`, `sats_tp*_price` 출력
 - 단위 테스트: known small OHLCV에서 warmup, trend flip, TP/SL 산출 검증
@@ -651,7 +713,7 @@ entry_fill_policy: next_bar_open
 signal_price_for_plan: signal_close
 tp_weights: [0.3333, 0.3333, 0.3334]
 same_bar_conflict: pessimistic_sl_first
-reverse_signal_policy: close_then_reverse 또는 ignore_while_position
+reverse_signal_policy: ignore_while_position only in Phase 1
 initial_tp_execution_mode: single_tp 또는 multi_leg_engine_extension
 single_tp_level: tp3
 ```
@@ -663,7 +725,7 @@ entry_fill_policy = next_bar_open
 signal_price_for_plan = signal_close
 tp_weights = [0.3333, 0.3333, 0.3334]
 same_bar_conflict = pessimistic_sl_first
-reverse_signal_policy = ignore_while_position
+reverse_signal_policy = ignore_while_position only in Phase 1
 initial_tp_execution_mode = single_tp
 single_tp_level = tp3
 ```
