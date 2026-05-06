@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -441,7 +442,7 @@ def test_resolve_preset_crypto_24_7() -> None:
         {"pivot_len": 0},
     ],
 )
-def test_config_validation_rejects_invalid(kwargs: dict[str, object]) -> None:
+def test_config_validation_rejects_invalid(kwargs: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         SATSConfig(**kwargs)
 

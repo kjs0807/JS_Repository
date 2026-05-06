@@ -443,6 +443,11 @@ class SATSIndicator:
         return "sats"
 
     def required_warmup_bars(self) -> int:
+        # Pine §6: warmup = max(WARMUP_FLOOR, atr_len, er_len, rsi_len,
+        # vol_len, pivot_len*2+1, mom_len, struct_len) + 10. ``atr_baseline_len``
+        # is intentionally excluded — Pine uses ``nz(sma(rawAtr, baseline), rawAtr)``
+        # which falls back to raw ATR while the SMA is still warming, so the
+        # baseline window does not gate signal emission.
         atr_len, _base_mult, er_len, rsi_len, _sl_mult = resolve_sats_preset(self.cfg)
         return (
             max(
@@ -454,7 +459,6 @@ class SATSIndicator:
                 self.cfg.pivot_len * 2 + 1,
                 self.cfg.tqi_mom_len,
                 self.cfg.tqi_struct_len,
-                self.cfg.atr_baseline_len,
             )
             + 10
         )

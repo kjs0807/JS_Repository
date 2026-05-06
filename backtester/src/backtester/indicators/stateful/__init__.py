@@ -8,5 +8,6 @@ hence the separate ``stateful`` namespace. Indicators here still satisfy the
 """
 
 from backtester.indicators.stateful.frama import FRAMAChannel
+from backtester.indicators.stateful.sats import SATSConfig, SATSIndicator
 
-__all__ = ["FRAMAChannel"]
+__all__ = ["FRAMAChannel", "SATSConfig", "SATSIndicator"]
