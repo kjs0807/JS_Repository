@@ -20,8 +20,10 @@ Coverage:
    this bar (E1 one-TP-per-bar rule); TP2 / TP3 / resized SL stay active.
 7. Partial sum (0.3+0.3+0.3 = 0.9): all TPs fill → SL stays active with
    ``remaining`` = parent_qty * 0.1 (not cancelled).
-8. Side-aware ordering: long with descending TP prices raises ValueError
-   at spawn time (caught and logged via ORDER_REJECTED).
+8. Side-aware ordering: long with descending TP prices (and short with
+   ascending) is rejected at intent processing time via ORDER_REJECTED
+   so the position never opens — the engine refuses to fill an entry
+   whose bracket spec would violate the side-aware TP order invariant.
 9. Regression: existing single-TP ``BracketSpec`` path still works (one
    ORDER_RESIZED test).
 """
@@ -34,7 +36,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 import polars as pl
-import pytest
 
 from backtester.core.config import BacktestConfig, DataSourceConfig
 from backtester.core.context import StrategyContext
@@ -458,9 +459,10 @@ def test_partial_sum_bracket_leaves_sl_active_after_all_tps(
 # ---------- 8. Side-aware ordering invariant -------------------------------
 
 
-def test_long_with_descending_tp_prices_raises(tmp_path: Path) -> None:
-    """Long entry with TP prices sorted descending must fail at spawn time
-    — TP1 should be the closest above entry, not the farthest."""
+def test_long_with_descending_tp_prices_is_rejected(tmp_path: Path) -> None:
+    """Long entry with TP prices sorted descending must be rejected at
+    intent processing time so the entry never fills — TP1 should be the
+    closest above entry, not the farthest."""
     bracket = MultiBracketSpec(
         take_profits=(
             TakeProfitLeg(price=Decimal("130"), size_fraction=Decimal("0.5")),
@@ -472,12 +474,22 @@ def test_long_with_descending_tp_prices_raises(tmp_path: Path) -> None:
         _flat_bar(100.0),
         {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
     ]
-    with pytest.raises(ValueError, match="ascending"):
-        _run(tmp_path, bars, bracket, side="buy")
+    events_path = _run(tmp_path, bars, bracket, side="buy")
+
+    rejected = _events(events_path, EventType.ORDER_REJECTED)
+    assert len(rejected) == 1
+    reason = rejected[0].payload["reason"]
+    assert "bracket" in reason and "ascending" in reason
+    # No fills, no order_added (entry never opened).
+    fills = _events(events_path, EventType.FILL)
+    assert fills == []
+    added = _events(events_path, EventType.ORDER_ADDED)
+    assert added == []
 
 
-def test_short_with_ascending_tp_prices_raises(tmp_path: Path) -> None:
-    """Short entry: TP prices must be descending so TP1 is closest below entry."""
+def test_short_with_ascending_tp_prices_is_rejected(tmp_path: Path) -> None:
+    """Short entry: TP prices must be descending so TP1 is closest below
+    entry. Bad spec is rejected via ORDER_REJECTED, no entry fills."""
     bracket = MultiBracketSpec(
         take_profits=(
             TakeProfitLeg(price=Decimal("85"), size_fraction=Decimal("0.5")),
@@ -489,8 +501,14 @@ def test_short_with_ascending_tp_prices_raises(tmp_path: Path) -> None:
         _flat_bar(100.0),
         {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
     ]
-    with pytest.raises(ValueError, match="descending"):
-        _run(tmp_path, bars, bracket, side="sell")
+    events_path = _run(tmp_path, bars, bracket, side="sell")
+
+    rejected = _events(events_path, EventType.ORDER_REJECTED)
+    assert len(rejected) == 1
+    reason = rejected[0].payload["reason"]
+    assert "bracket" in reason and "descending" in reason
+    fills = _events(events_path, EventType.FILL)
+    assert fills == []
 
 
 # ---------- 9. Regression — single-TP BracketSpec still works ----------------

@@ -947,8 +947,61 @@ class BacktestEngine:
             )
         return snapshots
 
+    @staticmethod
+    def _validate_bracket_for_intent(intent: OrderIntent) -> str | None:
+        """Phase 3 — side-aware ``MultiBracketSpec`` invariants.
+
+        Construction-time validation in :class:`MultiBracketSpec` cannot enforce
+        TP price ordering because the spec doesn't know the entry's side. Once
+        we see ``intent.side`` we can require:
+
+        - long entry (``side == "buy"``) → TP prices ascending so
+          ``take_profits[0]`` is the closest TP above entry.
+        - short entry (``side == "sell"``) → TP prices descending so
+          ``take_profits[0]`` is the closest TP below entry.
+
+        Returns ``None`` when there's nothing to flag (BracketSpec / no bracket /
+        valid MultiBracketSpec) or a human-readable reason string for the
+        ``ORDER_REJECTED`` payload otherwise.
+        """
+        from backtester.core.orders import MultiBracketSpec
+
+        bracket = intent.bracket
+        if not isinstance(bracket, MultiBracketSpec):
+            return None
+        prices = [leg.price for leg in bracket.take_profits]
+        if intent.side == "buy":
+            if prices != sorted(prices):
+                return (
+                    f"long-side MultiBracketSpec TP prices must be ascending; "
+                    f"got {prices}"
+                )
+        else:  # sell
+            if prices != sorted(prices, reverse=True):
+                return (
+                    f"short-side MultiBracketSpec TP prices must be descending; "
+                    f"got {prices}"
+                )
+        return None
+
     def _handle_intent(self, intent: OrderIntent, ts: datetime) -> None:
         assert self._event_log is not None
+        # Phase 3 — side-aware bracket invariants (cheap, no I/O). Reject the
+        # entry intent here so the position never opens; otherwise we'd have
+        # to abort mid-bar after the fill, leaving an unprotected position.
+        bracket_reason = self._validate_bracket_for_intent(intent)
+        if bracket_reason is not None:
+            self._event_log.append(
+                Event(
+                    ts=ts,
+                    type=EventType.ORDER_REJECTED,
+                    payload={
+                        "intent": intent,
+                        "reason": f"bracket: {bracket_reason}",
+                    },
+                )
+            )
+            return
         try:
             instrument = self.instrument_registry.get(intent.symbol)
         except Exception as e:  # noqa: BLE001 — InstrumentError를 거부 사유로 기록
@@ -1351,20 +1404,24 @@ class BacktestEngine:
         )
         parent_qty = abs(parent_fill.size)
 
-        # Side-aware TP price-order check.
+        # Side-aware TP price-order invariant — already enforced at intent
+        # processing time via :meth:`_validate_bracket_for_intent`, which
+        # rejects bad specs before the entry order is created. Keep the
+        # check as defense-in-depth: if a bracket reaches this point it
+        # has already been validated, so a violation here is a bug.
         prices = [leg.price for leg in bracket.take_profits]
         if close_side == "sell":  # long entry — TPs above, ascending.
-            if prices != sorted(prices):
-                raise ValueError(
-                    f"long-side MultiBracketSpec TP prices must be ascending; "
-                    f"got {prices} for parent {parent_order.id!r}"
-                )
+            assert prices == sorted(prices), (
+                f"_validate_bracket_for_intent should have rejected "
+                f"non-ascending long-side TPs; got {prices} for parent "
+                f"{parent_order.id!r}"
+            )
         else:  # short entry — TPs below, descending.
-            if prices != sorted(prices, reverse=True):
-                raise ValueError(
-                    f"short-side MultiBracketSpec TP prices must be descending; "
-                    f"got {prices} for parent {parent_order.id!r}"
-                )
+            assert prices == sorted(prices, reverse=True), (
+                f"_validate_bracket_for_intent should have rejected "
+                f"non-descending short-side TPs; got {prices} for parent "
+                f"{parent_order.id!r}"
+            )
 
         bracket_group_id = f"bracket_{parent_order.id}"
         spawned: list[Order] = []
