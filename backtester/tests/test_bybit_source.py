@@ -317,8 +317,10 @@ def _make_paged_single(
 ]:
     """Bybit v5 단일 페이지 호출 시뮬레이션 — 한 번에 ``page_limit`` 봉까지만 반환.
 
-    cursor 가 진행해야 다음 페이지를 뽑을 수 있으므로 페이지네이션 검증에 적합.
-    호출 인자를 ``calls`` 리스트로 기록.
+    Bybit v5 는 ``[start, end]`` 안에서 newest-first 로 최대 ``limit`` 봉을
+    돌려주므로 mock 도 ``in_range`` 의 마지막 ``page_limit`` 개 (= 가장 최근) 만
+    잘라 반환한다 — ``_paginate_klines`` 가 cursor_end 를 줄여가며 backward
+    walk 한다는 계약을 그대로 검증.
     """
     calls: list[tuple[datetime, datetime]] = []
 
@@ -330,7 +332,7 @@ def _make_paged_single(
             (r for r in rows if s_ms <= r.open_time_ms <= e_ms),
             key=lambda r: r.open_time_ms,
         )
-        return in_range[:page_limit]
+        return in_range[-page_limit:]
 
     return _single, calls
 
@@ -350,9 +352,11 @@ def test_paginate_klines_walks_through_pages_when_data_exceeds_limit() -> None:
     assert len(set(ts)) == 2500
     # 3 회 호출 (1000 + 1000 + 500)
     assert len(calls) == 3
-    # cursor 가 진행하는지 — 두 번째 호출의 start 가 첫 호출 start 보다 미래
-    assert calls[1][0] > calls[0][0]
-    assert calls[2][0] > calls[1][0]
+    # cursor 가 backward 진행 — 두 번째 호출의 end 가 첫 호출 end 보다 과거.
+    # 모든 호출의 start 는 동일 (range 시작점은 고정).
+    assert calls[1][1] < calls[0][1]
+    assert calls[2][1] < calls[1][1]
+    assert calls[0][0] == calls[1][0] == calls[2][0]
 
 
 def test_paginate_klines_terminates_on_empty_response() -> None:
@@ -391,11 +395,12 @@ def test_paginate_klines_max_iter_safety() -> None:
     counter = [0]
 
     def _single(start: datetime, end: datetime) -> list[BybitKlineRow]:
-        # 항상 1 개의 새 봉만 반환 → cursor 가 ms 단위로만 진행
+        # 항상 1 개의 새 봉만 반환 (가장 최근 위치 = cursor_end). backward
+        # cursor 가 ms 단위로만 줄어들어 365일 range 가 5 iter 안에 끝나지 못함.
         counter[0] += 1
         return [
             BybitKlineRow(
-                open_time_ms=int(start.timestamp() * 1000),
+                open_time_ms=int(end.timestamp() * 1000),
                 open=100.0,
                 high=101.0,
                 low=99.0,

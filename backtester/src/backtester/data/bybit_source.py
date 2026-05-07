@@ -16,6 +16,7 @@ DataSource 인터페이스 (``fetch`` → ``(pl.DataFrame, GapReport)``) 는 ``P
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -85,6 +86,12 @@ _PAGINATION_MAX_ITER = 100
 SinglePageFetcher = Callable[[datetime, datetime], list[BybitKlineRow]]
 
 
+_PAGE_THROTTLE_S = 0.15
+"""Sleep between consecutive paginated kline calls (Bybit hits 10006 rate
+limit at ~10 requests/sec from a single IP). 0.15s × ≤100 max_iter pages =
+worst-case 15s of throttling per ``fetch`` — acceptable for backfills."""
+
+
 def _paginate_klines(
     single_page: SinglePageFetcher,
     *,
@@ -94,34 +101,50 @@ def _paginate_klines(
 ) -> list[BybitKlineRow]:
     """Bybit v5 kline 1000-봉/콜 제약을 우회하는 페이지네이터.
 
-    cursor 를 ``start`` 부터 받은 마지막 봉 +1ms 로 진행. 빈 응답 / 진척 없음 / 끝 도달 시
-    종료. ``max_iter`` 초과 시 ``DataError`` (무한 루프 방어).
+    Bybit v5 는 ``[start, end]`` 안에서 *newest-first* 로 최대 ``limit`` 봉을
+    반환한다 (즉, 1년 × 30m 같이 1000봉을 초과하는 범위에서는 가장 최근 1000봉만
+    돌아온다). 따라서 cursor 는 *end 를 줄여가며* 과거로 walk: 매 페이지의 가장
+    오래된 봉 ``- 1ms`` 를 다음 호출의 ``end`` 로 사용한다.
+
+    종료 조건:
+    - 빈 응답
+    - 모든 봉이 이미 본 봉 (진척 없음 — overlapping window 방어)
+    - 가장 오래된 봉 ts 가 ``start`` 에 도달
+    - ``cursor_end < start`` (range 소진)
+    - ``max_iter`` 초과 → ``DataError`` (무한 루프 방어)
 
     출력은 dedup + ascending sort.
     """
     out: list[BybitKlineRow] = []
     seen_ts: set[int] = set()
-    cursor = start
-    end_ms = _to_epoch_ms(end)
+    cursor_end = end
+    start_ms = _to_epoch_ms(start)
     for _ in range(max_iter):
-        if cursor > end:
+        if cursor_end < start:
             break
-        page = single_page(cursor, end)
+        page = single_page(start, cursor_end)
         if not page:
             break
         new_rows = [r for r in page if r.open_time_ms not in seen_ts]
         if not new_rows:
-            # 전부 이미 본 봉 → 진척 없음 (overlapping 응답) → 종료
+            # 전부 이미 본 봉 → 진척 없음 → 종료
             break
         for r in new_rows:
             seen_ts.add(r.open_time_ms)
         out.extend(new_rows)
-        last_ts_ms = max(r.open_time_ms for r in new_rows)
-        if last_ts_ms >= end_ms:
+        oldest_ts_ms = min(r.open_time_ms for r in new_rows)
+        if oldest_ts_ms <= start_ms:
             break
-        cursor = datetime.fromtimestamp(
-            (last_ts_ms + 1) / 1000, tz=timezone.utc
+        cursor_end = datetime.fromtimestamp(
+            (oldest_ts_ms - 1) / 1000, tz=timezone.utc
         )
+        # Throttle between consecutive single_page calls — Bybit's IP-based
+        # 10006 rate limit ("Too many visits") trips at ~10 req/s. Tested
+        # paginators don't see this delay (mocked single_page returns
+        # immediately, so test wall time impact is the actual sleep × pages).
+        # Set to 0 in tests via monkeypatching ``_PAGE_THROTTLE_S`` if needed.
+        if _PAGE_THROTTLE_S > 0:
+            time.sleep(_PAGE_THROTTLE_S)
     else:
         raise DataError(
             f"_paginate_klines exceeded max_iter={max_iter} for "
