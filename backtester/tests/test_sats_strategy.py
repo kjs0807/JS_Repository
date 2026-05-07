@@ -52,6 +52,7 @@ from backtester.core.errors import ConfigError
 from backtester.core.orders import (
     BracketSpec,
     ClosePosition,
+    MultiBracketSpec,
     TargetNotionalPct,
 )
 from backtester.events.reader import EventLogReader
@@ -229,11 +230,13 @@ def test_required_indicators_returns_single_sats_instance() -> None:
 # ---------- 2. long entry ---------------------------------------------------
 
 
-def test_long_signal_emits_long_market_intent_with_bracket() -> None:
+def test_long_signal_emits_long_market_intent_with_multi_bracket() -> None:
+    """Phase 4 default: long signal emits MultiBracketSpec with 3 TP legs +
+    SL, fractions per the 1/3 Pine split."""
     bars = _bars_from_close([100.0] * 30)
     ind = _make_sats_df(30, last_signal=1)
     ctx = _ctx(bars_df=bars, ind_df=ind)
-    s = SATSStrategy(notional_pct=Decimal("0.07"), single_tp_level="tp3")
+    s = SATSStrategy(notional_pct=Decimal("0.07"))
     intents = s.on_bar(ctx)
     assert len(intents) == 1
     intent = intents[0]
@@ -241,7 +244,36 @@ def test_long_signal_emits_long_market_intent_with_bracket() -> None:
     assert intent.type == "market"
     assert isinstance(intent.size_spec, TargetNotionalPct)
     assert intent.size_spec.notional_pct == Decimal("0.07")
-    # SATS Phase 1/2 only emits single-TP BracketSpec — narrow for mypy.
+    assert isinstance(intent.bracket, MultiBracketSpec)
+    assert intent.bracket.stop_loss_price == Decimal("95.0")
+    legs = intent.bracket.take_profits
+    assert len(legs) == 3
+    assert legs[0].price == Decimal("105.0")
+    assert legs[1].price == Decimal("110.0")
+    assert legs[2].price == Decimal("115.0")
+    assert legs[0].label == "tp1"
+    assert legs[1].label == "tp2"
+    assert legs[2].label == "tp3"
+    # Default Pine 1/3 split (last leg absorbs the rounding).
+    assert legs[0].size_fraction == Decimal("0.3333")
+    assert legs[1].size_fraction == Decimal("0.3333")
+    assert legs[2].size_fraction == Decimal("0.3334")
+    assert intent.reason == "sats_buy"
+
+
+def test_long_signal_with_single_mode_emits_bracket_spec() -> None:
+    """Legacy ``tp_split_mode='single'`` keeps the old BracketSpec path."""
+    bars = _bars_from_close([100.0] * 30)
+    ind = _make_sats_df(30, last_signal=1)
+    ctx = _ctx(bars_df=bars, ind_df=ind)
+    s = SATSStrategy(
+        notional_pct=Decimal("0.07"),
+        tp_split_mode="single",
+        single_tp_level="tp3",
+    )
+    intents = s.on_bar(ctx)
+    assert len(intents) == 1
+    intent = intents[0]
     assert isinstance(intent.bracket, BracketSpec)
     assert intent.bracket.take_profit_price == Decimal("115.0")
     assert intent.bracket.stop_loss_price == Decimal("95.0")
@@ -252,18 +284,25 @@ def test_long_signal_emits_long_market_intent_with_bracket() -> None:
 # ---------- 3. short entry --------------------------------------------------
 
 
-def test_short_signal_emits_short_market_intent() -> None:
+def test_short_signal_emits_short_multi_bracket() -> None:
+    """Phase 4 default: short signal emits MultiBracketSpec with descending
+    TP prices (closest first) — engine's side-aware ordering check passes."""
     bars = _bars_from_close([100.0] * 30)
     ind = _make_sats_df(30, last_signal=-1, short=True)
     ctx = _ctx(bars_df=bars, ind_df=ind)
-    s = SATSStrategy(allow_short=True, single_tp_level="tp3")
+    s = SATSStrategy(allow_short=True)
     intents = s.on_bar(ctx)
     assert len(intents) == 1
     intent = intents[0]
     assert intent.side == "sell"
-    assert isinstance(intent.bracket, BracketSpec)
+    assert isinstance(intent.bracket, MultiBracketSpec)
     assert intent.bracket.stop_loss_price == Decimal("105.0")
-    assert intent.bracket.take_profit_price == Decimal("85.0")
+    legs = intent.bracket.take_profits
+    assert [leg.price for leg in legs] == [
+        Decimal("95.0"),
+        Decimal("90.0"),
+        Decimal("85.0"),
+    ]
     assert intent.reason == "sats_sell"
 
 
@@ -328,7 +367,9 @@ def test_single_tp_level_picks_correct_price(
     bars = _bars_from_close([100.0] * 30)
     ind = _make_sats_df(30, last_signal=1)
     ctx = _ctx(bars_df=bars, ind_df=ind)
-    s = SATSStrategy(single_tp_level=level)
+    # ``tp_split_mode='single'`` must be set explicitly to exercise the
+    # legacy ``single_tp_level`` selector — Phase 4 default is multi.
+    s = SATSStrategy(tp_split_mode="single", single_tp_level=level)
     intents = s.on_bar(ctx)
     assert len(intents) == 1
     assert isinstance(intents[0].bracket, BracketSpec)
@@ -461,11 +502,31 @@ def test_registry_rejects_invalid_preset_with_config_error() -> None:
         {"single_tp_level": "tp9"},
         {"notional_pct": "0"},
         {"notional_pct": "-0.01"},
+        # Phase 4 — split-mode validation.
+        {"tp_split_mode": "weird"},
+        {"tp_size_fractions": ("0.5", "0.5")},  # only 2 legs, need 3
+        {"tp_size_fractions": ("0.4", "0.4", "0.4")},  # sum > 1
+        {"tp_size_fractions": ("0.0", "0.5", "0.5")},  # zero leg
     ],
 )
 def test_constructor_rejects_invalid(kwargs: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         SATSStrategy(**kwargs)
+
+
+def test_tp_size_fractions_under_one_leaves_residual_position() -> None:
+    """A 0.3+0.3+0.3 split is valid (sum < 1) — engine keeps the leftover
+    10% under the SL until manual close. Strategy just forwards the spec."""
+    bars = _bars_from_close([100.0] * 30)
+    ind = _make_sats_df(30, last_signal=1)
+    ctx = _ctx(bars_df=bars, ind_df=ind)
+    s = SATSStrategy(
+        tp_size_fractions=(Decimal("0.3"), Decimal("0.3"), Decimal("0.3")),
+    )
+    intents = s.on_bar(ctx)
+    bracket = intents[0].bracket
+    assert isinstance(bracket, MultiBracketSpec)
+    assert bracket.total_fraction == Decimal("0.9")
 
 
 def test_constructor_treats_zero_or_negative_max_age_as_disabled() -> None:
@@ -595,15 +656,30 @@ def test_engine_run_produces_fills_via_registry(tmp_path: Path) -> None:
 # ---------- BracketSpec sanity ---------------------------------------------
 
 
-def test_long_bracket_carries_no_time_stop_bars() -> None:
-    """SATS spec recommends NOT setting BracketSpec.time_stop_bars (engine
-    ignores it; strategy owns timeout). Defensive guard."""
+def test_single_mode_bracket_carries_no_time_stop_bars() -> None:
+    """Single-TP path: ``BracketSpec.time_stop_bars`` must stay ``None`` —
+    SATS spec recommends NOT putting timeout there since the engine ignores
+    it and the strategy owns timeout via ``ctx.bars_held()``."""
     bars = _bars_from_close([100.0] * 30)
     ind = _make_sats_df(30, last_signal=1)
     ctx = _ctx(bars_df=bars, ind_df=ind)
-    s = SATSStrategy(trade_max_age_bars=50)
+    s = SATSStrategy(trade_max_age_bars=50, tp_split_mode="single")
     intents = s.on_bar(ctx)
     assert len(intents) == 1
     bracket = intents[0].bracket
     assert isinstance(bracket, BracketSpec)
     assert bracket.time_stop_bars is None
+
+
+def test_multi_mode_bracket_has_no_time_stop_bars_field() -> None:
+    """Phase 4 default: ``MultiBracketSpec`` doesn't expose
+    ``time_stop_bars`` at all — the field was intentionally omitted to
+    prevent the dual-source-of-truth that ``BracketSpec`` allowed."""
+    bars = _bars_from_close([100.0] * 30)
+    ind = _make_sats_df(30, last_signal=1)
+    ctx = _ctx(bars_df=bars, ind_df=ind)
+    s = SATSStrategy(trade_max_age_bars=50)  # default tp_split_mode='multi'
+    intents = s.on_bar(ctx)
+    bracket = intents[0].bracket
+    assert isinstance(bracket, MultiBracketSpec)
+    assert not hasattr(bracket, "time_stop_bars")

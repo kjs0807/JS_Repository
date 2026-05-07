@@ -1,29 +1,37 @@
-"""SATS strategy (Phase 2) — single-symbol entry / single-TP bracket / time stop.
+"""SATS strategy — single-symbol entry, multi-leg or single-TP bracket, time stop.
 
-Reads the precomputed ``sats_*`` indicator columns and emits a single market
-entry per signal flip with one ``BracketSpec`` carrying the chosen TP leg
-and the pivot-anchored SL. Time stop runs through ``ctx.bars_held()`` +
-``ClosePosition()`` — ``BracketSpec.time_stop_bars`` is *not* set because the
-engine does not auto-process it (PR K spec) and we keep timeout responsibility
-on the strategy as the single source of truth.
+Reads the precomputed ``sats_*`` indicator columns and emits one market
+entry per signal flip. Phase 4 default is the Pine-parity 1/3 split via
+``MultiBracketSpec`` (three reduce-only TP limits + one shared SL stop).
+Single-TP mode is preserved for legacy / smoke configurations.
 
-Phase 1 simplifications versus the full SATS doc plan:
+Behavioural notes:
 
+- Time stop runs through ``ctx.bars_held()`` + ``ClosePosition()`` —
+  ``BracketSpec.time_stop_bars`` / ``MultiBracketSpec`` keep timeout
+  responsibility off the engine (single source of truth on the strategy).
 - ``reverse_signal_policy`` is hard-coded to ``ignore_while_position``.
   Same-bar close-then-reverse needs ordering decisions for partial fills,
-  flip-on-fill semantics, and a ``BarPathModel`` interaction that we want
-  to settle in Phase 3 alongside multi-leg TP.
-- Multi-leg TP is out of scope. ``single_tp_level`` picks one of
-  ``tp1``/``tp2``/``tp3`` as the bracket TP — the doc flags TP3 as a smoke
-  default that does not match Pine's 1/3 split P&L.
+  flip-on-fill semantics, and a ``BarPathModel`` interaction that the doc
+  defers to a later phase.
+- Sizing uses ``TargetNotionalPct(notional_pct=...)``. ``RiskManager``
+  enforces ``max_total_exposure`` separately. When leverage-aware sizing
+  becomes needed, follow ``BBKCLegacyCompatStrategy``'s
+  ``TargetMarginPct(margin_pct=, leverage=)`` pattern with distinct
+  fields rather than overloading ``notional_pct``.
 
-Sizing uses ``TargetNotionalPct(notional_pct=...)`` directly. The kwarg is
-exposed on the strategy as ``notional_pct`` (not ``margin_pct``) so the name
-matches the underlying SizeSpec — leverage is not modelled here, and
-``RiskManager`` enforces ``max_total_exposure`` separately. When
-leverage-aware sizing becomes needed, follow ``BBKCLegacyCompatStrategy``'s
-``TargetMarginPct(margin_pct=, leverage=)`` pattern (separate fields,
-distinct semantics) rather than overloading ``notional_pct``.
+TP split modes:
+
+- ``tp_split_mode="multi"`` (default) — emit ``MultiBracketSpec`` with
+  three TP legs at the indicator's ``sats_tp1_price`` / ``sats_tp2_price``
+  / ``sats_tp3_price`` and fractions ``tp_size_fractions`` (default
+  ``(0.3333, 0.3333, 0.3334)`` so the 1/3 Pine split works as a clean
+  ``Decimal``). Long entries naturally produce ascending TP prices and
+  short entries descending — both satisfy the engine's side-aware
+  ordering invariant without extra effort.
+- ``tp_split_mode="single"`` — legacy path, emits ``BracketSpec`` using
+  ``single_tp_level`` to pick one of tp1/tp2/tp3. Useful for smoke
+  comparisons or for paths that explicitly do not want partial fills.
 """
 
 from __future__ import annotations
@@ -35,7 +43,9 @@ from backtester.core.context import StrategyContext
 from backtester.core.orders import (
     BracketSpec,
     ClosePosition,
+    MultiBracketSpec,
     OrderIntent,
+    TakeProfitLeg,
     TargetNotionalPct,
 )
 from backtester.indicators.base import Indicator
@@ -57,6 +67,14 @@ _VALID_PRESETS: tuple[str, ...] = (
 )
 _VALID_TP_MODES: tuple[str, ...] = ("Fixed", "Dynamic")
 _VALID_SINGLE_TP: tuple[str, ...] = ("tp1", "tp2", "tp3")
+_VALID_TP_SPLIT_MODES: tuple[str, ...] = ("multi", "single")
+
+# Pine 1/3 split — last leg absorbs the rounding (0.3333+0.3333+0.3334=1.0000).
+_DEFAULT_TP_FRACTIONS: tuple[Decimal, Decimal, Decimal] = (
+    Decimal("0.3333"),
+    Decimal("0.3333"),
+    Decimal("0.3334"),
+)
 
 _TP_PRICE_COL = {
     "tp1": "sats_tp1_price",
@@ -113,6 +131,8 @@ class SATSStrategy(BaseStrategy):
         dyn_tp_floor_r1: float = 0.5,
         dyn_tp_ceil_r3: float = 8.0,
         # ── Strategy-only kwargs ─────────────────────────────────────────
+        tp_split_mode: str = "multi",
+        tp_size_fractions: tuple[Decimal | float | str, ...] | None = None,
         single_tp_level: str = "tp3",
         allow_short: bool = True,
         notional_pct: Decimal | float | str = Decimal("0.05"),
@@ -126,6 +146,11 @@ class SATSStrategy(BaseStrategy):
             raise ValueError(
                 f"tp_mode must be one of {_VALID_TP_MODES}, got {tp_mode!r}"
             )
+        if tp_split_mode not in _VALID_TP_SPLIT_MODES:
+            raise ValueError(
+                f"tp_split_mode must be one of {_VALID_TP_SPLIT_MODES}, "
+                f"got {tp_split_mode!r}"
+            )
         if single_tp_level not in _VALID_SINGLE_TP:
             raise ValueError(
                 f"single_tp_level must be one of {_VALID_SINGLE_TP}, "
@@ -137,6 +162,31 @@ class SATSStrategy(BaseStrategy):
         if trade_max_age_bars is not None and trade_max_age_bars <= 0:
             # Treat 0 / negative as disabled, matching BBKCLegacy convention.
             trade_max_age_bars = None
+
+        # Multi-leg fractions normalize once at __init__ so on_bar can build
+        # the BracketSpec hot-path without re-parsing per signal. Only used
+        # when tp_split_mode == "multi"; ignored otherwise.
+        fractions: tuple[Decimal, ...]
+        if tp_size_fractions is None:
+            fractions = _DEFAULT_TP_FRACTIONS
+        else:
+            fractions = tuple(Decimal(str(f)) for f in tp_size_fractions)
+        if tp_split_mode == "multi":
+            if len(fractions) != 3:
+                raise ValueError(
+                    f"tp_split_mode='multi' requires exactly 3 size fractions "
+                    f"(one per sats_tp1/2/3 column); got {len(fractions)}"
+                )
+            for f in fractions:
+                if f <= Decimal(0):
+                    raise ValueError(
+                        f"tp_size_fractions entries must be > 0, got {f}"
+                    )
+            total = sum(fractions, Decimal(0))
+            if total > Decimal(1) or total <= Decimal(0):
+                raise ValueError(
+                    f"sum of tp_size_fractions must be in (0, 1], got {total}"
+                )
 
         cfg = SATSConfig(
             preset=cast(PresetT, preset),
@@ -182,6 +232,10 @@ class SATSStrategy(BaseStrategy):
             trade_max_age_bars=trade_max_age_bars or 0,
         )
         self._sats = SATSIndicator(cfg)
+        self.tp_split_mode: Literal["multi", "single"] = cast(
+            Literal["multi", "single"], tp_split_mode
+        )
+        self.tp_size_fractions: tuple[Decimal, ...] = fractions
         self.single_tp_level: Literal["tp1", "tp2", "tp3"] = cast(
             Literal["tp1", "tp2", "tp3"], single_tp_level
         )
@@ -236,11 +290,13 @@ class SATSStrategy(BaseStrategy):
             return []
 
         sl_raw = ind["sats_sl_price"][last_idx]
-        tp_raw = ind[_TP_PRICE_COL[self.single_tp_level]][last_idx]
-        if sl_raw is None or tp_raw is None:
+        if sl_raw is None:
             return []
 
         side: Literal["buy", "sell"] = "buy" if signal == 1 else "sell"
+        bracket = self._build_bracket(ind, last_idx, sl_raw)
+        if bracket is None:
+            return []
         return [
             OrderIntent(
                 symbol=symbol,
@@ -248,12 +304,60 @@ class SATSStrategy(BaseStrategy):
                 type="market",
                 size_spec=TargetNotionalPct(notional_pct=self.notional_pct),
                 reason="sats_buy" if signal == 1 else "sats_sell",
-                bracket=BracketSpec(
-                    take_profit_price=Decimal(str(tp_raw)),
-                    stop_loss_price=Decimal(str(sl_raw)),
-                ),
+                bracket=bracket,
             )
         ]
+
+    def _build_bracket(
+        self,
+        ind: object,
+        last_idx: int,
+        sl_raw: object,
+    ) -> BracketSpec | MultiBracketSpec | None:
+        """Construct the per-signal bracket spec.
+
+        ``multi`` mode reads all three ``sats_tpN_price`` columns and pairs
+        them with the strategy's ``tp_size_fractions``. The indicator already
+        emits ascending TP prices for long signals and descending for short,
+        so the engine's side-aware ordering invariant in
+        :meth:`BacktestEngine._validate_bracket_for_intent` is satisfied
+        without further work.
+
+        ``single`` mode preserves legacy behavior — one ``BracketSpec`` with
+        the TP picked by ``single_tp_level``.
+        """
+        if self.tp_split_mode == "multi":
+            tp1_raw = ind["sats_tp1_price"][last_idx]  # type: ignore[index]
+            tp2_raw = ind["sats_tp2_price"][last_idx]  # type: ignore[index]
+            tp3_raw = ind["sats_tp3_price"][last_idx]  # type: ignore[index]
+            if tp1_raw is None or tp2_raw is None or tp3_raw is None:
+                return None
+            tp_prices = (tp1_raw, tp2_raw, tp3_raw)
+            legs = tuple(
+                TakeProfitLeg(
+                    price=Decimal(str(p)),
+                    size_fraction=frac,
+                    label=label,
+                )
+                for label, p, frac in zip(
+                    ("tp1", "tp2", "tp3"),
+                    tp_prices,
+                    self.tp_size_fractions,
+                    strict=True,
+                )
+            )
+            return MultiBracketSpec(
+                take_profits=legs,
+                stop_loss_price=Decimal(str(sl_raw)),
+            )
+        # single mode
+        tp_raw = ind[_TP_PRICE_COL[self.single_tp_level]][last_idx]  # type: ignore[index]
+        if tp_raw is None:
+            return None
+        return BracketSpec(
+            take_profit_price=Decimal(str(tp_raw)),
+            stop_loss_price=Decimal(str(sl_raw)),
+        )
 
 
 __all__ = ["SATSStrategy"]
