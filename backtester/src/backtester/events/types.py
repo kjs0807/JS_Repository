@@ -29,6 +29,7 @@ class EventType(str, Enum):
     ORDER_MODIFIED = "order_modified"
     ORDER_EXPIRED = "order_expired"
     ORDER_REJECTED = "order_rejected"
+    ORDER_RESIZED = "order_resized"  # Phase 3 — multi-leg SL auto-shrink on TP fill
     FILL = "fill"
     SETTLE = "settle"
     LIQUIDATION = "liquidation"  # PR P
@@ -69,3 +70,40 @@ class IntentCreatedPayload:
     decision_ts: datetime
     bar_timestamp: datetime
     bar_close_price: Decimal
+
+
+@dataclass(frozen=True)
+class OrderResizedPayload:
+    """ORDER_RESIZED 이벤트 payload (Phase 3 multi-leg bracket).
+
+    Engine 이 TP leg 체결 직후 같은 ``bracket_group_id`` 의 protector SL 의
+    ``sized_quantity`` 를 leg 의 ``size_fraction`` 만큼 줄일 때 emit. resize 는
+    ``OrderBook.resize`` 가 강제하는 invariant ``bracket_role == "protector_sl"`` 에
+    의해 SL child 에만 허용 — TP leg 이나 non-bracket 주문에 대한 resize 는
+    ``ValueError`` 로 차단된다.
+
+    payload 필드:
+
+    - ``order_id``: 줄어든 SL child 의 OrderBook id.
+    - ``bracket_group_id``: SL 가 속한 multi-leg bracket group.
+    - ``trigger_order_id``: 이번 resize 를 유발한 TP leg 의 order id (downstream
+      replay/audit 용 — ``Fill`` 자체에는 별도 id 가 없고 ``(order_id, timestamp)``
+      로 식별 가능).
+    - ``old_sized_quantity`` / ``new_sized_quantity``: SL 의 ``sized_quantity``
+      변경 전후. ``old - new`` 가 이번 cycle 에서 청산된 단위 수 (= TP leg 의
+      ``size_fraction × parent_fill.size``).
+    - ``old_remaining`` / ``new_remaining``: 이미 partial fill 이 있었던 경우
+      적용 전후 의 ``remaining``. resize 는 ``new_remaining = new_sized -
+      already_filled`` 로 재계산 — caller 가 partial-fill 이력을 직접 읽지 않아도
+      되도록 함께 기록.
+    - ``reason``: 자유형 문자열 (``"tp_leg_filled"`` 기본).
+    """
+
+    order_id: str
+    bracket_group_id: str
+    trigger_order_id: str
+    old_sized_quantity: Decimal
+    new_sized_quantity: Decimal
+    old_remaining: Decimal
+    new_remaining: Decimal
+    reason: str = "tp_leg_filled"

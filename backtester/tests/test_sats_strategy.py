@@ -241,7 +241,8 @@ def test_long_signal_emits_long_market_intent_with_bracket() -> None:
     assert intent.type == "market"
     assert isinstance(intent.size_spec, TargetNotionalPct)
     assert intent.size_spec.notional_pct == Decimal("0.07")
-    assert intent.bracket is not None
+    # SATS Phase 1/2 only emits single-TP BracketSpec — narrow for mypy.
+    assert isinstance(intent.bracket, BracketSpec)
     assert intent.bracket.take_profit_price == Decimal("115.0")
     assert intent.bracket.stop_loss_price == Decimal("95.0")
     assert intent.bracket.time_stop_bars is None  # no double-source-of-truth
@@ -260,7 +261,7 @@ def test_short_signal_emits_short_market_intent() -> None:
     assert len(intents) == 1
     intent = intents[0]
     assert intent.side == "sell"
-    assert intent.bracket is not None
+    assert isinstance(intent.bracket, BracketSpec)
     assert intent.bracket.stop_loss_price == Decimal("105.0")
     assert intent.bracket.take_profit_price == Decimal("85.0")
     assert intent.reason == "sats_sell"
@@ -330,7 +331,7 @@ def test_single_tp_level_picks_correct_price(
     s = SATSStrategy(single_tp_level=level)
     intents = s.on_bar(ctx)
     assert len(intents) == 1
-    assert intents[0].bracket is not None
+    assert isinstance(intents[0].bracket, BracketSpec)
     assert intents[0].bracket.take_profit_price == expected_tp
 
 

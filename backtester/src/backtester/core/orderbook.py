@@ -35,6 +35,10 @@ OrderState = Literal[
     "rejected",
 ]
 
+# Phase 3 — bracket child role for ``MultiBracketSpec`` spawned children.
+# Single-TP ``BracketSpec`` children stay role-less and use ``oco_group_id``.
+BracketRole = Literal["tp_leg", "protector_sl"]
+
 _ACTIVE_STATES: frozenset[OrderState] = frozenset({"pending", "partially_filled"})
 _TERMINAL_STATES: frozenset[OrderState] = frozenset(
     {"filled", "cancelled", "expired", "rejected"}
@@ -61,6 +65,14 @@ class Order:
     # 으로 reduce-only TP/SL child 를 생성. children 은 같은 oco_group_id 를 공유.
     parent_order_id: str | None = None
     oco_group_id: str | None = None
+    # Phase 3 (multi-leg bracket) — children spawned from ``MultiBracketSpec``
+    # carry a separate ``bracket_group_id`` (distinct from ``oco_group_id`` so
+    # the existing OCO sibling-cancel path doesn't fire on TP fills) plus a
+    # role tag and, for TPs, the leg's index in the spec tuple. Single-TP
+    # ``BracketSpec`` children leave these None and fall back to OCO behavior.
+    bracket_group_id: str | None = None
+    bracket_role: BracketRole | None = None
+    tp_leg_index: int | None = None
 
     @property
     def is_active(self) -> bool:
@@ -86,6 +98,9 @@ class OrderBook:
         *,
         parent_order_id: str | None = None,
         oco_group_id: str | None = None,
+        bracket_group_id: str | None = None,
+        bracket_role: BracketRole | None = None,
+        tp_leg_index: int | None = None,
     ) -> Order:
         """새 주문을 'pending' 상태로 등록.
 
@@ -167,6 +182,9 @@ class OrderBook:
             remaining=sized_quantity,
             parent_order_id=parent_order_id,
             oco_group_id=oco_group_id,
+            bracket_group_id=bracket_group_id,
+            bracket_role=bracket_role,
+            tp_leg_index=tp_leg_index,
         )
         self._orders[order_id] = order
         return order
@@ -328,6 +346,57 @@ class OrderBook:
             order.state = "filled"
         else:
             order.state = "partially_filled"
+
+    def resize(
+        self,
+        order_id: str,
+        new_sized_quantity: Decimal,
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+        """Phase 3: shrink a protective SL's ``sized_quantity`` after a TP leg
+        fills, so the SL only covers the remaining position.
+
+        Invariants:
+        - Order must exist and be active (pending / partially_filled).
+        - Order must carry ``bracket_role == "protector_sl"``. Resizing TP legs
+          or non-bracket children would be a logic error elsewhere — fail loud.
+        - ``new_sized_quantity > 0`` (use ``cancel`` to terminate; resizing to
+          zero collapses the order's invariant that filled bookkeeping uses
+          positive sizes).
+        - ``new_sized_quantity >= already_filled`` — resizing below the amount
+          already executed would imply rewriting history.
+
+        Returns ``(old_sized_quantity, new_sized_quantity, old_remaining,
+        new_remaining)`` so the engine can build an ``ORDER_RESIZED`` event
+        payload without re-reading the order.
+        """
+        order = self._orders.get(order_id)
+        if order is None:
+            raise KeyError(f"Order not found: {order_id!r}")
+        if not order.is_active:
+            raise RuntimeError(
+                f"Cannot resize non-active order: {order_id!r} state={order.state}"
+            )
+        if order.bracket_role != "protector_sl":
+            raise ValueError(
+                f"resize is only allowed for protector_sl bracket children; "
+                f"order {order_id!r} has bracket_role={order.bracket_role!r}"
+            )
+        if new_sized_quantity <= 0:
+            raise ValueError(
+                f"new_sized_quantity must be > 0 (use cancel to terminate); "
+                f"got {new_sized_quantity}"
+            )
+        already_filled = order.sized_quantity - order.remaining
+        if new_sized_quantity < already_filled:
+            raise ValueError(
+                f"new_sized_quantity {new_sized_quantity} < already_filled "
+                f"{already_filled} for order {order_id!r}"
+            )
+        old_sized = order.sized_quantity
+        old_remaining = order.remaining
+        order.sized_quantity = new_sized_quantity
+        order.remaining = new_sized_quantity - already_filled
+        return (old_sized, new_sized_quantity, old_remaining, order.remaining)
 
     def get(self, order_id: str) -> Order:
         if order_id not in self._orders:

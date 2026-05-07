@@ -66,6 +66,7 @@ from backtester.events.types import (
     Event,
     EventType,
     IntentCreatedPayload,
+    OrderResizedPayload,
     SnapshotReason,
 )
 from backtester.execution.funding import FundingProcessor
@@ -655,9 +656,22 @@ class BacktestEngine:
             self.orderbook.get_active()
         )
         spawned_in_iteration: list[Order] = []
+        # Phase 3 E1 — track multi-leg bracket groups that already saw a fill
+        # this bar, regardless of role. Subsequent orders in the same group
+        # are skipped within the same iteration. PESSIMISTIC: SL fires first
+        # (cancels TPs via _handle_sl_fill — set membership becomes redundant
+        # but harmless). OPTIMISTIC: closest TP fires first; remaining TP legs
+        # AND the (now-resized) SL stay active for the next bar instead of
+        # double-filling on the same bar's path.
+        filled_bracket_groups: set[str] = set()
         for order in active_at_start:
             if not order.is_active:
                 continue  # PR L: sibling fill 이 이 주문을 cancel 했을 수 있음
+            if (
+                order.bracket_group_id is not None
+                and order.bracket_group_id in filled_bracket_groups
+            ):
+                continue  # E1: this multi-leg group already had a fill this bar.
             snap = snapshots.get(order.intent.symbol)
             if snap is None:
                 continue
@@ -671,8 +685,15 @@ class BacktestEngine:
             self._event_log.append(Event(ts=ts, type=EventType.FILL, payload=fill))
             self._emit_snapshot(ts, "fill")  # implicit, 주기 무관
 
-            # PR L: OCO sibling 자동 cancel.
-            if order.oco_group_id is not None:
+            # Phase 3 multi-leg bracket: SL resize on TP fill / TP cancel on SL fill.
+            if order.bracket_group_id is not None:
+                if order.bracket_role == "tp_leg":
+                    self._handle_tp_leg_fill(order, fill, ts)
+                elif order.bracket_role == "protector_sl":
+                    self._handle_sl_fill(order, ts)
+                filled_bracket_groups.add(order.bracket_group_id)
+            elif order.oco_group_id is not None:
+                # PR L: single-TP/SL OCO sibling 자동 cancel.
                 self._cancel_oco_siblings(order, ts)
 
             # PR K: bracket child 생성 (entry 만, 즉 parent_order_id is None).
@@ -688,7 +709,8 @@ class BacktestEngine:
         # PR U: 같은 봉 entry-bar bracket child 체결 시도. 진입 봉의 high/low 가
         # TP/SL 에 도달하면 같은 봉에서 체결 가능하도록 — crypto 급변 봉에서 SL 보다
         # 다음 봉까지 살아남는 갭을 차단. OCO + BarPathModel 로 같은 봉 양쪽 도달 시
-        # 우선순위 결정 (PR L 정책 동일).
+        # 우선순위 결정 (PR L 정책 동일). Phase 3: filled_bracket_groups 가 같은 entry
+        # bar 동안 multi-leg 의 one-fill-per-bar 규칙을 강제.
         if spawned_in_iteration:
             children_ordered = self._order_oco_aware_active_list(
                 [c for c in spawned_in_iteration if c.is_active]
@@ -696,6 +718,11 @@ class BacktestEngine:
             for order in children_ordered:
                 if not order.is_active:
                     continue  # OCO sibling cancel 로 비활성화 가능
+                if (
+                    order.bracket_group_id is not None
+                    and order.bracket_group_id in filled_bracket_groups
+                ):
+                    continue
                 snap = snapshots.get(order.intent.symbol)
                 if snap is None:
                     continue
@@ -710,7 +737,13 @@ class BacktestEngine:
                     Event(ts=ts, type=EventType.FILL, payload=fill)
                 )
                 self._emit_snapshot(ts, "fill")
-                if order.oco_group_id is not None:
+                if order.bracket_group_id is not None:
+                    if order.bracket_role == "tp_leg":
+                        self._handle_tp_leg_fill(order, fill, ts)
+                    elif order.bracket_role == "protector_sl":
+                        self._handle_sl_fill(order, ts)
+                    filled_bracket_groups.add(order.bracket_group_id)
+                elif order.oco_group_id is not None:
                     self._cancel_oco_siblings(order, ts)
 
         # 4. mark-to-market — post-fill 포지션을 봉 close 로 mark + equity_history 적재.
@@ -990,7 +1023,12 @@ class BacktestEngine:
         sized_quantity: Decimal,
         ts: datetime,
     ) -> None:
-        """ORDER_ADDED 이벤트 발행. PR K: parent_order_id / oco_group_id payload 포함."""
+        """ORDER_ADDED 이벤트 발행.
+
+        PR K: parent_order_id / oco_group_id payload 포함.
+        Phase 3: bracket_group_id / bracket_role / tp_leg_index 필드 추가 — multi-leg
+        TP children 의 그룹 / 역할 / 순서를 EventLog 만으로 재구성 가능하게.
+        """
         assert self._event_log is not None
         self._event_log.append(
             Event(
@@ -1002,6 +1040,9 @@ class BacktestEngine:
                     "sized_quantity": sized_quantity,
                     "parent_order_id": order.parent_order_id,
                     "oco_group_id": order.oco_group_id,
+                    "bracket_group_id": order.bracket_group_id,
+                    "bracket_role": order.bracket_role,
+                    "tp_leg_index": order.tp_leg_index,
                 },
             )
         )
@@ -1110,13 +1151,18 @@ class BacktestEngine:
     # ---------- PR L: OCO + Same-Bar Path 우선순위 -------------------------
 
     def _order_oco_aware_active_list(self, active: list[Order]) -> list[Order]:
-        """OCO group 내부 fill 시도 순서 결정 (BarPathModel 기반).
+        """OCO / bracket group 내부 fill 시도 순서 결정 (BarPathModel 기반).
 
-        - 같은 ``oco_group_id`` 안에서 PESSIMISTIC (default) → stop 먼저, limit 나중.
-        - OPTIMISTIC → limit 먼저, stop 나중.
-        - OPEN_TO_CLOSE / OHLC_ORDER → PESSIMISTIC 과 동일하게 보수적으로 stop 먼저
-          (후속 PR 에서 정밀 모델링).
-        - OCO group 외 주문은 원래 순서 유지. group 들은 고유 group_id sort 로 결정성 보장.
+        - 같은 ``oco_group_id`` (single-TP/SL bracket, user OCO) 안에서:
+          * PESSIMISTIC (default) → stop 먼저, limit 나중.
+          * OPTIMISTIC → limit 먼저, stop 나중.
+        - 같은 ``bracket_group_id`` (Phase 3 multi-leg) 안에서:
+          * PESSIMISTIC → SL stop 먼저, TP legs 는 ``tp_leg_index`` 오름차순 (가까운 TP 먼저).
+          * OPTIMISTIC → TP legs 가까운 순 먼저, SL 마지막.
+        - 두 group_id 는 별도 namespace ("oco_..." vs "bracket_...") 라 충돌하지 않음.
+          하나만 set 인 경우가 일반 — entry order 는 둘 다 None.
+        - OPEN_TO_CLOSE / OHLC_ORDER → PESSIMISTIC 과 동일 (보수적 stop 우선).
+        - 그룹 외 주문은 원래 순서 유지. 그룹들은 ``(prefix, group_id)`` sort 로 결정성 보장.
 
         반환: 평탄화된 새 리스트.
         """
@@ -1127,19 +1173,24 @@ class BacktestEngine:
         bpm = self.config.bar_path_model
         groups: dict[str | None, list[Order]] = defaultdict(list)
         for o in active:
-            groups[o.oco_group_id].append(o)
+            # bracket_group_id 우선 (Phase 3 multi-leg 가 별도 namespace).
+            key = o.bracket_group_id or o.oco_group_id
+            groups[key].append(o)
 
-        def _sort_key(o: Order) -> int:
-            # PESSIMISTIC / 기본: stop 우선 (불리한 가격 먼저)
+        def _sort_key(o: Order) -> tuple[int, int]:
+            # 1차 — type priority: PESSIMISTIC stop 먼저, OPTIMISTIC limit 먼저.
             if bpm == _BPM.OPTIMISTIC:
-                return 0 if o.intent.type == "limit" else 1
-            return 0 if o.intent.type == "stop" else 1
+                type_pri = 0 if o.intent.type == "limit" else 1
+            else:
+                type_pri = 0 if o.intent.type == "stop" else 1
+            # 2차 — multi-leg 안에서 가까운 TP (tp_leg_index 작음) 먼저.
+            leg_pri = o.tp_leg_index if o.tp_leg_index is not None else 0
+            return (type_pri, leg_pri)
 
         out: list[Order] = []
         # 결정성: ungrouped (None) 먼저, 그 다음 group_id 알파벳 정렬.
         ungrouped = groups.pop(None, [])
         out.extend(ungrouped)
-        # group_id is non-None 으로 좁힘 (None 은 위에서 pop 됨)
         non_null_keys: list[str] = [k for k in groups if k is not None]
         for gid in sorted(non_null_keys):
             out.extend(sorted(groups[gid], key=_sort_key))
@@ -1177,7 +1228,30 @@ class BacktestEngine:
         parent_fill: Any,
         ts: datetime,
     ) -> list[Order]:
-        """PR K: entry fill 직후 reduce-only TP/SL child 생성.
+        """Phase 3 dispatcher: route ``BracketSpec`` vs ``MultiBracketSpec``.
+
+        - ``BracketSpec`` (PR K) → single TP / SL pair sharing one
+          ``oco_group_id``. Sibling fill cancels the other (PR L).
+        - ``MultiBracketSpec`` (Phase 3) → N TP legs + 1 protective SL sharing
+          one ``bracket_group_id`` (separate namespace from OCO). TP fill
+          shrinks SL via :meth:`_handle_tp_leg_fill`; SL fill cancels every
+          remaining TP leg via :meth:`_handle_sl_fill`.
+        """
+        from backtester.core.orders import MultiBracketSpec
+
+        bracket = parent_order.intent.bracket
+        assert bracket is not None
+        if isinstance(bracket, MultiBracketSpec):
+            return self._spawn_multi_bracket_children(parent_order, parent_fill, ts)
+        return self._spawn_single_bracket_children(parent_order, parent_fill, ts)
+
+    def _spawn_single_bracket_children(
+        self,
+        parent_order: Order,
+        parent_fill: Any,
+        ts: datetime,
+    ) -> list[Order]:
+        """PR K: entry fill 직후 reduce-only TP/SL child 생성 (single-TP path).
 
         - long entry (buy fill): TP = sell limit, SL = sell stop. 둘 다 reduce_only=True.
         - short entry (sell fill): TP = buy limit, SL = buy stop.
@@ -1186,12 +1260,11 @@ class BacktestEngine:
         - child size = ``parent_fill.size`` (전체 부분체결 수량).
         - reason = ``"bracket_tp:{parent.id}" / "bracket_sl:{parent.id}"``.
         """
-        from backtester.core.orders import OrderIntent, TargetUnits
+        from backtester.core.orders import BracketSpec, OrderIntent, TargetUnits
 
         bracket = parent_order.intent.bracket
-        assert bracket is not None
+        assert isinstance(bracket, BracketSpec)
         symbol = parent_order.intent.symbol
-        # close 방향: parent buy → sell child / parent sell → buy child.
         close_side: Literal["buy", "sell"] = (
             "sell" if parent_fill.side == "buy" else "buy"
         )
@@ -1240,6 +1313,203 @@ class BacktestEngine:
             spawned.append(sl_order)
 
         return spawned
+
+    def _spawn_multi_bracket_children(
+        self,
+        parent_order: Order,
+        parent_fill: Any,
+        ts: datetime,
+    ) -> list[Order]:
+        """Phase 3: spawn N TP legs + 1 protective SL for ``MultiBracketSpec``.
+
+        Side-aware price-ordering invariant enforced here (rather than on the
+        spec itself, which doesn't know the entry side at construction time):
+
+        - long entry (close_side='sell') → TP prices must be ascending so that
+          ``take_profits[0]`` is the closest TP above entry.
+        - short entry (close_side='buy') → TP prices must be descending so that
+          ``take_profits[0]`` is the closest TP below entry.
+
+        TP leg sizing: ``leg_qty = parent_qty * leg.size_fraction``. When the
+        spec's ``total_fraction`` exactly equals 1, the last leg absorbs any
+        residual rounding so the sum of leg sizes matches ``parent_qty``
+        exactly. When ``total_fraction < 1``, the residual ``parent_qty *
+        (1 - total_fraction)`` stays under the SL (no auto-close for that
+        slice — strategy owns it).
+        """
+        from backtester.core.orders import (
+            MultiBracketSpec,
+            OrderIntent,
+            TargetUnits,
+        )
+
+        bracket = parent_order.intent.bracket
+        assert isinstance(bracket, MultiBracketSpec)
+        symbol = parent_order.intent.symbol
+        close_side: Literal["buy", "sell"] = (
+            "sell" if parent_fill.side == "buy" else "buy"
+        )
+        parent_qty = abs(parent_fill.size)
+
+        # Side-aware TP price-order check.
+        prices = [leg.price for leg in bracket.take_profits]
+        if close_side == "sell":  # long entry — TPs above, ascending.
+            if prices != sorted(prices):
+                raise ValueError(
+                    f"long-side MultiBracketSpec TP prices must be ascending; "
+                    f"got {prices} for parent {parent_order.id!r}"
+                )
+        else:  # short entry — TPs below, descending.
+            if prices != sorted(prices, reverse=True):
+                raise ValueError(
+                    f"short-side MultiBracketSpec TP prices must be descending; "
+                    f"got {prices} for parent {parent_order.id!r}"
+                )
+
+        bracket_group_id = f"bracket_{parent_order.id}"
+        spawned: list[Order] = []
+        n_legs = len(bracket.take_profits)
+        full_split = bracket.total_fraction == Decimal(1)
+        accumulated = Decimal(0)
+
+        for i, leg in enumerate(bracket.take_profits):
+            if full_split and i == n_legs - 1:
+                # Last leg absorbs rounding so sum == parent_qty exactly.
+                leg_qty = parent_qty - accumulated
+            else:
+                leg_qty = parent_qty * leg.size_fraction
+            accumulated += leg_qty
+            label = leg.label or f"tp{i + 1}"
+            tp_intent = OrderIntent(
+                symbol=symbol,
+                side=close_side,
+                type="limit",
+                size_spec=TargetUnits(units=leg_qty),
+                limit_price=leg.price,
+                reason=f"bracket_tp:{parent_order.id}:{label}",
+                reduce_only=True,
+            )
+            tp_order = self.orderbook.add(
+                tp_intent,
+                leg_qty,
+                ts,
+                parent_order_id=parent_order.id,
+                bracket_group_id=bracket_group_id,
+                bracket_role="tp_leg",
+                tp_leg_index=i,
+            )
+            self._emit_order_added(tp_order, leg_qty, ts)
+            spawned.append(tp_order)
+
+        if bracket.stop_loss_price is not None:
+            sl_intent = OrderIntent(
+                symbol=symbol,
+                side=close_side,
+                type="stop",
+                size_spec=TargetUnits(units=parent_qty),
+                stop_price=bracket.stop_loss_price,
+                reason=f"bracket_sl:{parent_order.id}",
+                reduce_only=True,
+            )
+            sl_order = self.orderbook.add(
+                sl_intent,
+                parent_qty,
+                ts,
+                parent_order_id=parent_order.id,
+                bracket_group_id=bracket_group_id,
+                bracket_role="protector_sl",
+            )
+            self._emit_order_added(sl_order, parent_qty, ts)
+            spawned.append(sl_order)
+
+        return spawned
+
+    def _handle_tp_leg_fill(
+        self,
+        tp_order: Order,
+        tp_fill: Any,
+        ts: datetime,
+    ) -> None:
+        """Phase 3: TP leg fill → resize protective SL by ``tp_fill.size``.
+
+        Cancel the SL outright when the new size would reach zero or below
+        (i.e. all TPs filled, or partial sums exhaust parent_qty). ``OrderBook
+        .resize`` rejects ``new_sized_quantity <= 0`` to keep the ``filled``
+        bookkeeping invariant — so we explicitly cancel here when needed.
+        """
+        assert self._event_log is not None
+        gid = tp_order.bracket_group_id
+        if gid is None:
+            return
+        sl: Order | None = None
+        for o in self.orderbook.get_active():
+            if o.bracket_group_id == gid and o.bracket_role == "protector_sl":
+                sl = o
+                break
+        if sl is None:
+            return  # no SL in this multi-bracket
+        new_sized = sl.sized_quantity - tp_fill.size
+        if new_sized <= Decimal(0):
+            cancelled = self.orderbook.cancel(sl.id, ts)
+            if cancelled:
+                self._event_log.append(
+                    Event(
+                        ts=ts,
+                        type=EventType.ORDER_CANCELLED,
+                        payload={
+                            "order_id": sl.id,
+                            "reason": "bracket_position_closed",
+                            "bracket_group_id": gid,
+                            "trigger_order_id": tp_order.id,
+                        },
+                    )
+                )
+            return
+        old_sized, new_sized_actual, old_remaining, new_remaining = (
+            self.orderbook.resize(sl.id, new_sized)
+        )
+        self._event_log.append(
+            Event(
+                ts=ts,
+                type=EventType.ORDER_RESIZED,
+                payload=OrderResizedPayload(
+                    order_id=sl.id,
+                    bracket_group_id=gid,
+                    trigger_order_id=tp_order.id,
+                    old_sized_quantity=old_sized,
+                    new_sized_quantity=new_sized_actual,
+                    old_remaining=old_remaining,
+                    new_remaining=new_remaining,
+                    reason="tp_leg_filled",
+                ),
+            )
+        )
+
+    def _handle_sl_fill(self, sl_order: Order, ts: datetime) -> None:
+        """Phase 3: SL fill → cancel every remaining TP leg in same bracket group."""
+        assert self._event_log is not None
+        gid = sl_order.bracket_group_id
+        if gid is None:
+            return
+        for sibling in list(self.orderbook.get_active()):
+            if sibling.id == sl_order.id:
+                continue
+            if sibling.bracket_group_id != gid:
+                continue
+            cancelled = self.orderbook.cancel(sibling.id, ts)
+            if cancelled:
+                self._event_log.append(
+                    Event(
+                        ts=ts,
+                        type=EventType.ORDER_CANCELLED,
+                        payload={
+                            "order_id": sibling.id,
+                            "reason": "bracket_sl_filled",
+                            "bracket_group_id": gid,
+                            "filled_sl_id": sl_order.id,
+                        },
+                    )
+                )
 
     def _handle_action(self, action: OrderAction, ts: datetime) -> None:
         """PR D: cancel / modify / new 모두 활성. cancel/modify 는 EventLog 에 기록."""

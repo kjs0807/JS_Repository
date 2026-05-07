@@ -259,7 +259,7 @@ def test_break_up_emits_long_market_intent_with_bracket() -> None:
     assert intent.size_spec.leverage == Decimal("3")
     # BBKC parity: price-level pct = pct/leverage. tp_pct=0.06, leverage=3
     # → +2% above entry for buy.
-    assert intent.bracket is not None
+    assert isinstance(intent.bracket, BracketSpec)
     expected_tp = Decimal("100.0") * (Decimal("1") + Decimal("0.06") / Decimal("3"))
     expected_sl = Decimal("100.0") * (Decimal("1") - Decimal("0.07") / Decimal("3"))
     assert intent.bracket.take_profit_price == expected_tp
@@ -288,7 +288,7 @@ def test_break_dn_emits_short_market_intent_when_allow_short() -> None:
     intent = intents[0]
     assert intent.side == "sell"
     # Short bracket: TP below entry, SL above entry.
-    assert intent.bracket is not None
+    assert isinstance(intent.bracket, BracketSpec)
     expected_tp = Decimal("100.0") * (Decimal("1") - Decimal("0.06") / Decimal("3"))
     expected_sl = Decimal("100.0") * (Decimal("1") + Decimal("0.07") / Decimal("3"))
     assert intent.bracket.take_profit_price == expected_tp

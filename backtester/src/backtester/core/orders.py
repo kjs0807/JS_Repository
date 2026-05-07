@@ -120,6 +120,109 @@ class BracketSpec:
         )
 
 
+# ---------- Multi-leg bracket (Phase 3) -------------------------------------
+
+
+@dataclass(frozen=True)
+class TakeProfitLeg:
+    """One TP leg in a :class:`MultiBracketSpec` — partial reduce-only limit.
+
+    ``size_fraction`` is the share of the parent entry fill that this leg
+    closes (e.g. ``Decimal("0.3333")`` for a 1/3 split). ``label`` is an
+    opaque tag preserved on the child order's ``intent.reason`` for downstream
+    filtering / replay (e.g. ``"tp1"``).
+    """
+
+    price: Decimal
+    size_fraction: Decimal
+    label: str = ""
+
+    def __post_init__(self) -> None:
+        if self.size_fraction <= Decimal(0) or self.size_fraction > Decimal(1):
+            raise ValueError(
+                f"size_fraction must be in (0, 1], got {self.size_fraction}"
+            )
+        if self.price <= Decimal(0):
+            raise ValueError(f"price must be > 0, got {self.price}")
+
+
+@dataclass(frozen=True)
+class MultiBracketSpec:
+    """Multi-leg bracket — N partial TP legs + one protective SL stop.
+
+    Phase 3 alternative to :class:`BracketSpec` when the strategy wants to
+    scale out across multiple price targets. Engine spawns ``len(take_profits)``
+    reduce-only limits + (optionally) one reduce-only SL stop, all sharing a
+    single ``bracket_group_id``. Each TP fill triggers an SL resize event
+    (``ORDER_RESIZED``) that shrinks the SL by the leg's size fraction. SL
+    fill cancels every remaining TP. Last TP fill (when fractions sum to 1)
+    cancels the SL.
+
+    Notes:
+
+    - At least one TP leg is required; if you only need one TP / SL pair use
+      :class:`BracketSpec`.
+    - ``size_fraction`` sum must be in ``(0, 1]``. Sums below 1 leave a
+      "tail" of position that stays exposed under the SL — the strategy is
+      responsible for closing it (e.g. via opposite signal or time stop).
+    - ``time_stop_bars`` is intentionally omitted: the engine has never
+      auto-processed it on ``BracketSpec`` either, and bundling it here would
+      reintroduce the dual source of truth (cf. SATS strategy doc Section 6).
+      Strategies should run their own ``ctx.bars_held()`` + ``ClosePosition()``.
+    - Tuple order ("TP1 first, TP3 last") encodes proximity to the entry —
+      the engine treats ``take_profits[0]`` as the closest TP regardless of
+      long/short side. Side-aware monotonic-distance validation runs at spawn
+      time when the engine knows the entry's actual side.
+    """
+
+    take_profits: tuple[TakeProfitLeg, ...]
+    stop_loss_price: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        if not self.take_profits:
+            raise ValueError(
+                "MultiBracketSpec requires >= 1 TP legs; use BracketSpec for "
+                "SL-only or single-TP setups"
+            )
+        total = sum(
+            (leg.size_fraction for leg in self.take_profits), Decimal(0)
+        )
+        if total <= Decimal(0) or total > Decimal(1):
+            raise ValueError(
+                f"sum of TP size_fractions must be in (0, 1], got {total}"
+            )
+        # Distinct prices — Pine doesn't enforce this strictly but two TPs at
+        # the same price would mean one of them never adds informational value
+        # to the strategy and complicates same-bar tie-breaking. Reject early.
+        prices = [leg.price for leg in self.take_profits]
+        if len(set(prices)) != len(prices):
+            raise ValueError(
+                f"TP legs must have distinct prices, got {prices}"
+            )
+        if self.stop_loss_price is not None and self.stop_loss_price <= Decimal(0):
+            raise ValueError(
+                f"stop_loss_price must be > 0 if set, got {self.stop_loss_price}"
+            )
+
+    @property
+    def total_fraction(self) -> Decimal:
+        return sum(
+            (leg.size_fraction for leg in self.take_profits), Decimal(0)
+        )
+
+    def has_any(self) -> bool:
+        # MultiBracketSpec always has at least one TP leg by invariant.
+        return True
+
+
+BracketLike = BracketSpec | MultiBracketSpec
+"""Type alias for the union accepted by ``OrderIntent.bracket``.
+
+Engine branches on ``isinstance(intent.bracket, MultiBracketSpec)`` to pick
+the multi-leg spawn path; ``BracketSpec`` keeps the original single-TP / SL
+behavior for backwards compatibility (PR K)."""
+
+
 SizeSpec = (
     TargetWeight
     | TargetNotional
@@ -166,7 +269,9 @@ class OrderIntent:
     # reduce-only — 별도 표기 없이도 동일 의미로 처리.
     reduce_only: bool = False
     # PR K — entry intent 가 채워지면 Engine 이 reduce-only TP/SL child 자동 생성.
-    bracket: BracketSpec | None = None
+    # Phase 3: ``MultiBracketSpec`` 도 허용 — engine 이 isinstance 분기로 multi-leg
+    # spawn 경로를 탄다 (한 entry 에 N TP legs + 1 protective SL).
+    bracket: BracketSpec | MultiBracketSpec | None = None
 
 
 # ---------- OrderAction -----------------------------------------------------
