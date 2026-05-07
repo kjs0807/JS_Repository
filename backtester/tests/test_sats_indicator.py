@@ -106,6 +106,7 @@ EXPECTED_COLUMNS = [
     "sats_tp1_r",
     "sats_tp2_r",
     "sats_tp3_r",
+    "sats_signal_score",
     "sats_ready",
 ]
 

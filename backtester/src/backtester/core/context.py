@@ -277,11 +277,17 @@ OrderType = Literal["market", "limit", "stop", "stop_limit"]
 
 @dataclass(frozen=True)
 class OrderView:
-    """Read-only ``Order`` snapshot (PR A).
+    """Read-only ``Order`` snapshot (PR A + Phase 4 bracket extension).
 
     Engine 이 ``OrderBook.get_active()`` 결과로부터 매 ``on_bar`` 호출 시점에 새로
     만들어 주입. 전략이 mutate 시도하면 ``FrozenInstanceError``. 가격 필드는 ``intent``
     에서 가져오므로 Decimal | None.
+
+    Phase 4: bracket-aware fields (``bracket_group_id`` / ``bracket_role`` /
+    ``tp_leg_index``) are propagated from :class:`Order` so strategies can
+    locate their bracket children (SL by role, TP legs by index) without
+    parsing ``intent.reason`` strings. Single-bracket / non-bracket orders
+    leave these as ``None`` — same default as the ``Order`` dataclass.
     """
 
     id: str
@@ -294,6 +300,9 @@ class OrderView:
     submitted_at: datetime
     limit_price: Decimal | None
     stop_price: Decimal | None
+    bracket_group_id: str | None = None
+    bracket_role: str | None = None  # "tp_leg" | "protector_sl" | None
+    tp_leg_index: int | None = None
 
 
 @dataclass(frozen=True)

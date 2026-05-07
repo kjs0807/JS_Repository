@@ -236,7 +236,7 @@ def test_yaml_naive_datetime_rejected(tmp_path: Path) -> None:
 def test_data_source_config_rejects_unknown_type(tmp_path: Path) -> None:
     """Literal 은 런타임 강제 안 되지만 __post_init__ 가 ConfigError 로 차단."""
     with pytest.raises(ConfigError, match="DataSourceConfig.type"):
-        DataSourceConfig(base_dir=tmp_path, type="sqlite")  # type: ignore[arg-type]
+        DataSourceConfig(base_dir=tmp_path, type="hdf5")  # type: ignore[arg-type]
 
 
 def test_data_source_config_accepts_csv(tmp_path: Path) -> None:
@@ -245,10 +245,10 @@ def test_data_source_config_accepts_csv(tmp_path: Path) -> None:
 
 
 def test_yaml_data_source_unknown_type_rejected(tmp_path: Path) -> None:
-    """YAML 에서 type='sqlite' 같은 값이 들어오면 from_yaml 시점에 ConfigError."""
+    """YAML 에서 type='hdf5' 같은 미등록 값이 들어오면 from_yaml 시점에 ConfigError."""
     cfg = _full_config(tmp_path)
     d = cfg.to_dict()
-    d["data_source"]["type"] = "sqlite"
+    d["data_source"]["type"] = "hdf5"
     p = tmp_path / "bad.yaml"
     with open(p, "w", encoding="utf-8") as fp:
         yaml.safe_dump(d, fp)

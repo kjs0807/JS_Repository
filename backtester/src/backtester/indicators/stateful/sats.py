@@ -114,6 +114,15 @@ class SATSConfig:
     pivot_len: int = 3
     vol_len: int = 20
 
+    # ── Signal score subsystem (Pine display only — used by SATSStrategy
+    # ``min_signal_score`` gate when active) ───────────────────────────
+    rsi_ob: int = 70
+    rsi_os: int = 30
+    rsi_lookback: int = 20
+    use_vol_score: bool = True
+    use_rsi_score: bool = True
+    use_structure_score: bool = True
+
     # ── Risk / TP ──────────────────────────────────────────
     tp_mode: TPModeT = "Fixed"
     tp1_r: float = 1.0
@@ -278,6 +287,39 @@ def wilder_atr(
             abs(low[i] - close[i - 1]),
         )
     return wilder_rma(tr, length)
+
+
+def wilder_rsi(close: np.ndarray, length: int) -> np.ndarray:
+    """Wilder RSI (Pine ``ta.rsi`` parity).
+
+    NaN before ``length + 1`` bars (need ``length`` valid gain/loss diffs +
+    one priming bar). When the average loss is zero and gain > 0 → 100;
+    both zero → NaN (caller decides fallback, mirroring Pine ``nz``).
+    """
+    n = len(close)
+    out = np.full(n, np.nan, dtype=np.float64)
+    if n <= 1:
+        return out
+    diffs = np.diff(close)
+    gains = np.where(diffs > 0, diffs, 0.0)
+    losses = np.where(diffs < 0, -diffs, 0.0)
+    gains_full = np.concatenate(([np.nan], gains))
+    losses_full = np.concatenate(([np.nan], losses))
+    avg_gain = wilder_rma(gains_full, length)
+    avg_loss = wilder_rma(losses_full, length)
+    for t in range(n):
+        ag = avg_gain[t]
+        al = avg_loss[t]
+        if math.isnan(ag) or math.isnan(al):
+            continue
+        if al == 0.0 and ag == 0.0:
+            continue  # both sides flat — Pine returns NaN, caller wraps in nz
+        if al == 0.0:
+            out[t] = 100.0
+        else:
+            rs = ag / al
+            out[t] = 100.0 - 100.0 / (1.0 + rs)
+    return out
 
 
 def efficiency_ratio(close: np.ndarray, length: int) -> np.ndarray:
@@ -491,7 +533,7 @@ class SATSIndicator:
             return _empty_output()
 
         cfg = self.cfg
-        atr_len, base_mult, er_len, _rsi_len, sl_mult = resolve_sats_preset(cfg)
+        atr_len, base_mult, er_len, rsi_len, sl_mult = resolve_sats_preset(cfg)
 
         high = bars["high"].to_numpy().astype(np.float64, copy=False)
         low = bars["low"].to_numpy().astype(np.float64, copy=False)
@@ -543,6 +585,13 @@ class SATSIndicator:
         pv_high = pivot_high(high, cfg.pivot_len, cfg.pivot_len)
         pv_low = pivot_low(low, cfg.pivot_len, cfg.pivot_len)
 
+        # ── score subsystem helpers (Pine §6.4 calcSignalScore) ────────
+        # RSI on close + rolling min/max over rsi_lookback so the loop can
+        # read the depth in O(1) per signal bar rather than re-scanning.
+        rsi = wilder_rsi(close, rsi_len)
+        rsi_lo = rolling_min(rsi, cfg.rsi_lookback)
+        rsi_hi = rolling_max(rsi, cfg.rsi_lookback)
+
         # ── per-bar recursive loop ────────────────────────
         out = _compute_sats_recursive(
             high=high,
@@ -560,6 +609,8 @@ class SATSIndicator:
             vol_z=vol_z,
             pv_high=pv_high,
             pv_low=pv_low,
+            rsi_lo=rsi_lo,
+            rsi_hi=rsi_hi,
             cfg=cfg,
             base_mult=base_mult,
             sl_mult=sl_mult,
@@ -595,9 +646,100 @@ def _empty_output() -> pl.DataFrame:
             "sats_tp1_r": pl.Float64,
             "sats_tp2_r": pl.Float64,
             "sats_tp3_r": pl.Float64,
+            "sats_signal_score": pl.Float64,
             "sats_ready": pl.Boolean,
         }
     )
+
+
+def _calc_signal_score(
+    *,
+    is_buy: bool,
+    close_now: float,
+    close_3: float,
+    atr_value: float,
+    er: float,
+    vol_z: float,
+    rsi_lo_lookback: float,
+    rsi_hi_lookback: float,
+    rsi_ob: int,
+    rsi_os: int,
+    last_pivot_high: float,
+    last_pivot_low: float,
+    prev_upper: float,
+    prev_lower: float,
+    prev_close: float,
+    use_vol: bool,
+    use_rsi: bool,
+    use_struct: bool,
+    has_volume: bool,
+) -> float:
+    """Pine ``calcSignalScore`` port — sum of 6 sub-scores, max ~100.
+
+    Components (mapped to [0..17] or [0..16] per Pine):
+
+    - **mom**: counter-3-bar move / ATR. Buy rewards a recent dip, sell a
+      recent rally — fade the latest 3-bar momentum.
+    - **er**: efficiency ratio mapped 0.15..0.7 → 0..17.
+    - **vol**: volume z-score 0..3 → 0..17 (or BYPASS=12 when disabled / no
+      volume on the bar).
+    - **rsi**: depth past OB/OS over a lookback window (15-pt scale → 0..17;
+      or BYPASS=12 when disabled).
+    - **struct**: distance to last pivot / ATR mapped 0..1.5 → 16..6
+      (closer = higher; or BYPASS=12 when disabled).
+    - **break**: how deep into the prior bar's opposite band the close had
+      penetrated, normalized by ATR; 0..1 → 0..16.
+    """
+    bypass = 12.0
+    # mom — counter-direction 3-bar move.
+    if is_buy:
+        dir_move = close_3 - close_now
+    else:
+        dir_move = close_now - close_3
+    mom = _map_clamp(_safe_div(dir_move, atr_value, 0.0), 0.3, 2.0, 0.0, 17.0)
+    # er
+    er_score = _map_clamp(er, 0.15, 0.7, 0.0, 17.0)
+    # vol
+    if use_vol and has_volume and not math.isnan(vol_z):
+        vol_score = _map_clamp(vol_z, 0.0, 3.0, 0.0, 17.0)
+    else:
+        vol_score = bypass
+    # rsi depth
+    if use_rsi:
+        if is_buy and not math.isnan(rsi_lo_lookback):
+            depth = max(0.0, rsi_os - rsi_lo_lookback)
+        elif not is_buy and not math.isnan(rsi_hi_lookback):
+            depth = max(0.0, rsi_hi_lookback - rsi_ob)
+        else:
+            depth = 0.0
+        rsi_score = _map_clamp(depth, 0.0, 15.0, 0.0, 17.0)
+    else:
+        rsi_score = bypass
+    # struct
+    if use_struct:
+        if is_buy and not math.isnan(last_pivot_low):
+            piv_dist = abs(close_now - last_pivot_low)
+        elif not is_buy and not math.isnan(last_pivot_high):
+            piv_dist = abs(last_pivot_high - close_now)
+        else:
+            piv_dist = 0.0
+        struct_score = _map_clamp(
+            _safe_div(piv_dist, atr_value, 0.0), 0.0, 1.5, 16.0, 6.0
+        )
+    else:
+        struct_score = bypass
+    # break depth (uses prev bar's band + close)
+    if math.isnan(prev_upper) or math.isnan(prev_lower) or math.isnan(prev_close):
+        break_score = 0.0
+    else:
+        if is_buy:
+            break_depth = max(0.0, prev_upper - prev_close)
+        else:
+            break_depth = max(0.0, prev_close - prev_lower)
+        break_score = _map_clamp(
+            _safe_div(break_depth, atr_value, 0.0), 0.0, 1.0, 0.0, 16.0
+        )
+    return mom + er_score + vol_score + rsi_score + struct_score + break_score
 
 
 def _compute_sats_recursive(
@@ -617,6 +759,8 @@ def _compute_sats_recursive(
     vol_z: np.ndarray,
     pv_high: np.ndarray,
     pv_low: np.ndarray,
+    rsi_lo: np.ndarray,
+    rsi_hi: np.ndarray,
     cfg: SATSConfig,
     base_mult: float,
     sl_mult: float,
@@ -654,6 +798,7 @@ def _compute_sats_recursive(
     sats_tp1_r = np.full(n, np.nan, dtype=np.float64)
     sats_tp2_r = np.full(n, np.nan, dtype=np.float64)
     sats_tp3_r = np.full(n, np.nan, dtype=np.float64)
+    sats_signal_score = np.full(n, np.nan, dtype=np.float64)
     sats_ready = np.zeros(n, dtype=bool)
 
     # state
@@ -946,11 +1091,53 @@ def _compute_sats_recursive(
                 tp1_t = entry_t - risk * live_tp1
                 tp2_t = entry_t - risk * live_tp2
                 tp3_t = entry_t - risk * live_tp3
-            sats_entry_price[t] = entry_t
-            sats_sl_price[t] = sl_t
-            sats_tp1_price[t] = tp1_t
-            sats_tp2_price[t] = tp2_t
-            sats_tp3_price[t] = tp3_t
+            # Skip emitting prices entirely if any planned level ended up
+            # non-positive — happens on low-price symbols where the pivot-
+            # anchored SL is many ATRs away from entry and pushes the
+            # short-side TPs below zero. Strategy treats missing prices as
+            # "no plan" and silently drops the signal; we still leave
+            # ``sats_signal`` set + carry forward the trend / TQI state
+            # below so the next bar's char-flip / band ratchet stays
+            # coherent.
+            invalid_levels = (
+                sl_t <= 0.0
+                or tp1_t <= 0.0
+                or tp2_t <= 0.0
+                or tp3_t <= 0.0
+            )
+            if invalid_levels:
+                sats_signal[t] = 0  # downgrade to "no plan"
+            else:
+                sats_entry_price[t] = entry_t
+                sats_sl_price[t] = sl_t
+                sats_tp1_price[t] = tp1_t
+                sats_tp2_price[t] = tp2_t
+                sats_tp3_price[t] = tp3_t
+            # Pine §6.4 calcSignalScore — display/filter only.
+            close_3 = close[t - 3] if t >= 3 else float("nan")
+            prev_close_for_score = close[t - 1] if t > 0 else float("nan")
+            score = _calc_signal_score(
+                is_buy=signal_dir == 1,
+                close_now=c_t,
+                close_3=close_3,
+                atr_value=atr_t,
+                er=er[t],
+                vol_z=vol_z[t] if has_volume[t] else float("nan"),
+                rsi_lo_lookback=rsi_lo[t],
+                rsi_hi_lookback=rsi_hi[t],
+                rsi_ob=cfg.rsi_ob,
+                rsi_os=cfg.rsi_os,
+                last_pivot_high=last_pivot_high,
+                last_pivot_low=last_pivot_low,
+                prev_upper=prev_upper,
+                prev_lower=prev_lower,
+                prev_close=prev_close_for_score,
+                use_vol=cfg.use_vol_score,
+                use_rsi=cfg.use_rsi_score,
+                use_struct=cfg.use_structure_score,
+                has_volume=bool(has_volume[t]),
+            )
+            sats_signal_score[t] = score
             sats_tp1_r[t] = live_tp1
             sats_tp2_r[t] = live_tp2
             sats_tp3_r[t] = live_tp3
@@ -983,6 +1170,7 @@ def _compute_sats_recursive(
         "sats_tp1_r": sats_tp1_r,
         "sats_tp2_r": sats_tp2_r,
         "sats_tp3_r": sats_tp3_r,
+        "sats_signal_score": sats_signal_score,
         "sats_ready": sats_ready,
     }
 

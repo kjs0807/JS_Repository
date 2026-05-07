@@ -43,6 +43,7 @@ from backtester.core.context import (
     BarsView,
     IndicatorsView,
     OrdersView,
+    OrderView,
     PortfolioView,
     PositionView,
     StrategyContext,
@@ -512,6 +513,172 @@ def test_registry_rejects_invalid_preset_with_config_error() -> None:
 def test_constructor_rejects_invalid(kwargs: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         SATSStrategy(**kwargs)
+
+
+def _make_pending(
+    *,
+    symbol: str = "BTCUSDT",
+    bracket_group_id: str = "bracket_ord_0",
+    sl_stop_price: Decimal = Decimal("95"),
+    tp_leg_indices: tuple[int, ...] = (0, 1, 2),
+    long: bool = True,
+) -> tuple[OrderView, ...]:
+    """Synthetic OrdersView pending tuple — N TP legs + one protector SL."""
+    base_ts = datetime(2026, 3, 1, tzinfo=UTC)
+    close_side: Literal["buy", "sell"] = "sell" if long else "buy"
+    pending: list[OrderView] = []
+    for idx in tp_leg_indices:
+        pending.append(
+            OrderView(
+                id=f"ord_tp{idx + 1}",
+                symbol=symbol,
+                side=close_side,
+                type="limit",
+                state="pending",
+                sized_quantity=Decimal("1"),
+                remaining=Decimal("1"),
+                submitted_at=base_ts,
+                limit_price=Decimal("110") + Decimal(idx * 10),
+                stop_price=None,
+                bracket_group_id=bracket_group_id,
+                bracket_role="tp_leg",
+                tp_leg_index=idx,
+            )
+        )
+    pending.append(
+        OrderView(
+            id="ord_sl",
+            symbol=symbol,
+            side=close_side,
+            type="stop",
+            state="pending",
+            sized_quantity=Decimal("1"),
+            remaining=Decimal("1"),
+            submitted_at=base_ts,
+            limit_price=None,
+            stop_price=sl_stop_price,
+            bracket_group_id=bracket_group_id,
+            bracket_role="protector_sl",
+            tp_leg_index=None,
+        )
+    )
+    return tuple(pending)
+
+
+def test_be_move_modifies_sl_when_tp1_filled() -> None:
+    """``move_sl_to_entry_on_tp1=True`` + TP1 absent from pending (filled) +
+    SL still active → strategy emits ``modify(stop_price=entry_price)``."""
+    from backtester.core.orders import OrderAction as _OA  # noqa: F401
+
+    bars = _bars_from_close([100.0] * 30)
+    ind = _make_sats_df(30, last_signal=0)
+    ctx = _ctx(
+        bars_df=bars,
+        ind_df=ind,
+        has_position=True,
+        position_size=Decimal("1"),
+    )
+    s = SATSStrategy(move_sl_to_entry_on_tp1=True)
+    # Manually seed the meta so we don't have to run a full entry cycle.
+    from backtester.strategies.sats import _ActiveTradeMeta
+
+    s._meta["BTCUSDT"] = _ActiveTradeMeta(
+        entry_price=Decimal("100"),
+        direction="long",
+        be_moved=False,
+    )
+    pending = _make_pending(tp_leg_indices=(1, 2), sl_stop_price=Decimal("95"))
+    actions = s.on_pending_orders(ctx, pending)
+    assert len(actions) == 1
+    a = actions[0]
+    assert a.type == "modify"
+    assert a.order_id == "ord_sl"
+    assert a.modify_stop_price == Decimal("100")
+
+
+def test_be_move_skipped_while_tp1_still_active() -> None:
+    bars = _bars_from_close([100.0] * 30)
+    ind = _make_sats_df(30, last_signal=0)
+    ctx = _ctx(bars_df=bars, ind_df=ind, has_position=True)
+    s = SATSStrategy(move_sl_to_entry_on_tp1=True)
+    from backtester.strategies.sats import _ActiveTradeMeta
+
+    s._meta["BTCUSDT"] = _ActiveTradeMeta(
+        entry_price=Decimal("100"),
+        direction="long",
+        be_moved=False,
+    )
+    pending = _make_pending(tp_leg_indices=(0, 1, 2))  # TP1 still present
+    assert s.on_pending_orders(ctx, pending) == []
+
+
+def test_be_move_runs_only_once() -> None:
+    bars = _bars_from_close([100.0] * 30)
+    ind = _make_sats_df(30, last_signal=0)
+    ctx = _ctx(bars_df=bars, ind_df=ind, has_position=True)
+    s = SATSStrategy(move_sl_to_entry_on_tp1=True)
+    from backtester.strategies.sats import _ActiveTradeMeta
+
+    s._meta["BTCUSDT"] = _ActiveTradeMeta(
+        entry_price=Decimal("100"),
+        direction="long",
+        be_moved=False,
+    )
+    pending = _make_pending(tp_leg_indices=(1, 2))
+    first = s.on_pending_orders(ctx, pending)
+    second = s.on_pending_orders(ctx, pending)
+    assert len(first) == 1
+    assert second == [], "BE move should fire once, not on every subsequent bar"
+
+
+def test_be_move_disabled_emits_nothing() -> None:
+    bars = _bars_from_close([100.0] * 30)
+    ind = _make_sats_df(30, last_signal=0)
+    ctx = _ctx(bars_df=bars, ind_df=ind, has_position=True)
+    s = SATSStrategy(move_sl_to_entry_on_tp1=False)  # default False anyway
+    pending = _make_pending(tp_leg_indices=(1, 2))
+    assert s.on_pending_orders(ctx, pending) == []
+
+
+def test_be_move_short_side_ratchets_down() -> None:
+    """Short trade: entry below original SL, BE move ratchets SL DOWN
+    to entry. ``OrderBook.modify`` requires new_stop < old_stop for short."""
+    bars = _bars_from_close([100.0] * 30)
+    ind = _make_sats_df(30, last_signal=0)
+    ctx = _ctx(bars_df=bars, ind_df=ind, has_position=True, position_size=Decimal("-1"))
+    s = SATSStrategy(move_sl_to_entry_on_tp1=True, allow_short=True)
+    from backtester.strategies.sats import _ActiveTradeMeta
+
+    s._meta["BTCUSDT"] = _ActiveTradeMeta(
+        entry_price=Decimal("100"),
+        direction="short",
+        be_moved=False,
+    )
+    # Short: original SL above entry (e.g., 105).
+    pending = _make_pending(
+        tp_leg_indices=(1, 2), sl_stop_price=Decimal("105"), long=False
+    )
+    actions = s.on_pending_orders(ctx, pending)
+    assert len(actions) == 1
+    assert actions[0].modify_stop_price == Decimal("100")
+
+
+def test_be_move_meta_cleared_when_position_flat() -> None:
+    bars = _bars_from_close([100.0] * 30)
+    ind = _make_sats_df(30, last_signal=0)
+    # Position flat (default for _ctx with has_position=False).
+    ctx = _ctx(bars_df=bars, ind_df=ind, has_position=False)
+    s = SATSStrategy(move_sl_to_entry_on_tp1=True)
+    from backtester.strategies.sats import _ActiveTradeMeta
+
+    s._meta["BTCUSDT"] = _ActiveTradeMeta(
+        entry_price=Decimal("100"),
+        direction="long",
+        be_moved=False,
+    )
+    actions = s.on_pending_orders(ctx, _make_pending())
+    assert actions == []
+    assert "BTCUSDT" not in s._meta
 
 
 def test_tp_size_fractions_under_one_leaves_residual_position() -> None:

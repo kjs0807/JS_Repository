@@ -145,6 +145,8 @@ node_modules/
 # Allow project-local scripts directories (Windows ignorecase makes Scripts/==scripts/)
 !Crypto/Bybit_Trading/scripts/
 !Crypto/Bybit_Trading/scripts/**
+!backtester/scripts/
+!backtester/scripts/**
 
 # MCP Servers (third-party, local config)
 MCP_Servers/

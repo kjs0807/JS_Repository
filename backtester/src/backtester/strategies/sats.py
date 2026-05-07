@@ -36,16 +36,19 @@ TP split modes:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal, cast
 
-from backtester.core.context import StrategyContext
+from backtester.core.context import OrderView, StrategyContext
 from backtester.core.orders import (
     BracketSpec,
     ClosePosition,
     MultiBracketSpec,
+    OrderAction,
     OrderIntent,
     TakeProfitLeg,
+    TargetMarginPct,
     TargetNotionalPct,
 )
 from backtester.indicators.base import Indicator
@@ -75,6 +78,21 @@ _DEFAULT_TP_FRACTIONS: tuple[Decimal, Decimal, Decimal] = (
     Decimal("0.3333"),
     Decimal("0.3334"),
 )
+
+
+@dataclass
+class _ActiveTradeMeta:
+    """Per-symbol trade tracking for the optional BE-move-on-TP1 feature.
+
+    Captured at entry intent time so ``on_pending_orders`` can later compare
+    the surviving TP legs against the spec — when ``smallest_active_tp_idx
+    >= 1`` the closest leg (TP1) has filled and the strategy can ratchet
+    the SL to the entry price on its next pending-orders cycle.
+    """
+
+    entry_price: Decimal
+    direction: Literal["long", "short"]
+    be_moved: bool = False
 
 _TP_PRICE_COL = {
     "tp1": "sats_tp1_price",
@@ -136,7 +154,21 @@ class SATSStrategy(BaseStrategy):
         single_tp_level: str = "tp3",
         allow_short: bool = True,
         notional_pct: Decimal | float | str = Decimal("0.05"),
+        # BBKC-style margin × leverage sizing — when both ``margin_pct`` and
+        # ``leverage`` are set, ``TargetMarginPct`` replaces ``TargetNotionalPct``
+        # so the position is computed as ``equity × margin_pct × leverage``
+        # mark-priced into units. Default both ``None`` keeps the legacy
+        # ``TargetNotionalPct(notional_pct)`` path. Setting only one of the two
+        # is rejected as ambiguous.
+        margin_pct: Decimal | float | str | None = None,
+        leverage: Decimal | float | str | None = None,
         trade_max_age_bars: int | None = 100,
+        # Optional BE move on TP1 fill — only meaningful in multi mode.
+        move_sl_to_entry_on_tp1: bool = False,
+        # Filter entries by Pine signal-score threshold (None = no filter).
+        # Pine score is sum of 6 components, max ~100. Defaults: 20 weak,
+        # 30 stronger filter — see indicator's ``sats_signal_score`` column.
+        min_signal_score: float | None = None,
     ) -> None:
         if preset not in _VALID_PRESETS:
             raise ValueError(
@@ -159,9 +191,35 @@ class SATSStrategy(BaseStrategy):
         notional = Decimal(str(notional_pct))
         if notional <= 0:
             raise ValueError(f"notional_pct must be > 0, got {notional}")
+
+        # BBKC-style sizing — accept both or neither. ``leverage`` only kicks
+        # in via ``TargetMarginPct``; passing leverage alone wouldn't compose
+        # with ``TargetNotionalPct`` (no leverage field), so reject early.
+        if (margin_pct is None) != (leverage is None):
+            raise ValueError(
+                "margin_pct and leverage must be set together (BBKC pattern) "
+                "or both left None"
+            )
+        margin_dec: Decimal | None = None
+        leverage_dec: Decimal | None = None
+        if margin_pct is not None and leverage is not None:
+            margin_dec = Decimal(str(margin_pct))
+            leverage_dec = Decimal(str(leverage))
+            if margin_dec <= 0:
+                raise ValueError(
+                    f"margin_pct must be > 0, got {margin_dec}"
+                )
+            if leverage_dec <= 0:
+                raise ValueError(
+                    f"leverage must be > 0, got {leverage_dec}"
+                )
         if trade_max_age_bars is not None and trade_max_age_bars <= 0:
             # Treat 0 / negative as disabled, matching BBKCLegacy convention.
             trade_max_age_bars = None
+        if min_signal_score is not None and min_signal_score < 0:
+            raise ValueError(
+                f"min_signal_score must be >= 0 (or None), got {min_signal_score}"
+            )
 
         # Multi-leg fractions normalize once at __init__ so on_bar can build
         # the BracketSpec hot-path without re-parsing per signal. Only used
@@ -241,7 +299,15 @@ class SATSStrategy(BaseStrategy):
         )
         self.allow_short = allow_short
         self.notional_pct = notional
+        self.margin_pct = margin_dec
+        self.leverage = leverage_dec
         self.trade_max_age_bars = trade_max_age_bars
+        self.move_sl_to_entry_on_tp1 = move_sl_to_entry_on_tp1
+        self.min_signal_score = min_signal_score
+        # Per-symbol trade tracking for BE-move logic. Populated on entry,
+        # cleared when the position goes flat (or on next entry — _meta_for
+        # always overwrites the slot).
+        self._meta: dict[str, _ActiveTradeMeta] = {}
 
     def required_indicators(self) -> list[Indicator]:
         return [self._sats]
@@ -293,18 +359,116 @@ class SATSStrategy(BaseStrategy):
         if sl_raw is None:
             return []
 
+        # Score-based filter (Pine ``min_signal_score`` gate).
+        if self.min_signal_score is not None:
+            score = ind["sats_signal_score"][last_idx]
+            # Score is NaN/None when the indicator wasn't able to compute it
+            # (warmup, missing pivots) — treat as "below threshold" since we
+            # can't confirm the signal's quality.
+            if score is None or float(score) < float(self.min_signal_score):
+                return []
+
         side: Literal["buy", "sell"] = "buy" if signal == 1 else "sell"
         bracket = self._build_bracket(ind, last_idx, sl_raw)
         if bracket is None:
             return []
+
+        # Capture per-trade meta so on_pending_orders can detect TP1 fills
+        # and ratchet the SL to entry. ``sats_entry_price`` is the planned
+        # signal-candle close — the engine fills at next bar open, so the
+        # actual entry price drifts a tick or two but ``sats_entry_price``
+        # is the analytically meaningful BE level.
+        entry_planned = ind["sats_entry_price"][last_idx]
+        if entry_planned is not None and self.move_sl_to_entry_on_tp1:
+            self._meta[symbol] = _ActiveTradeMeta(
+                entry_price=Decimal(str(entry_planned)),
+                direction="long" if signal == 1 else "short",
+                be_moved=False,
+            )
         return [
             OrderIntent(
                 symbol=symbol,
                 side=side,
                 type="market",
-                size_spec=TargetNotionalPct(notional_pct=self.notional_pct),
+                size_spec=self._size_spec(),
                 reason="sats_buy" if signal == 1 else "sats_sell",
                 bracket=bracket,
+            )
+        ]
+
+    def _size_spec(self) -> TargetMarginPct | TargetNotionalPct:
+        """Pick ``TargetMarginPct`` (BBKC pattern) when leverage was set,
+        else fall back to ``TargetNotionalPct`` for the legacy 1x path."""
+        if self.margin_pct is not None and self.leverage is not None:
+            return TargetMarginPct(
+                margin_pct=self.margin_pct, leverage=self.leverage
+            )
+        return TargetNotionalPct(notional_pct=self.notional_pct)
+
+    def on_pending_orders(
+        self,
+        ctx: StrategyContext,
+        pending: tuple[OrderView, ...],
+    ) -> list[OrderAction]:
+        """BE-move-on-TP1: when the multi-leg bracket's TP1 fills, modify the
+        protector SL's stop_price to the recorded entry price.
+
+        TP1-filled detection without subscribing to fill events: walk the
+        symbol's still-active TP legs and check the smallest ``tp_leg_index``.
+        If it is ``>= 1`` then leg 0 (TP1) has either filled or been cancelled.
+        Combined with a still-active ``protector_sl`` in the same group, that
+        means TP1 filled (cancellation cancels the SL too) — safe to ratchet.
+
+        Ratchet invariants are enforced by ``OrderBook.modify``:
+        long → ``new_stop > old_stop`` (entry > original SL below entry ✓),
+        short → ``new_stop < old_stop`` (entry < original SL above entry ✓).
+        """
+        if not self.move_sl_to_entry_on_tp1:
+            return []
+        symbol = ctx.primary_symbol
+        pos = ctx.position(symbol)
+        if pos is None or pos.is_flat:
+            self._meta.pop(symbol, None)
+            return []
+        meta = self._meta.get(symbol)
+        if meta is None or meta.be_moved:
+            return []
+
+        sym_pending = [o for o in pending if o.symbol == symbol]
+        sl: OrderView | None = None
+        active_tp_indices: list[int] = []
+        for o in sym_pending:
+            if o.bracket_role == "protector_sl":
+                sl = o
+            elif o.bracket_role == "tp_leg" and o.tp_leg_index is not None:
+                active_tp_indices.append(o.tp_leg_index)
+        if sl is None:
+            return []
+        # All TP legs still active → TP1 has not filled yet.
+        smallest_active_tp = min(active_tp_indices) if active_tp_indices else 999
+        if smallest_active_tp < 1:
+            return []
+
+        # Ratchet check — bail silently on violation rather than letting
+        # ``OrderBook.modify`` raise (defensive: indicator's planned entry
+        # vs actual fill drift could in theory put entry on the wrong side
+        # of the original SL on extreme bars).
+        old_stop = sl.stop_price
+        if old_stop is None:
+            return []
+        if meta.direction == "long" and meta.entry_price <= old_stop:
+            meta.be_moved = True  # nothing to do, but don't keep retrying
+            return []
+        if meta.direction == "short" and meta.entry_price >= old_stop:
+            meta.be_moved = True
+            return []
+
+        meta.be_moved = True
+        return [
+            OrderAction(
+                type="modify",
+                order_id=sl.id,
+                modify_stop_price=meta.entry_price,
             )
         ]
 

@@ -58,6 +58,7 @@ from backtester.core.snapshot import MarketSnapshot
 from backtester.core.types import to_decimal
 from backtester.data.base import GapReport, parse_timeframe, sanitize_symbol
 from backtester.data.bybit_source import BybitDataSource
+from backtester.data.sqlite_source import SQLiteDataSource
 from backtester.data.csv_source import CSVDataSource
 from backtester.data.parquet_source import ParquetDataSource
 from backtester.events.log import EventLog
@@ -489,7 +490,7 @@ class BacktestEngine:
 
     def _build_data_source(
         self,
-    ) -> ParquetDataSource | CSVDataSource | BybitDataSource:
+    ) -> ParquetDataSource | CSVDataSource | BybitDataSource | SQLiteDataSource:
         ds = self.config.data_source
         if ds.type == "parquet":
             return ParquetDataSource(ds.base_dir)
@@ -497,6 +498,10 @@ class BacktestEngine:
             return CSVDataSource(ds.base_dir)
         if ds.type == "bybit":
             return BybitDataSource(ds.base_dir, category=ds.bybit_category)
+        if ds.type == "sqlite":
+            # ``base_dir`` is repurposed as the DB file path here — see
+            # ``DataSourceConfig`` docstring for the dual-meaning rationale.
+            return SQLiteDataSource(ds.base_dir)
         raise NotImplementedError(  # pragma: no cover — Config 검증이 차단
             f"DataSource type {ds.type!r} is Phase 2+"
         )
@@ -914,6 +919,9 @@ class BacktestEngine:
                 submitted_at=o.submitted_at,
                 limit_price=o.intent.limit_price,
                 stop_price=o.intent.stop_price,
+                bracket_group_id=o.bracket_group_id,
+                bracket_role=o.bracket_role,
+                tp_leg_index=o.tp_leg_index,
             )
             for o in active
         )

@@ -42,7 +42,9 @@ _VALID_GAP_POLICY: frozenset[str] = frozenset({"notify", "strict"})
 _VALID_EXECUTION_MODEL: frozenset[str] = frozenset(
     {"next_bar_open", "slippage_bps"}
 )
-_VALID_DATA_SOURCE_TYPE: frozenset[str] = frozenset({"parquet", "csv", "bybit"})
+_VALID_DATA_SOURCE_TYPE: frozenset[str] = frozenset(
+    {"parquet", "csv", "bybit", "sqlite"}
+)
 _VALID_BYBIT_CATEGORY: frozenset[str] = frozenset({"linear", "spot", "inverse"})
 
 
@@ -52,10 +54,15 @@ class DataSourceConfig:
 
     PR 16 prep 2차: ``bybit_category`` 노출 — 기본 ``linear`` (perpetual), ``spot`` /
     ``inverse`` 도 config 로 선택 가능. ``type != "bybit"`` 일 땐 의미 없음 (default 유지).
+
+    Phase 4 (SQLite source): ``type="sqlite"`` 는 ``base_dir`` 을 SQLite DB 파일
+    경로로 해석한다 — Bybit_Trading 의 ``ohlcv_<tf>`` 테이블을 backtester 가 직접
+    읽도록 (별도 fetch 없이 공유 DB 사용). 그 외 type 은 base_dir 을 디렉토리로
+    해석한다.
     """
 
     base_dir: Path
-    type: Literal["parquet", "csv", "bybit"] = "parquet"
+    type: Literal["parquet", "csv", "bybit", "sqlite"] = "parquet"
     bybit_category: Literal["linear", "spot", "inverse"] = "linear"
 
     def __post_init__(self) -> None:
