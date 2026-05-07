@@ -47,6 +47,7 @@ class FillRecord:
     price: Decimal
     side: str
     size: Decimal
+    intent_reason: str = ""
 
 
 @dataclass
@@ -58,7 +59,23 @@ class ModifyRecord:
 
 @dataclass
 class TradeRecord:
-    """식별된 trade 한 건. fills/modifies 로 마커 그릴 정보 모두 보존."""
+    """식별된 trade 한 건. fills/modifies 로 마커 그릴 정보 모두 보존.
+
+    Phase 3.5 — multi-leg awareness:
+
+    - ``bracket_kind`` is inferred from the exit fills' ``intent_reason``
+      strings: ``"single"`` when only one ``bracket_tp:*`` (or single SL)
+      label appears, ``"multi"`` when multiple ``bracket_tp:*:tpN`` labels
+      appear within the same trade, ``None`` when no bracket-emitted
+      reasons are seen (e.g. manual close, time-stop ClosePosition).
+    - ``exit_legs`` is the ordered list of exit-leg labels parsed from the
+      reasons (``"tp1"``, ``"tp2"``, ``"tp3"``, ``"sl"``, ``"timeout"``,
+      etc.) — preserves *which* TP fired in *what* order.
+    - ``weighted_exit_price`` is the volume-weighted average of all
+      reduce-only / exit fills, so realized PnL% reflects partial closes
+      correctly. ``exit_price`` keeps the legacy meaning (last fill's
+      price) for backwards compatibility with existing chart code.
+    """
 
     symbol: str
     direction: str  # "long" | "short"
@@ -70,14 +87,25 @@ class TradeRecord:
     fills: list[FillRecord] = field(default_factory=list)
     modifies: list[ModifyRecord] = field(default_factory=list)
     open: bool = False  # run 종료 시점에 미청산이면 True
+    # Phase 3.5 multi-leg metadata.
+    bracket_kind: str | None = None  # "single" | "multi" | None
+    exit_legs: list[str] = field(default_factory=list)
+    weighted_exit_price: Decimal | None = None
 
     @property
     def realized_pnl_pct(self) -> Decimal | None:
-        if self.exit_price is None or self.entry_price <= 0:
+        """Volume-weighted realized PnL% across all exit fills.
+
+        Falls back to the legacy ``exit_price`` (last fill) when
+        ``weighted_exit_price`` is unset (open trades, or paths that
+        bypass ``identify_trades`` post-processing).
+        """
+        ref_exit = self.weighted_exit_price or self.exit_price
+        if ref_exit is None or self.entry_price <= 0:
             return None
         if self.direction == "long":
-            return (self.exit_price - self.entry_price) / self.entry_price
-        return (self.entry_price - self.exit_price) / self.entry_price
+            return (ref_exit - self.entry_price) / self.entry_price
+        return (self.entry_price - ref_exit) / self.entry_price
 
 
 # ---------- trade identification ---------------------------------------------
@@ -109,7 +137,13 @@ def identify_trades(reader: EventLogReader) -> list[TradeRecord]:
         was_flat = prev == 0
         is_flat = new == 0
         flipped = (prev > 0 and new < 0) or (prev < 0 and new > 0)
-        record = FillRecord(ts=evt.ts, price=price, side=side, size=size)
+        record = FillRecord(
+            ts=evt.ts,
+            price=price,
+            side=side,
+            size=size,
+            intent_reason=str(p.get("intent_reason") or ""),
+        )
 
         if was_flat and not is_flat:
             t = TradeRecord(
@@ -158,7 +192,88 @@ def identify_trades(reader: EventLogReader) -> list[TradeRecord]:
         t.open = True
         trades.append(t)
 
+    # Phase 3.5 — multi-leg post-processing: parse exit-leg labels and
+    # weighted exit price from each trade's fills.
+    for t in trades:
+        _annotate_multi_leg(t)
+
     return trades
+
+
+# ---------- Phase 3.5 multi-leg post-processing -----------------------------
+
+
+def _parse_exit_label(intent_reason: str) -> str | None:
+    """Map a fill's ``intent_reason`` to a short exit-leg label.
+
+    - ``bracket_tp:<parent>:tp1`` → ``"tp1"`` (multi-leg label after second colon)
+    - ``bracket_tp:<parent>``     → ``"tp"``  (single-bracket TP)
+    - ``bracket_sl:<parent>``     → ``"sl"``
+    - ``*time_stop*``             → ``"timeout"``
+    - anything else with ``"close"`` in it → ``"close"``
+
+    Returns ``None`` for non-exit fills (entry / scale-in reasons we don't
+    classify as legs).
+    """
+    if not intent_reason:
+        return None
+    if intent_reason.startswith("bracket_tp:"):
+        parts = intent_reason.split(":")
+        # bracket_tp:<parent>:<label> → label is parts[2]
+        if len(parts) >= 3 and parts[2]:
+            return parts[2]
+        return "tp"
+    if intent_reason.startswith("bracket_sl:"):
+        return "sl"
+    if "time_stop" in intent_reason or "timeout" in intent_reason:
+        return "timeout"
+    if "close" in intent_reason:
+        return "close"
+    return None
+
+
+def _annotate_multi_leg(trade: TradeRecord) -> None:
+    """Populate ``bracket_kind`` / ``exit_legs`` / ``weighted_exit_price`` on
+    a finalized ``TradeRecord`` from its fills.
+
+    Closing fills are detected by side relative to ``trade.direction``:
+
+    - long trade → ``side == "sell"`` fills reduce / close.
+    - short trade → ``side == "buy"`` fills reduce / close.
+
+    The weighted price ignores the entry fill (first one in the same
+    direction as the trade) and aggregates only the reduce-side fills, so
+    it works the same for partial closes as for a single full close.
+    """
+    if trade.entry_size <= 0:
+        return
+    closing_side = "sell" if trade.direction == "long" else "buy"
+    legs: list[str] = []
+    weighted_num = Decimal("0")
+    weighted_den = Decimal("0")
+    multi_tp_labels: set[str] = set()
+    saw_single_tp = False
+    for fill in trade.fills:
+        if fill.side != closing_side:
+            continue
+        weighted_num += fill.price * fill.size
+        weighted_den += fill.size
+        label = _parse_exit_label(fill.intent_reason)
+        if label is not None:
+            legs.append(label)
+            if label.startswith("tp") and label != "tp":
+                multi_tp_labels.add(label)
+            elif label == "tp":
+                saw_single_tp = True
+    if weighted_den > 0:
+        trade.weighted_exit_price = weighted_num / weighted_den
+    trade.exit_legs = legs
+    if multi_tp_labels:
+        trade.bracket_kind = "multi"
+    elif saw_single_tp or "sl" in legs:
+        trade.bracket_kind = "single"
+    else:
+        trade.bracket_kind = None
 
 
 # ---------- bar window slicing ----------------------------------------------

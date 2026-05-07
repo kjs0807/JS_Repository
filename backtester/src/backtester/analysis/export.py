@@ -79,12 +79,38 @@ def _extract_fills(reader: EventLogReader) -> list[dict[str, Any]]:
     return rows
 
 
+def _classify_bracket(bracket: Any) -> tuple[str, Any, int | None, str]:
+    """Return ``(kind, tp_price, tp_legs_n, tp_legs_prices)`` from a serialized
+    bracket payload.
+
+    - ``kind``: ``""`` if no bracket, ``"single"`` for ``BracketSpec`` (one TP /
+      one SL), ``"multi"`` for ``MultiBracketSpec``.
+    - ``tp_price``: most-useful single price — single bracket's
+      ``take_profit_price`` or multi bracket's *closest* leg price (first leg
+      in the spec tuple). ``None`` when the bracket has no TP.
+    - ``tp_legs_n``: number of TP legs for multi (``None`` for single / no
+      bracket).
+    - ``tp_legs_prices``: ``";"``-joined leg prices for multi (``""`` for
+      single / no bracket).
+    """
+    if bracket is None:
+        return ("", None, None, "")
+    legs = bracket.get("take_profits")
+    if isinstance(legs, list):  # MultiBracketSpec
+        prices = [leg.get("price") for leg in legs]
+        first = prices[0] if prices else None
+        joined = ";".join(_to_str(p) for p in prices)
+        return ("multi", first, len(prices), joined)
+    return ("single", bracket.get("take_profit_price"), None, "")
+
+
 def _extract_intents(reader: EventLogReader) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for evt in reader.by_type(EventType.INTENT_CREATED):
         p = evt.payload
         intent = p.get("intent") or {}
         bracket = intent.get("bracket")
+        kind, tp_price, tp_legs_n, tp_legs_prices = _classify_bracket(bracket)
         rows.append(
             {
                 "decision_ts": evt.ts.isoformat(),
@@ -98,8 +124,11 @@ def _extract_intents(reader: EventLogReader) -> list[dict[str, Any]]:
                 "limit_price": intent.get("limit_price"),
                 "stop_price": intent.get("stop_price"),
                 "has_bracket": bracket is not None,
-                "tp_price": (bracket or {}).get("take_profit_price"),
+                "bracket_kind": kind,
+                "tp_price": tp_price,
                 "sl_price": (bracket or {}).get("stop_loss_price"),
+                "tp_legs_n": tp_legs_n,
+                "tp_legs_prices": tp_legs_prices,
             }
         )
     return rows
@@ -111,14 +140,54 @@ _ORDER_EVENT_TYPES: tuple[EventType, ...] = (
     EventType.ORDER_MODIFIED,
     EventType.ORDER_EXPIRED,
     EventType.ORDER_REJECTED,
+    EventType.ORDER_RESIZED,  # Phase 3.5 — multi-leg SL auto-shrink
 )
 
 
 def _extract_orders(reader: EventLogReader) -> list[dict[str, Any]]:
+    """Flatten order-lifecycle events into a single CSV-friendly stream.
+
+    ``ORDER_RESIZED`` payloads have a different shape (no nested ``intent``,
+    no ``parent_order_id`` at the top level — instead ``bracket_group_id`` +
+    ``trigger_order_id`` + ``old/new_sized_quantity``). We map them onto the
+    common columns so the timeline reads chronologically:
+
+    - ``order_id`` ← payload's ``order_id`` (the resized SL).
+    - ``sized_quantity`` ← ``new_sized_quantity`` (post-resize value).
+    - ``parent_order_id`` ← payload's ``trigger_order_id`` (the TP that
+      caused the resize) — repurposed so the relationship survives in CSV.
+    - ``reason`` ← combined "tp_leg_filled: <old>->{new}" so analysts can see
+      both old and new in one cell.
+    """
     rows: list[dict[str, Any]] = []
     for et in _ORDER_EVENT_TYPES:
         for evt in reader.by_type(et):
             p = evt.payload
+            if et == EventType.ORDER_RESIZED:
+                old = p.get("old_sized_quantity")
+                new = p.get("new_sized_quantity")
+                rows.append(
+                    {
+                        "timestamp": evt.ts.isoformat(),
+                        "event_type": et.value,
+                        "order_id": p.get("order_id"),
+                        "symbol": None,
+                        "side": None,
+                        "type": None,
+                        "parent_order_id": p.get("trigger_order_id"),
+                        "oco_group_id": None,
+                        "bracket_group_id": p.get("bracket_group_id"),
+                        "bracket_role": "protector_sl",
+                        "tp_leg_index": None,
+                        "sized_quantity": new,
+                        "limit_price": None,
+                        "stop_price": None,
+                        "reason": (
+                            f"{p.get('reason') or 'resize'}: {_to_str(old)}->{_to_str(new)}"
+                        ),
+                    }
+                )
+                continue
             intent = p.get("intent") or {}
             rows.append(
                 {
@@ -130,6 +199,9 @@ def _extract_orders(reader: EventLogReader) -> list[dict[str, Any]]:
                     "type": intent.get("type"),
                     "parent_order_id": p.get("parent_order_id"),
                     "oco_group_id": p.get("oco_group_id"),
+                    "bracket_group_id": p.get("bracket_group_id"),
+                    "bracket_role": p.get("bracket_role"),
+                    "tp_leg_index": p.get("tp_leg_index"),
                     "sized_quantity": p.get("sized_quantity"),
                     "limit_price": p.get("limit_price") or intent.get("limit_price"),
                     "stop_price": p.get("stop_price") or intent.get("stop_price"),
@@ -244,8 +316,11 @@ _INTENT_HEADERS = [
     "limit_price",
     "stop_price",
     "has_bracket",
+    "bracket_kind",
     "tp_price",
     "sl_price",
+    "tp_legs_n",
+    "tp_legs_prices",
 ]
 _ORDER_HEADERS = [
     "timestamp",
@@ -256,6 +331,9 @@ _ORDER_HEADERS = [
     "type",
     "parent_order_id",
     "oco_group_id",
+    "bracket_group_id",
+    "bracket_role",
+    "tp_leg_index",
     "sized_quantity",
     "limit_price",
     "stop_price",
