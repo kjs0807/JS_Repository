@@ -96,9 +96,38 @@ class TradeRecord:
     def realized_pnl_pct(self) -> Decimal | None:
         """Volume-weighted realized PnL% across all exit fills.
 
-        Falls back to the legacy ``exit_price`` (last fill) when
-        ``weighted_exit_price`` is unset (open trades, or paths that
-        bypass ``identify_trades`` post-processing).
+        Returns ``None`` while ``open`` is ``True`` — even if some TP legs
+        have already filled (partial close on a multi-leg bracket), the
+        trade still has unrealized exposure left under the SL or open
+        signal, so reporting a single PnL% would mislead chart titles into
+        showing a "completed" return for a position that's still alive.
+
+        Use :attr:`partial_pnl_pct` when the caller explicitly wants the
+        already-realized portion of an open multi-leg trade.
+        """
+        if self.open:
+            return None
+        ref_exit = self.weighted_exit_price or self.exit_price
+        if ref_exit is None or self.entry_price <= 0:
+            return None
+        if self.direction == "long":
+            return (ref_exit - self.entry_price) / self.entry_price
+        return (self.entry_price - ref_exit) / self.entry_price
+
+    @property
+    def partial_pnl_pct(self) -> Decimal | None:
+        """PnL% on the *closed* portion of the trade (multi-leg friendly).
+
+        Equal to :attr:`realized_pnl_pct` when the trade is finalized.
+        For ``open`` trades that already had some TP legs fill (partial
+        scale-out under a ``MultiBracketSpec``), this returns the volume-
+        weighted PnL of those filled legs alone — useful for tooltip /
+        diagnostic output that wants to show "+20% so far" without
+        pretending the trade is done.
+
+        Returns ``None`` when no exit fills have occurred yet, or when
+        ``weighted_exit_price`` was never computed (e.g. fixture trades
+        constructed without ``identify_trades``).
         """
         ref_exit = self.weighted_exit_price or self.exit_price
         if ref_exit is None or self.entry_price <= 0:

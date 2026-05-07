@@ -434,3 +434,72 @@ def test_realized_pnl_pct_open_trade_returns_none(tmp_path: Path) -> None:
     assert t.realized_pnl_pct is None
 
 
+# ---------- 8. open trade with partial TP fills must not report realized PnL --
+
+
+def test_realized_pnl_pct_is_none_while_partial_close_in_progress(
+    tmp_path: Path,
+) -> None:
+    """Partial-sum bracket (0.3+0.3+0.3 = 0.9): all 3 TPs fire but 10% of the
+    position stays under the SL, so the trade record stays ``open=True``.
+
+    Previously :attr:`TradeRecord.realized_pnl_pct` returned a weighted PnL
+    even on open trades, which would surface a "completed" percentage in
+    the trade-review chart title for a position that hasn't actually
+    closed. Now it must be ``None`` while open. The partial PnL is still
+    available via :attr:`TradeRecord.partial_pnl_pct` for callers that
+    want to show in-progress diagnostics.
+    """
+    bracket = MultiBracketSpec(
+        take_profits=(
+            TakeProfitLeg(price=Decimal("110"), size_fraction=Decimal("0.3")),
+            TakeProfitLeg(price=Decimal("120"), size_fraction=Decimal("0.3")),
+            TakeProfitLeg(price=Decimal("130"), size_fraction=Decimal("0.3")),
+        ),
+        stop_loss_price=Decimal("95"),
+    )
+    bars = [
+        {"open": 100.0, "high": 100.05, "low": 99.95, "close": 100.0},
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
+        {"open": 100.0, "high": 111.0, "low": 99.0, "close": 110.0},   # TP1
+        {"open": 110.0, "high": 121.0, "low": 109.0, "close": 120.0},  # TP2
+        {"open": 120.0, "high": 131.0, "low": 119.0, "close": 130.0},  # TP3
+    ]
+    run_dir = _run_engine(tmp_path, bars, bracket, size=Decimal("10"))
+    reader = EventLogReader(run_dir / "events.jsonl")
+    trades = identify_trades(reader)
+    assert len(trades) == 1
+    t = trades[0]
+    # 10 units × 0.3 each leg = 9 units exited; 1 unit left under SL →
+    # trade stays open.
+    assert t.open is True
+    # Three TP legs fired and were captured.
+    assert t.exit_legs == ["tp1", "tp2", "tp3"]
+    # weighted_exit_price IS computed (so partial diagnostics work) …
+    assert t.weighted_exit_price is not None
+    assert abs(t.weighted_exit_price - Decimal("120")) < Decimal("0.5")
+    # …but realized_pnl_pct must be None while open.
+    assert t.realized_pnl_pct is None
+    # partial_pnl_pct gives the in-progress weighted PnL on the closed part.
+    assert t.partial_pnl_pct is not None
+    expected = (Decimal("120") - Decimal("100")) / Decimal("100")  # 0.20
+    assert abs(t.partial_pnl_pct - expected) < Decimal("0.01")
+
+
+def test_partial_pnl_pct_equals_realized_when_finalized(
+    tmp_path: Path,
+) -> None:
+    """For a fully closed multi-leg trade, ``partial_pnl_pct`` and
+    ``realized_pnl_pct`` agree — partial is the more general accessor."""
+    bracket = _multi_bracket_3legs()
+    bars = _bars_all_tps_hit()
+    run_dir = _run_engine(tmp_path, bars, bracket)
+    reader = EventLogReader(run_dir / "events.jsonl")
+    trades = identify_trades(reader)
+    t = trades[0]
+    assert t.open is False
+    assert t.realized_pnl_pct is not None
+    assert t.partial_pnl_pct is not None
+    assert t.realized_pnl_pct == t.partial_pnl_pct
+
+
