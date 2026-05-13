@@ -114,11 +114,15 @@ class BbkcDemoBroker(LiveBroker):
                 continue
             lot = item.get("lotSizeFilter", {})
             try:
-                self._qty_step[sym] = float(lot.get("qtyStep", "0.001"))
+                self._qty_step[sym] = float(
+                    item.get("qty_step", lot.get("qtyStep", "0.001"))
+                )
             except Exception:
                 self._qty_step[sym] = 0.001
             try:
-                self._min_qty[sym] = float(lot.get("minOrderQty", "0.001"))
+                self._min_qty[sym] = float(
+                    item.get("min_qty", lot.get("minOrderQty", "0.001"))
+                )
             except Exception:
                 self._min_qty[sym] = 0.001
             logger.info(
@@ -146,6 +150,9 @@ class BbkcDemoBroker(LiveBroker):
             return float(qty)
         n_steps = math.floor(qty / step)
         rounded = n_steps * step
+        step_text = f"{step:.12f}".rstrip("0").rstrip(".")
+        decimals = len(step_text.split(".")[1]) if "." in step_text else 0
+        rounded = round(rounded, decimals)
         min_q = self._min_qty.get(symbol, 0.0)
         if rounded < min_q:
             return 0.0

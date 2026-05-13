@@ -75,7 +75,7 @@ class BybitRestClient:
                     "qty_step": float(lot.get("qtyStep", 0)),
                     "tick_size": float(price.get("tickSize", 0)),
                     "min_notional": float(price.get("minPrice", 0)),
-                    "max_leverage": int(lev.get("maxLeverage", 0)),
+                    "max_leverage": int(float(lev.get("maxLeverage", 0))),
                     "contract_type": item.get("contractType", ""),
                     "updated_at": None,
                 }

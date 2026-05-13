@@ -41,7 +41,7 @@ class TestBybitRestClient:
             {"symbol":"BTCUSDT","baseCoin":"BTC","quoteCoin":"USDT",
              "lotSizeFilter":{"minOrderQty":"0.001","qtyStep":"0.001"},
              "priceFilter":{"tickSize":"0.1","minPrice":"0.1"},
-             "leverageFilter":{"maxLeverage":"100"},"contractType":"LinearPerpetual"}]}}
+             "leverageFilter":{"maxLeverage":"100.00"},"contractType":"LinearPerpetual"}]}}
         products = BybitRestClient("k","s","https://api-demo.bybit.com").get_instruments()
         assert len(products) == 1
         assert products[0]["symbol"] == "BTCUSDT"

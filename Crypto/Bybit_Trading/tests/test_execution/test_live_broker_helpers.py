@@ -177,3 +177,26 @@ def test_bbkc_demo_legacy_notional_qty_uses_max_position_pct_and_leverage():
     qty = broker.calc_legacy_notional_qty("BTCUSDT", entry_price=77_093.30)
 
     assert qty == 0.097
+
+
+def test_bbkc_demo_fetch_instrument_specs_uses_normalized_fields():
+    broker = BbkcDemoBroker.__new__(BbkcDemoBroker)
+    broker._symbols_allowed = {"BTCUSDT", "ETHUSDT", "AVAXUSDT"}
+    broker._qty_step = {}
+    broker._min_qty = {}
+    broker._rest = MagicMock()
+    broker._rest.get_instruments.return_value = [
+        {"symbol": "BTCUSDT", "qty_step": 0.001, "min_qty": 0.001},
+        {"symbol": "ETHUSDT", "qty_step": 0.01, "min_qty": 0.01},
+        {"symbol": "AVAXUSDT", "qty_step": 0.1, "min_qty": 0.1},
+    ]
+
+    broker._fetch_instrument_specs()
+
+    assert broker._qty_step == {
+        "BTCUSDT": 0.001,
+        "ETHUSDT": 0.01,
+        "AVAXUSDT": 0.1,
+    }
+    assert broker._round_qty("ETHUSDT", 3.131) == 3.13
+    assert broker._round_qty("AVAXUSDT", 757.943) == 757.9
