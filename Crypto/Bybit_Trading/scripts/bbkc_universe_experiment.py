@@ -274,8 +274,8 @@ def make_strategy(leverage: int, tp_pct: float, sl_pct: float) -> BBKCSqueeze:
 
 def run_single_symbol(sd: SymbolData, cfg: BacktestConfig, risk_cfg: RiskConfig,
                       leverage: int, tp_pct: float, sl_pct: float,
-                      max_position_pct: float, apply_lot_rounding: bool = True
-                      ) -> Dict[str, Any]:
+                      max_position_pct: float, apply_lot_rounding: bool = True,
+                      return_broker: bool = False):
     broker = ExpBroker(cfg, risk_cfg, leverage=leverage,
                        max_position_pct=max_position_pct,
                        symbol_specs=INSTRUMENT_SPECS,
@@ -314,6 +314,8 @@ def run_single_symbol(sd: SymbolData, cfg: BacktestConfig, risk_cfg: RiskConfig,
         "leverage": leverage, "tp_pct": tp_pct, "sl_pct": sl_pct,
         "max_position_pct": max_position_pct,
     })
+    if return_broker:
+        return m, broker
     return m
 
 
@@ -321,7 +323,7 @@ def run_combo(symbols: List[str], data: Dict[str, SymbolData],
               cfg: BacktestConfig, risk_cfg: RiskConfig, leverage: int,
               tp_pct: float, sl_pct: float,
               per_symbol_max_pos_pct: Dict[str, float],
-              apply_lot_rounding: bool = True) -> Dict[str, Any]:
+              apply_lot_rounding: bool = True, return_broker: bool = False):
     """True multi-symbol backtest: one shared ExpBroker, chronological bar
     events across all symbols, one BBKCSqueeze instance (keyed by bar.symbol)."""
     # ExpBroker needs *one* max_position_pct; for per-symbol weights we pass a
@@ -411,6 +413,8 @@ def run_combo(symbols: List[str], data: Dict[str, SymbolData],
         "per_symbol_max_pos_pct": dict(per_symbol_max_pos_pct),
         "per_symbol_contribution": contrib,
     })
+    if return_broker:
+        return m, broker
     return m
 
 
@@ -583,6 +587,78 @@ def cmd_weights(args, db, cfg, risk_cfg) -> None:
                                   "single_symbol": {s: single[s] for s in syms}})
 
 
+def cmd_slsweep(args, db, cfg, risk_cfg) -> None:
+    """Sweep the *price-based* initial stop while keeping price-TP fixed and
+    leverage fixed (3x). The be_trail BE/trail triggers are anchored to TP
+    (tp_distance = entry * tp_pct / leverage), so this only moves the initial
+    backstop — not the trailing logic."""
+    syms = args.symbols
+    lev = args.leverage
+    price_tp = args.price_tp                       # default 0.02 -> tp_pct = 0.06 at 3x
+    tp_pct = price_tp * lev
+    price_sl_list = sorted(set(args.sl_list + [price_tp, DEFAULT_SL_PCT / DEFAULT_LEVERAGE]))
+    data = {s: load_symbol_data(db, s) for s in syms}
+    rows: List[Dict[str, Any]] = []
+    for s in syms:
+        for psl in price_sl_list:
+            sl_pct = psl * lev
+            m = run_single_symbol(data[s], cfg, risk_cfg, leverage=lev,
+                                  tp_pct=tp_pct, sl_pct=sl_pct,
+                                  max_position_pct=DEFAULT_MAX_POS_PCT,
+                                  apply_lot_rounding=True)
+            m["price_sl"] = psl
+            m["price_tp"] = price_tp
+            m["rr_ratio"] = price_tp / psl
+            rows.append(m)
+    # also the BTC+ETH and BIGTHREE combos at each SL (equal weights)
+    combo_rows: Dict[str, List[Dict[str, Any]]] = {}
+    for cname, csyms in (("BTC_ETH", ["BTCUSDT", "ETHUSDT"]),
+                         ("BIGTHREE", ["BTCUSDT", "ETHUSDT", "AVAXUSDT"])):
+        if not all(s in data for s in csyms):
+            for s in csyms:
+                if s not in data:
+                    data[s] = load_symbol_data(db, s)
+        lst = []
+        for psl in price_sl_list:
+            sl_pct = psl * lev
+            r = run_combo(csyms, data, cfg, risk_cfg, leverage=lev, tp_pct=tp_pct,
+                          sl_pct=sl_pct,
+                          per_symbol_max_pos_pct={s: DEFAULT_MAX_POS_PCT for s in csyms},
+                          apply_lot_rounding=True)
+            r["price_sl"] = psl; r["price_tp"] = price_tp; r["rr_ratio"] = price_tp / psl
+            lst.append(r)
+        combo_rows[cname] = lst
+
+    print(f"\n### Stop-loss sweep — price-TP fixed at {price_tp*100:.2f}%, leverage {lev}x, live-forward sizing")
+    print("(be_trail BE/trail triggers anchored to TP, unchanged: BE @ "
+          f"{price_tp*0.25*100:.2f}% / trail-start @ {price_tp*0.60*100:.2f}% / "
+          f"trail-dist {price_tp*0.30*100:.2f}% price move)")
+    for s in syms:
+        print(f"\n#### {s}")
+        print("| price_SL% | sl_pct | R:R(TP/SL) | 거래수 | 승률 | 총수익률 | 총PnL$ | PF | MDD% | 평균익$ | 평균손$ | 최대연속손실 | Sharpe/t |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        for r in [x for x in rows if x["symbol"] == s]:
+            mark = " ←현행" if abs(r["price_sl"] - DEFAULT_SL_PCT / DEFAULT_LEVERAGE) < 1e-9 else (
+                "  (=TP, symmetric)" if abs(r["price_sl"] - price_tp) < 1e-9 else "")
+            print(f"| {r['price_sl']*100:.3f}{mark} | {r['sl_pct']:.4f} | {r['rr_ratio']:.2f} | "
+                  f"{r['n_trades']} | {r['win_rate']*100:.1f} | {r['total_return_pct']*100:+.2f} | "
+                  f"{r['net_pnl_usdt']:+,.1f} | {_pf(r['profit_factor'])} | {r['max_drawdown_pct']*100:.2f} | "
+                  f"{r['avg_win']:+,.1f} | {r['avg_loss']:+,.1f} | {r['max_consecutive_losses']} | "
+                  f"{r['sharpe_per_trade']:.2f} |")
+    for cname, lst in combo_rows.items():
+        print(f"\n#### combo {cname} (equal {DEFAULT_MAX_POS_PCT} each, 3x)")
+        print("| price_SL% | R:R | 거래수 | 승률 | 총수익률 | 총PnL$ | PF | MDD% | 최대연속손실 | Sharpe/t | 동시포지션 max |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|")
+        for r in lst:
+            mark = " ←현행" if abs(r["price_sl"] - DEFAULT_SL_PCT / DEFAULT_LEVERAGE) < 1e-9 else ""
+            print(f"| {r['price_sl']*100:.3f}{mark} | {r['rr_ratio']:.2f} | {r['n_trades']} | "
+                  f"{r['win_rate']*100:.1f} | {r['total_return_pct']*100:+.2f} | {r['net_pnl_usdt']:+,.1f} | "
+                  f"{_pf(r['profit_factor'])} | {r['max_drawdown_pct']*100:.2f} | {r['max_consecutive_losses']} | "
+                  f"{r['sharpe_per_trade']:.2f} | {r['max_concurrent_positions']} |")
+    _save("phase_slsweep.json", {"single": rows, "combos": combo_rows,
+                                 "price_tp": price_tp, "leverage": lev})
+
+
 def cmd_leverage(args, db, cfg, risk_cfg) -> None:
     syms = args.universe
     if getattr(args, "no_guards", False):
@@ -621,6 +697,343 @@ def cmd_leverage(args, db, cfg, risk_cfg) -> None:
 
 
 # ===========================================================================
+# Phase WF — fixed-parameter rolling out-of-sample validation
+# ===========================================================================
+# NOTE: this is *fixed-parameter rolling OOS validation*, NOT rolling
+# re-optimization. The be25_st60_di30 cell (and any --sl-eth override) is held
+# constant in every window; the "IS" period is reported only as prior-window
+# context and is NOT a fit set.
+
+def _git_commit() -> str:
+    import subprocess
+    try:
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(PROJECT_ROOT),
+                              capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def _r_per_trade(trades: List[Any], price_sl: float) -> float:
+    rs = []
+    for t in trades:
+        risk = t.qty * t.entry_price * price_sl
+        if risk > 0:
+            rs.append(t.pnl / risk)
+    return float(np.mean(rs)) if rs else 0.0
+
+
+def _daily_sharpe(trades: List[Any], oos_start_ms: int, oos_end_ms: int,
+                  initial_capital: float) -> float:
+    """Sharpe of the daily equity-return series over the OOS window (flat days
+    count as 0). Annualized with sqrt(365)."""
+    if oos_end_ms <= oos_start_ms:
+        return 0.0
+    n_days = max(1, int((oos_end_ms - oos_start_ms) / 86_400_000))
+    daily = np.zeros(n_days)
+    for t in trades:
+        d = int((int(t.exit_time) - oos_start_ms) // 86_400_000)
+        if 0 <= d < n_days:
+            daily[d] += t.pnl
+    rets = daily / initial_capital
+    sd = float(np.std(rets, ddof=1)) if len(rets) > 1 else 0.0
+    return (float(np.mean(rets)) / sd) * math.sqrt(365) if sd > 0 else 0.0
+
+
+def _window_oos_metrics(all_trades: List[Any], oos_s: datetime, oos_e: datetime,
+                        initial_capital: float, price_sl: float) -> Dict[str, Any]:
+    from src.evaluation.holdout import compute_metrics_from_trades
+    oms = int(oos_s.replace(tzinfo=timezone.utc).timestamp() * 1000)
+    ome = int(oos_e.replace(tzinfo=timezone.utc).timestamp() * 1000)
+    win = [t for t in all_trades if oms <= int(t.entry_time) < ome]
+    m = compute_metrics_from_trades(win, initial_capital)
+    pnls = [t.pnl for t in win]
+    wins = [p for p in pnls if p > 0]; losses = [p for p in pnls if p <= 0]
+    gp = sum(wins) if wins else 0.0; gl = abs(sum(losses)) if losses else 0.0
+    return {
+        "oos_start": oos_s.strftime("%Y-%m-%d"), "oos_end": oos_e.strftime("%Y-%m-%d"),
+        "n_trades": int(m.get("n_trades", 0)),
+        "win_rate": float(m.get("win_rate", 0.0)),
+        "net_pnl": float(m.get("total_pnl", 0.0)),
+        "net_pct": float(m.get("total_pnl", 0.0)) / initial_capital,
+        "max_dd_pct": float(m.get("max_drawdown", 0.0)),
+        "profit_factor": (gp / gl) if gl > 0 else (float("inf") if gp > 0 else 0.0),
+        "r_per_trade": _r_per_trade(win, price_sl),
+        "daily_sharpe": _daily_sharpe(win, oms, ome, initial_capital),
+    }
+
+
+def _max_consec_neg(values: List[float]) -> int:
+    best = cur = 0
+    for v in values:
+        if v < 0:
+            cur += 1; best = max(best, cur)
+        else:
+            cur = 0
+    return best
+
+
+def cmd_wf(args, db, cfg, risk_cfg) -> None:
+    import sys as _sys
+    sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+    from bbkc_exit_eval import build_wf_windows, _add_months
+    from src.core.config import BacktestConfig as _BC
+    from src.evaluation.holdout import HoldoutSpec, run_strategy_on_holdout
+    from src.backtester.engine import BacktestEngine
+
+    fmt = "%Y-%m-%d"
+    data_start = args.data_start or args.anchor_date
+    data_end = args.data_end
+    live_start = datetime.strptime(args.live_start, fmt)
+    is_m, oos_m, step_m = args.is_months, args.oos_months, args.step_months
+    # how many windows fit before data_end?
+    sdt = datetime.strptime(args.anchor_date, fmt)
+    edt = datetime.strptime(data_end, fmt)
+    n_windows = 0
+    while True:
+        is_s = _add_months(sdt, step_m * n_windows)
+        oos_e = _add_months(_add_months(is_s, is_m), oos_m)
+        if _add_months(is_s, is_m) >= edt:
+            break
+        n_windows += 1
+    n_windows = max(1, n_windows)
+    windows = build_wf_windows(args.anchor_date, data_end, is_m, oos_m, step_m, n_windows)
+
+    # configs: name -> (symbols, sl_pct override or None)
+    configs: Dict[str, Tuple[List[str], Optional[float]]] = {
+        "A_ETH":          (["ETHUSDT"], None),
+        "B_BTC":          (["BTCUSDT"], None),
+        "C_BTC_ETH":      (["BTCUSDT", "ETHUSDT"], None),
+        "D_BIGTHREE":     (["BTCUSDT", "ETHUSDT", "AVAXUSDT"], None),
+        "A_ETH_sl1.9":    (["ETHUSDT"], TARGET_PRICE_TP * DEFAULT_LEVERAGE),  # placeholder, set below
+    }
+    # SL-1.9% variant: price_sl = 0.019 -> sl_pct = 0.019*3
+    configs["A_ETH_sl1.9"] = (["ETHUSDT"], 0.019 * DEFAULT_LEVERAGE)
+
+    cost_mults = args.cost_mult
+    base_taker, base_slip = cfg.taker_fee_pct, cfg.slippage_pct
+    initial = cfg.initial_capital
+
+    # data cache
+    _data: Dict[str, SymbolData] = {}
+    def _get(sym: str) -> SymbolData:
+        if sym not in _data:
+            _data[sym] = load_symbol_data(db, sym)
+        return _data[sym]
+
+    def run_full_trades(symbols: List[str], sl_pct_override: Optional[float],
+                        cost_mult: float) -> List[Any]:
+        """Full-history backtest with *live-forward* sizing (ExpBroker, mpp=0.05,
+        3x, daily-reset wired) so the run isn't truncated by the never-resetting
+        canonical daily-loss / 15%-MDD halt. Returns the trade list.
+        single symbol -> run_single_symbol; multi -> shared-equity run_combo."""
+        tp_pct = DEFAULT_TP_PCT
+        sl_pct = sl_pct_override if sl_pct_override is not None else DEFAULT_SL_PCT
+        bc = _BC(initial_capital=initial,
+                 taker_fee_pct=base_taker * cost_mult,
+                 maker_fee_pct=cfg.maker_fee_pct * cost_mult,
+                 slippage_pct=base_slip * cost_mult)
+        if len(symbols) == 1:
+            _m, broker = run_single_symbol(_get(symbols[0]), bc, risk_cfg,
+                                           leverage=DEFAULT_LEVERAGE, tp_pct=tp_pct, sl_pct=sl_pct,
+                                           max_position_pct=DEFAULT_MAX_POS_PCT,
+                                           apply_lot_rounding=True, return_broker=True)
+        else:
+            dmap = {s: _get(s) for s in symbols}
+            _m, broker = run_combo(symbols, dmap, bc, risk_cfg, leverage=DEFAULT_LEVERAGE,
+                                   tp_pct=tp_pct, sl_pct=sl_pct,
+                                   per_symbol_max_pos_pct={s: DEFAULT_MAX_POS_PCT for s in symbols},
+                                   apply_lot_rounding=True, return_broker=True)
+        return broker.get_trades()
+
+    print(f"\n### Phase WF — fixed-parameter rolling OOS validation (NOT re-optimization)")
+    print(f"cell=be25_st60_di30 (fixed), 3x, live-forward sizing (ExpBroker mpp=0.05, daily-reset), 1h. "
+          f"windows: IS {is_m}m / OOS {oos_m}m / step {step_m}m, anchor {args.anchor_date}, "
+          f"data {data_start}..{data_end}  -> {n_windows} windows")
+    print(f"live forward started {args.live_start}; OOS windows ending after that are 'overlap_live_oos'.")
+    print(f"min trades/window for full confidence: {args.min_trades_per_window}. "
+          f"verdict {'excludes' if args.exclude_live_overlap_from_verdict else 'includes'} live-overlap windows.")
+    print(f"cost-stress multipliers: {cost_mults}")
+
+    results: Dict[str, Any] = {
+        "_meta": {
+            "git_commit": _git_commit(),
+            "run_utc": datetime.now(timezone.utc).isoformat(),
+            "data_start": data_start, "data_end": data_end,
+            "anchor": args.anchor_date, "is_months": is_m, "oos_months": oos_m,
+            "step_months": step_m, "n_windows": n_windows,
+            "live_start": args.live_start, "min_trades_per_window": args.min_trades_per_window,
+            "exclude_live_overlap_from_verdict": args.exclude_live_overlap_from_verdict,
+            "cost_mults": cost_mults, "sizing": "live-forward (ExpBroker mpp=0.05, leverage 3, qty_step/min rounding, daily reset_daily)",
+            "code": "scripts/bbkc_universe_experiment.py wf",
+        },
+        "configs": {},
+    }
+
+    per_config_oos: Dict[str, List[Dict[str, Any]]] = {}
+    for cname, (syms, sl_ov) in configs.items():
+        price_sl = (sl_ov / DEFAULT_LEVERAGE) if sl_ov is not None else (DEFAULT_SL_PCT / DEFAULT_LEVERAGE)
+        # base-cost full-history run
+        all_t = run_full_trades(syms, sl_ov, 1.0)
+        win_rows = []
+        for (is_s, is_e, oos_s, oos_e) in windows:
+            m = _window_oos_metrics(all_t, oos_s, oos_e, initial, price_sl)
+            # IS context (prior 6mo) — NOT a fit set
+            is_m_metrics = _window_oos_metrics(all_t, is_s, is_e, initial, price_sl)
+            m["is_r_per_trade"] = is_m_metrics["r_per_trade"]
+            m["is_n_trades"] = is_m_metrics["n_trades"]
+            m["low_confidence"] = m["n_trades"] < args.min_trades_per_window
+            m["live_overlap"] = oos_e > live_start
+            win_rows.append(m)
+        per_config_oos[cname] = win_rows
+
+        # aggregates
+        def agg(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+            if not rows:
+                return {"n_windows": 0}
+            netpcts = [r["net_pct"] for r in rows]
+            rpts = [r["r_per_trade"] for r in rows]
+            return {
+                "n_windows": len(rows),
+                "oos_positive": sum(1 for r in rows if r["net_pct"] > 0),
+                "frac_positive": sum(1 for r in rows if r["net_pct"] > 0) / len(rows),
+                "mean_net_pct": float(np.mean(netpcts)),
+                "median_net_pct": float(np.median(netpcts)),
+                "mean_r_per_trade": float(np.mean(rpts)),
+                "median_r_per_trade": float(np.median(rpts)),
+                "worst_net_pct": float(np.min(netpcts)),
+                "max_consec_losing_windows": _max_consec_neg(netpcts),
+                "mean_is_r_per_trade": float(np.mean([r["is_r_per_trade"] for r in rows])),
+                "total_oos_trades": sum(r["n_trades"] for r in rows),
+                "mean_daily_sharpe": float(np.mean([r["daily_sharpe"] for r in rows])),
+            }
+        pure = [r for r in win_rows if not r["live_overlap"]]
+        ovl = [r for r in win_rows if r["live_overlap"]]
+        hi_conf_pure = [r for r in pure if not r["low_confidence"]]
+        agg_all = agg(win_rows); agg_pure = agg(pure); agg_ovl = agg(ovl); agg_hi = agg(hi_conf_pure)
+        deg = (agg_pure["mean_r_per_trade"] / agg_pure["mean_is_r_per_trade"]
+               if agg_pure.get("mean_is_r_per_trade", 0) > 0 else float("nan"))
+
+        # verdict on pure_backtest_oos (or all if --no-exclude)
+        verdict_set = pure if args.exclude_live_overlap_from_verdict else win_rows
+        va = agg(verdict_set)
+        rules = {}
+        rules["oos_positive_>=60%"] = (va.get("frac_positive", 0) >= 0.60, va.get("frac_positive", 0))
+        rules["mean_oos_net%_>0"] = (va.get("mean_net_pct", 0) > 0, va.get("mean_net_pct", 0))
+        rules["median_oos_R/trade_>0"] = (va.get("median_r_per_trade", 0) > 0, va.get("median_r_per_trade", 0))
+        is_r = va.get("mean_is_r_per_trade", 0)
+        rules["mean_oos_R/trade_>=50%_IS"] = (
+            (va.get("mean_r_per_trade", 0) >= 0.5 * is_r) if is_r > 0 else True,
+            f"{va.get('mean_r_per_trade',0):.3f} vs IS {is_r:.3f}")
+        rules["worst_oos_window_>=-8%"] = (va.get("worst_net_pct", -1) >= -0.08, va.get("worst_net_pct", 0))
+        rules["max_consec_losing_oos_<=2"] = (va.get("max_consec_losing_windows", 99) <= 2,
+                                              va.get("max_consec_losing_windows", 0))
+        passed = all(v[0] for v in rules.values())
+        results["configs"][cname] = {
+            "symbols": syms, "price_sl_pct": price_sl,
+            "windows": win_rows,
+            "agg_all": agg_all, "agg_pure_backtest_oos": agg_pure,
+            "agg_overlap_live_oos": agg_ovl, "agg_hi_conf_pure": agg_hi,
+            "is_to_oos_degradation": deg,
+            "verdict": {"pass": passed, "basis": ("pure_backtest_oos" if args.exclude_live_overlap_from_verdict else "all_oos"),
+                        "rules": {k: {"pass": v[0], "value": v[1]} for k, v in rules.items()}},
+        }
+
+    # ---- pairwise comparison: A_ETH vs B/C/D (per-window paired diff in R/trade) ----
+    from scipy import stats as _st
+    comp: Dict[str, Any] = {}
+    base_rows = per_config_oos["A_ETH"]
+    base_pure_idx = [i for i, r in enumerate(base_rows) if not r["live_overlap"]]
+    for other in ("B_BTC", "C_BTC_ETH", "D_BIGTHREE"):
+        orows = per_config_oos[other]
+        diffs = [base_rows[i]["r_per_trade"] - orows[i]["r_per_trade"] for i in base_pure_idx]
+        diffs = [d for d in diffs if not (isinstance(d, float) and math.isnan(d))]
+        n = len(diffs)
+        k_pos = sum(1 for d in diffs if d > 0)
+        # two-sided sign test
+        if n > 0:
+            tail = max(k_pos, n - k_pos)
+            from math import comb
+            p_sign = min(1.0, 2.0 * sum(comb(n, j) for j in range(tail, n + 1)) / (2 ** n))
+        else:
+            p_sign = 1.0
+        try:
+            wstat, p_wil = _st.wilcoxon(diffs) if n >= 1 and any(d != 0 for d in diffs) else (float("nan"), 1.0)
+        except Exception:
+            p_wil = float("nan")
+        comp[f"A_ETH_vs_{other}"] = {
+            "n_windows": n, "n_A_wins": k_pos, "median_diff_R/trade": float(np.median(diffs)) if diffs else 0.0,
+            "mean_diff_R/trade": float(np.mean(diffs)) if diffs else 0.0,
+            "sign_test_p_2sided": p_sign, "wilcoxon_p_2sided": float(p_wil),
+            "A_advantage": (k_pos > n - k_pos and (float(np.median(diffs)) if diffs else 0) > 0 and min(p_sign, p_wil if not math.isnan(p_wil) else 1.0) < 0.10),
+        }
+    results["A_vs_others"] = comp
+
+    # ---- cost stress on A_ETH and C_BTC_ETH ----
+    cost_rows: Dict[str, List[Dict[str, Any]]] = {}
+    for cname in ("A_ETH", "C_BTC_ETH"):
+        syms, sl_ov = configs[cname]
+        price_sl = (sl_ov / DEFAULT_LEVERAGE) if sl_ov is not None else (DEFAULT_SL_PCT / DEFAULT_LEVERAGE)
+        rows = []
+        for cm in cost_mults:
+            all_t = run_full_trades(syms, sl_ov, cm)
+            wm = [_window_oos_metrics(all_t, oos_s, oos_e, initial, price_sl)
+                  for (_, _, oos_s, oos_e) in windows]
+            pure_wm = [w for w, (_, _, _, oe) in zip(wm, windows) if oe <= live_start]
+            netpcts = [w["net_pct"] for w in pure_wm]
+            rows.append({"cost_mult": cm, "n_windows": len(pure_wm),
+                         "oos_positive": sum(1 for w in pure_wm if w["net_pct"] > 0),
+                         "mean_net_pct": float(np.mean(netpcts)) if netpcts else 0.0,
+                         "mean_r_per_trade": float(np.mean([w["r_per_trade"] for w in pure_wm])) if pure_wm else 0.0,
+                         "total_pnl": float(sum(w["net_pnl"] for w in pure_wm))})
+        cost_rows[cname] = rows
+    results["cost_stress"] = cost_rows
+
+    # ---- print summary ----
+    print("\n#### per-config OOS aggregate (pure_backtest_oos = windows ending before live start)")
+    print("| config | symbols | OOS+/n | frac+ | mean net% | median net% | mean R/t | median R/t | worst net% | maxConsecLosingW | IS→OOS deg | mean dailySharpe | VERDICT |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for cname, cfgr in results["configs"].items():
+        a = cfgr["agg_pure_backtest_oos"]
+        v = cfgr["verdict"]
+        print(f"| {cname} | {'+'.join(s.replace('USDT','') for s in cfgr['symbols'])} | "
+              f"{a.get('oos_positive',0)}/{a.get('n_windows',0)} | {a.get('frac_positive',0)*100:.0f}% | "
+              f"{a.get('mean_net_pct',0)*100:+.2f} | {a.get('median_net_pct',0)*100:+.2f} | "
+              f"{a.get('mean_r_per_trade',0):+.3f} | {a.get('median_r_per_trade',0):+.3f} | "
+              f"{a.get('worst_net_pct',0)*100:+.2f} | {a.get('max_consec_losing_windows',0)} | "
+              f"{cfgr['is_to_oos_degradation']:.2f} | {a.get('mean_daily_sharpe',0):.2f} | "
+              f"{'PASS' if v['pass'] else 'FAIL'} |")
+    print("\n#### verdict rules (basis = pure_backtest_oos)")
+    for cname, cfgr in results["configs"].items():
+        v = cfgr["verdict"]
+        fails = [k for k, r in v["rules"].items() if not r["pass"]]
+        print(f"  {cname}: {'PASS' if v['pass'] else 'FAIL'}" + ("" if v["pass"] else f"  (failed: {', '.join(fails)})"))
+        for k, r in v["rules"].items():
+            print(f"      {'OK ' if r['pass'] else 'NO '}{k}: {r['value']}")
+    print("\n#### A_ETH vs others (per-window paired diff in R/trade, pure_backtest_oos)")
+    print("| comparison | n | A wins | median ΔR/t | mean ΔR/t | sign-test p | Wilcoxon p | A advantage? |")
+    print("|---|---|---|---|---|---|---|---|")
+    for k, c in results["A_vs_others"].items():
+        print(f"| {k} | {c['n_windows']} | {c['n_A_wins']} | {c['median_diff_R/trade']:+.3f} | "
+              f"{c['mean_diff_R/trade']:+.3f} | {c['sign_test_p_2sided']:.3f} | "
+              f"{c['wilcoxon_p_2sided']:.3f} | {'YES' if c['A_advantage'] else 'no'} |")
+    print("\n#### cost stress (pure_backtest_oos)")
+    print("| config | cost_mult | OOS+/n | mean net% | mean R/t | total PnL$ |")
+    print("|---|---|---|---|---|---|")
+    for cname, rows in results["cost_stress"].items():
+        for r in rows:
+            print(f"| {cname} | {r['cost_mult']:.2f}x | {r['oos_positive']}/{r['n_windows']} | "
+                  f"{r['mean_net_pct']*100:+.2f} | {r['mean_r_per_trade']:+.3f} | {r['total_pnl']:+,.1f} |")
+    print("\n#### window list (config A_ETH)")
+    print("| # | OOS start | OOS end | live? | lowConf? | trades | win% | net% | R/t | dailySharpe | IS R/t |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    for i, r in enumerate(per_config_oos["A_ETH"]):
+        print(f"| {i} | {r['oos_start']} | {r['oos_end']} | {'Y' if r['live_overlap'] else ''} | "
+              f"{'Y' if r['low_confidence'] else ''} | {r['n_trades']} | {r['win_rate']*100:.1f} | "
+              f"{r['net_pct']*100:+.2f} | {r['r_per_trade']:+.3f} | {r['daily_sharpe']:.2f} | {r['is_r_per_trade']:+.3f} |")
+    _save("phase_wf.json", results)
+
+
+# ===========================================================================
 def main() -> int:
     # the canonical reference run can spam "order rejected" lines from the
     # never-resetting daily-loss counter (artifact of BacktestEngine not calling
@@ -632,6 +1045,26 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("single")
     sub.add_parser("combo")
+    pf = sub.add_parser("wf")
+    pf.add_argument("--anchor-date", default="2024-04-01")
+    pf.add_argument("--data-start", default=None, help="defaults to --anchor-date")
+    pf.add_argument("--data-end", default="2026-05-13")
+    pf.add_argument("--is-months", type=int, default=6)
+    pf.add_argument("--oos-months", type=int, default=2)
+    pf.add_argument("--step-months", type=int, default=2)
+    pf.add_argument("--min-trades-per-window", type=int, default=10)
+    pf.add_argument("--live-start", default="2026-04-29")
+    pf.add_argument("--exclude-live-overlap-from-verdict", action="store_true", default=True)
+    pf.add_argument("--include-live-overlap-in-verdict", dest="exclude_live_overlap_from_verdict",
+                    action="store_false")
+    pf.add_argument("--cost-mult", nargs="+", type=float, default=[1.0, 1.25, 1.5])
+    ps = sub.add_parser("slsweep")
+    ps.add_argument("--symbols", nargs="+", default=ALL_SYMBOLS)
+    ps.add_argument("--sl-list", nargs="+", type=float,
+                    default=[0.015, 0.016, 0.017, 0.018, 0.019, 0.020],
+                    help="price-based SL fractions to sweep (e.g. 0.015 = 1.5%)")
+    ps.add_argument("--price-tp", type=float, default=0.02, help="price-based TP fraction (fixed)")
+    ps.add_argument("--leverage", type=int, default=3)
     pw = sub.add_parser("weights"); pw.add_argument("--universe", nargs="+", required=True)
     pl = sub.add_parser("leverage"); pl.add_argument("--universe", nargs="+", required=True)
     pl.add_argument("--weights-json", default=None,
@@ -652,7 +1085,7 @@ def main() -> int:
           f"max_concurrent={risk_cfg.max_concurrent} daily_loss_limit={risk_cfg.daily_loss_limit_pct} "
           f"max_dd={risk_cfg.max_drawdown_pct}")
 
-    {"single": cmd_single, "combo": cmd_combo,
+    {"single": cmd_single, "combo": cmd_combo, "slsweep": cmd_slsweep, "wf": cmd_wf,
      "weights": cmd_weights, "leverage": cmd_leverage}[args.cmd](args, db, cfg, risk_cfg)
     return 0
 
