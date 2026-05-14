@@ -27,14 +27,21 @@ class AlertManager:
             and bool(self.config.telegram_chat_id)
         )
 
-    def notify(self, level: str, message: str) -> None:
+    def notify(self, level: str, message: str, bypass_throttle: bool = False) -> None:
+        """Send an alert. Throttle applies per-level unless ``bypass_throttle``.
+
+        Trade entry/exit alerts bypass throttle so every fill is reported even
+        when multiple trades fire inside the throttle window. Other levels
+        (ERROR / DAILY / SYSTEM) stay throttled to prevent spam loops.
+        """
         if not self.enabled:
             return
-        now = time.time()
-        if now - self._last_sent.get(level, 0) < self.throttle_seconds:
-            return
+        if not bypass_throttle:
+            now = time.time()
+            if now - self._last_sent.get(level, 0) < self.throttle_seconds:
+                return
+            self._last_sent[level] = now
         self._send_telegram(f"[{level}] {message}")
-        self._last_sent[level] = now
 
     def on_trade_entry(
         self, symbol: str, side: str, qty: float, price: float, strategy: str
@@ -44,6 +51,7 @@ class AlertManager:
         self.notify(
             "TRADE",
             f"진입: {symbol} {side}\n가격: {price:,.1f} | 수량: {qty}\n전략: {strategy}",
+            bypass_throttle=True,
         )
 
     def on_trade_exit(
@@ -55,6 +63,7 @@ class AlertManager:
             "TRADE_EXIT",
             f"청산: {symbol} {side} ({exit_reason})\n"
             f"PnL: {'+' if pnl >= 0 else ''}{pnl:,.2f} USDT\n전략: {strategy}",
+            bypass_throttle=True,
         )
 
     def on_error(self, error_msg: str) -> None:

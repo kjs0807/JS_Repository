@@ -62,3 +62,42 @@ class TestAlertManager:
     def test_on_trade_entry_disabled(self):
         mgr = AlertManager(AlertConfig(telegram_enabled=True, telegram_token="t", telegram_chat_id="c", alert_on_trade=False))
         mgr.on_trade_entry("BTCUSDT", "LONG", 0.01, 65000.0, "Test")
+
+    @patch("src.core.alert.requests.post")
+    def test_trade_entries_bypass_throttle(self, mock_post):
+        """Back-to-back trade entries must all fire — every fill matters."""
+        mock_post.return_value = MagicMock(status_code=200)
+        mgr = AlertManager(
+            AlertConfig(telegram_enabled=True, telegram_token="t", telegram_chat_id="c", alert_on_trade=True),
+            throttle_seconds=60,
+        )
+        mgr.on_trade_entry("BTCUSDT", "LONG", 0.01, 65000.0, "Test")
+        mgr.on_trade_entry("ETHUSDT", "SHORT", 0.5, 2400.0, "Test")
+        mgr.on_trade_entry("BTCUSDT", "LONG", 0.02, 65100.0, "Test")
+        assert mock_post.call_count == 3
+
+    @patch("src.core.alert.requests.post")
+    def test_trade_exits_bypass_throttle(self, mock_post):
+        mock_post.return_value = MagicMock(status_code=200)
+        mgr = AlertManager(
+            AlertConfig(telegram_enabled=True, telegram_token="t", telegram_chat_id="c", alert_on_trade=True),
+            throttle_seconds=60,
+        )
+        mgr.on_trade_exit("BTCUSDT", "LONG", 150.0, "TP", "Test")
+        mgr.on_trade_exit("ETHUSDT", "SHORT", -80.0, "STOP", "Test")
+        assert mock_post.call_count == 2
+
+    @patch("src.core.alert.requests.post")
+    def test_non_trade_levels_still_throttled(self, mock_post):
+        """Regression guard: ERROR / DAILY / SYSTEM must remain throttled."""
+        mock_post.return_value = MagicMock(status_code=200)
+        mgr = AlertManager(
+            AlertConfig(telegram_enabled=True, telegram_token="t", telegram_chat_id="c",
+                        alert_on_error=True, alert_on_daily_summary=True),
+            throttle_seconds=60,
+        )
+        mgr.on_error("first error")
+        mgr.on_error("second error")
+        mgr.on_system_event("first system")
+        mgr.on_system_event("second system")
+        assert mock_post.call_count == 2  # one per level, second drops by throttle
