@@ -152,6 +152,35 @@ class BybitRestClient:
         )
         return resp.get("result", {})
 
+    def get_order(
+        self, *, order_id: str, symbol: str,
+    ) -> Dict[str, Any]:
+        """Look up a single order by ``orderId`` (Bybit V5).
+
+        Used by :class:`src.runtime.fill_tracker.FillTracker` to reconcile
+        slippage: after a market order is placed we need ``avgPrice`` and
+        ``cumExecQty`` to know the actual fill. Right after placement
+        those fields can be ``"0"`` / empty for a few hundred ms — the
+        caller must treat an empty / zero-priced response as "not yet
+        filled" and retry later (e.g. next runner heartbeat), NOT as a
+        failure to feed back into the circuit breaker.
+
+        Returns the first matching row from ``/v5/order/history``, or
+        an empty dict if nothing matches / API error.
+        """
+        try:
+            resp = self._session.get_order_history(
+                category="linear", symbol=symbol, orderId=order_id,
+            )
+        except Exception as exc:
+            logger.warning("get_order_history raised: %s", exc)
+            return {}
+        if resp.get("retCode") != 0:
+            logger.warning("get_order_history non-zero retCode: %s", resp)
+            return {}
+        items = resp.get("result", {}).get("list", []) or []
+        return items[0] if items else {}
+
     def get_positions(
         self, symbol: Optional[str] = None,
     ) -> List[Dict[str, Any]]:

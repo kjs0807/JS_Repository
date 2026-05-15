@@ -38,6 +38,8 @@ from src.data_manager.gap_filler import (
     fill_gap_for_universe,
 )
 from src.runtime.account_snapshot import AccountSnapshotWriter
+from src.runtime.fill_logger import FillLogger
+from src.runtime.fill_tracker import FillTracker
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +162,12 @@ class StrategyTradeRunner:
         leverage: int = 0,
         api_key_fingerprint: str = "",
         heartbeat_interval_seconds: float = 60.0,
+        # Stage C-2b: optional slippage / fill tracking. When wired,
+        # the runner reconciles pending fills against the REST client
+        # on every heartbeat. Either all three are provided, or none.
+        fill_tracker: Optional[FillTracker] = None,
+        fill_logger: Optional[FillLogger] = None,
+        rest_client: Optional[Any] = None,
     ) -> None:
         if not universe:
             raise ValueError("StrategyTradeRunner: universe is empty")
@@ -189,6 +197,11 @@ class StrategyTradeRunner:
         self._leverage = int(leverage) if leverage else 0
         self._api_key_fingerprint = api_key_fingerprint
         self._heartbeat_interval_ms = int(heartbeat_interval_seconds * 1000)
+        # C-2b: fill reconciliation deps. All three must be present for
+        # reconcile to run; partial wiring is treated as disabled.
+        self._fill_tracker = fill_tracker
+        self._fill_logger = fill_logger
+        self._rest_client = rest_client
         # Edge-trigger flag so we alert ONCE per kill-switch engage
         # (operator gets one Telegram per event, not one per heartbeat).
         # Breaker trips are alerted by CircuitBreaker itself — see
@@ -346,6 +359,20 @@ class StrategyTradeRunner:
             )
             return
 
+        # C-2b: seed the broker with this bar's close as the *intent
+        # price* reference BEFORE the strategy runs. Any order the
+        # strategy submits on this bar will be measured against it for
+        # slippage. The hasattr guard keeps minimal/__new__-built test
+        # brokers (which never see this method) from raising.
+        if hasattr(self._broker, "set_last_bar_close"):
+            try:
+                self._broker.set_last_bar_close(symbol, bar.close)
+            except Exception as exc:
+                logger.warning(
+                    "[dispatch] set_last_bar_close failed for %s: %s",
+                    symbol, exc,
+                )
+
         try:
             if hasattr(strat, "prepare") and hasattr(strat, "on_bar_fast"):
                 cache = strat.prepare(full)
@@ -479,6 +506,32 @@ class StrategyTradeRunner:
                     )
                 self._ks_alerted = True
 
+    def _reconcile_pending_fills(self) -> None:
+        """C-2b: drive ``FillTracker.reconcile_all`` from the heartbeat.
+
+        Disabled (no-op) when any of fill_tracker / fill_logger /
+        rest_client is missing. ``reconcile_all`` itself never raises,
+        but we keep an extra try/except here so a behaviour drift in
+        the tracker can never derail the heartbeat loop.
+        """
+        if (
+            self._fill_tracker is None
+            or self._fill_logger is None
+            or self._rest_client is None
+        ):
+            return
+        try:
+            emitted = self._fill_tracker.reconcile_all(
+                self._rest_client, self._fill_logger,
+            )
+            if emitted:
+                logger.info(
+                    "[heartbeat] fills reconciled this tick: %d (pending=%d)",
+                    emitted, self._fill_tracker.pending_count(),
+                )
+        except Exception as exc:
+            logger.warning("[heartbeat] reconcile_pending_fills error: %s", exc)
+
     def _write_account_snapshot(
         self, portfolio: Any, ws_connected: bool,
     ) -> None:
@@ -579,6 +632,9 @@ class StrategyTradeRunner:
                             portfolio, ws_connected=ws.is_connected,
                         )
                         self._check_state_edge_alerts()
+                        # C-2b: reconcile pending fills against Bybit.
+                        # This call NEVER feeds the circuit breaker.
+                        self._reconcile_pending_fills()
                     except Exception as exc:
                         logger.error("[heartbeat] sync failed: %s", exc)
                     last_heartbeat = _now_ms()
@@ -603,6 +659,10 @@ class StrategyTradeRunner:
                 self._write_account_snapshot(
                     final_portfolio, ws_connected=False,
                 )
+                # C-2b: one last reconcile so any pending fill that
+                # arrived after the last heartbeat tick still lands in
+                # fills.jsonl before the process exits.
+                self._reconcile_pending_fills()
             except Exception as exc:
                 logger.error("[final] sync failed: %s", exc)
             # One last edge-check + shutdown alert. The alert path is

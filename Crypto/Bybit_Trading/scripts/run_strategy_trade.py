@@ -67,6 +67,8 @@ from src.data_manager.db import DBManager
 from src.execution.bbkc_demo_broker import BbkcBroker
 from src.runtime.account_snapshot import AccountSnapshotWriter
 from src.runtime.circuit_breaker import CircuitBreaker
+from src.runtime.fill_logger import FillLogger
+from src.runtime.fill_tracker import FillTracker
 from src.runtime.kill_switch import KillSwitch
 from src.runtime.run_log import install_run_log_handler
 from src.runtime.strategy_runner import StrategyTradeRunner
@@ -445,6 +447,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         universe=universe,
         timeframe=timeframe,
     )
+    # Stage C-2b: slippage / fill telemetry. The broker registers each
+    # successful order with the tracker; the runner heartbeat
+    # reconciles pending entries against rest.get_order(orderId). Fill
+    # outcomes NEVER feed the circuit breaker.
+    fill_logger = FillLogger(path=run_dir / "fills.jsonl")
+    fill_tracker = FillTracker()
+    broker.set_fill_tracking(fill_tracker, fill_logger)
     runner = StrategyTradeRunner(
         broker=broker,
         db=db,
@@ -462,6 +471,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         mode=mode,
         leverage=cfg.app.leverage,
         api_key_fingerprint=fingerprint(api_key),
+        fill_tracker=fill_tracker,
+        fill_logger=fill_logger,
+        rest_client=rest,
     )
     runner.run()
     return 0

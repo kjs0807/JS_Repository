@@ -97,6 +97,11 @@ def _build_real_graph(
     broker._circuit_breaker = circuit_breaker
     broker._order_logger = order_logger
     broker._kill_switch_ref = kill_switch
+    # C-2b: fill-tracking attrs default disabled — these e2e tests
+    # focus on the breaker / kill-switch flow, not slippage telemetry.
+    broker._last_bar_close = {}
+    broker._fill_tracker = None
+    broker._fill_logger = None
     return broker, circuit_breaker, kill_switch, order_logger, broker._rest
 
 

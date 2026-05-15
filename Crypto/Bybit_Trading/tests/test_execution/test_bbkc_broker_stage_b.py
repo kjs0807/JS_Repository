@@ -52,6 +52,10 @@ def _make_broker(
     # about audit-log content set their own.
     broker._order_logger = MagicMock()
     broker._kill_switch_ref = kill_switch
+    # C-2b: fill-tracking attrs (disabled by default).
+    broker._last_bar_close = {}
+    broker._fill_tracker = None
+    broker._fill_logger = None
     return broker
 
 

@@ -119,6 +119,9 @@ def _build_demo_broker(run_dir: Path):
     broker._circuit_breaker = circuit_breaker
     broker._order_logger = order_logger
     broker._kill_switch_ref = kill_switch
+    broker._last_bar_close = {}
+    broker._fill_tracker = None
+    broker._fill_logger = None
     return broker, circuit_breaker, kill_switch, alert
 
 

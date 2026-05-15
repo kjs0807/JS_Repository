@@ -34,6 +34,11 @@ def _make_broker() -> LiveBroker:
     # logging and the kill-switch snapshot field; both are optional.
     broker._order_logger = None
     broker._kill_switch_ref = None
+    # Stage C-2b: fill-tracking deps. Default to disabled so the
+    # existing test cases do not require a tracker / logger.
+    broker._last_bar_close = {}
+    broker._fill_tracker = None
+    broker._fill_logger = None
     return broker
 
 

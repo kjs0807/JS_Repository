@@ -64,6 +64,9 @@ def _live_broker(tmp_path: Path) -> LiveBroker:
     broker._circuit_breaker = None
     broker._order_logger = OrderLogger(tmp_path / "orders.jsonl")
     broker._kill_switch_ref = None
+    broker._last_bar_close = {}
+    broker._fill_tracker = None
+    broker._fill_logger = None
     return broker
 
 
@@ -153,6 +156,9 @@ def _bbkc_broker(tmp_path: Path, *, kill_switch=None) -> BbkcBroker:
     broker._circuit_breaker = None
     broker._order_logger = OrderLogger(tmp_path / "orders.jsonl")
     broker._kill_switch_ref = kill_switch
+    broker._last_bar_close = {}
+    broker._fill_tracker = None
+    broker._fill_logger = None
     return broker
 
 

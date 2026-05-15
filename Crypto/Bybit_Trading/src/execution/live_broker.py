@@ -10,15 +10,32 @@ the failure rate climbs.
 ``close()`` is intentionally NOT wrapped: managing already-open
 positions has to keep working even when the circuit breaker has
 paused new entries.
+
+Stage C-2b adds *slippage / fill tracking*:
+
+  * :meth:`set_last_bar_close` is called by the runner just before
+    every strategy dispatch so the broker has an "intent price"
+    reference for the symbol when the strategy decides to send an
+    order.
+  * :meth:`set_fill_tracking` attaches a :class:`FillTracker` plus a
+    :class:`FillLogger`; on a successful order the broker registers
+    the order_id as pending and lets the runner heartbeat reconcile
+    it against ``rest.get_order`` later.
+
+By design fill reconciliation NEVER feeds the circuit breaker — fill
+telemetry is informational and must not contribute to entry pausing.
 """
 from __future__ import annotations
 import logging
+import time
 from typing import Any, Dict, List, Optional
 from src.core.config import RiskConfig
 from src.core.alert import AlertManager
 from src.api.rest_client import BybitRestClient
 from src.execution.broker import Broker, Position, Portfolio, Fill, Order
 from src.execution.risk import RiskManager
+from src.runtime.fill_logger import FillLogger, STATUS_MISSING_INTENT
+from src.runtime.fill_tracker import FillTracker
 from src.runtime.kill_switch import KillSwitch
 from src.runtime.order_failure import (
     ALL_CATEGORIES,
@@ -57,6 +74,13 @@ class LiveBroker:
         # reference for snapshot fields.
         self._order_logger: Optional[OrderLogger] = None
         self._kill_switch_ref: Optional[KillSwitch] = None
+        # Stage C-2b: optional slippage / fill tracking. The runner
+        # seeds ``_last_bar_close`` before every dispatch so we have
+        # an intent-price reference; on a successful order we register
+        # the order_id with the FillTracker for later reconciliation.
+        self._last_bar_close: Dict[str, float] = {}
+        self._fill_tracker: Optional[FillTracker] = None
+        self._fill_logger: Optional[FillLogger] = None
         self._sync_wallet()
 
     # ------------------------------------------------------------------
@@ -80,6 +104,29 @@ class LiveBroker:
         LiveBroker callers (legacy main_live.py) do not need this wired.
         """
         self._kill_switch_ref = kill_switch
+
+    def set_last_bar_close(self, symbol: str, price: float) -> None:
+        """Stage C-2b: stash the most recent bar close per symbol as
+        the *intent price* reference for slippage measurement.
+
+        The runner calls this from ``_dispatch_bar`` right before
+        invoking the strategy so any order the strategy submits on
+        that bar uses the bar's close as the reference. No-op if the
+        price is non-positive (defensive).
+        """
+        if price and price > 0:
+            self._last_bar_close[symbol] = float(price)
+
+    def set_fill_tracking(
+        self, tracker: FillTracker, logger_: FillLogger,
+    ) -> None:
+        """Stage C-2b: attach a :class:`FillTracker` and the matching
+        :class:`FillLogger`. Both must be set together so the broker
+        can emit ``missing_intent`` rows directly without having to
+        register a pending entry that would never reconcile.
+        """
+        self._fill_tracker = tracker
+        self._fill_logger = logger_
 
     def get_failure_counters(self) -> Dict[str, int]:
         """Snapshot of per-category failure counts since process start."""
@@ -272,6 +319,10 @@ class LiveBroker:
             self._circuit_breaker is not None
             and getattr(self._circuit_breaker, "tripped", False)
         )
+        # C-2b: capture submit timestamp + intent price BEFORE the
+        # REST call so any fill row joins on a consistent submit_ts_ms.
+        submit_ts_ms = int(time.time() * 1000)
+        intent_price = self._last_bar_close.get(symbol)
 
         if decision.action == "REJECT":
             # B2 (C-1 finalised): risk_reject is local-policy refusal,
@@ -385,6 +436,15 @@ class LiveBroker:
                 circuit_breaker_tripped=breaker_state,
                 kill_switch_engaged=ks_engaged,
             )
+            # C-2b: register pending fill (or emit a missing_intent
+            # row directly when no bar close was seeded for this
+            # symbol). Never raises — slippage telemetry must not
+            # affect the order path.
+            self._register_pending_fill(
+                order_id=order_id, symbol=symbol, side=side,
+                qty=qty, intent_price=intent_price,
+                submit_ts_ms=submit_ts_ms,
+            )
         else:
             # pybit returned success-shaped dict but no orderId. Treat
             # defensively so the strategy never thinks an order is open.
@@ -421,5 +481,42 @@ class LiveBroker:
             self._order_logger.log(**kwargs)
         except Exception as exc:
             logger.warning("[LiveBroker] order_logger.log raised: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Stage C-2b: fill tracking helper. Two outcomes:
+    #   * intent price present  -> register pending; runner heartbeat
+    #     reconciles against rest.get_order(orderId) later.
+    #   * intent price missing  -> emit a 'missing_intent' fill row
+    #     immediately so the audit covers the order but does not pile
+    #     up an unreconcilable entry. (Happens before the first bar
+    #     dispatch wires set_last_bar_close, or for manual trades on a
+    #     symbol that has never received a bar.)
+    # Never raises — telemetry must not affect the order path.
+    # ------------------------------------------------------------------
+    def _register_pending_fill(
+        self, *, order_id: str, symbol: str, side: str, qty: float,
+        intent_price: Optional[float], submit_ts_ms: int,
+    ) -> None:
+        if self._fill_tracker is None or self._fill_logger is None:
+            return
+        try:
+            if intent_price is None or intent_price <= 0:
+                self._fill_logger.log(
+                    order_id=order_id, symbol=symbol, side=side,
+                    intent_qty=qty, fill_qty=0.0,
+                    intent_price=None, fill_price=0.0,
+                    submit_ts_ms=submit_ts_ms, fill_ts_ms=submit_ts_ms,
+                    status=STATUS_MISSING_INTENT,
+                )
+                return
+            self._fill_tracker.register(
+                order_id=order_id, symbol=symbol, side=side,
+                intent_qty=qty, intent_price=intent_price,
+                submit_ts_ms=submit_ts_ms,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[LiveBroker] fill_tracker register raised: %s", exc,
+            )
 
 __all__ = ["LiveBroker"]
