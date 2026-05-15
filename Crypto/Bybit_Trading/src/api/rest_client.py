@@ -152,8 +152,20 @@ class BybitRestClient:
         )
         return resp.get("result", {})
 
-    def get_positions(self) -> List[Dict[str, Any]]:
-        resp = self._session.get_positions(category="linear", settleCoin="USDT")
+    def get_positions(
+        self, symbol: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return position rows for the linear category.
+
+        Without ``symbol`` Bybit returns only rows with ``size > 0``
+        (one of the gotchas around the V5 API). Pass ``symbol`` to get
+        every hedge-mode slot for that instrument, including empty ones
+        (needed by :meth:`BbkcBroker.ensure_leverage_set` for read-back).
+        """
+        if symbol is None:
+            resp = self._session.get_positions(category="linear", settleCoin="USDT")
+        else:
+            resp = self._session.get_positions(category="linear", symbol=symbol)
         if resp.get("retCode") != 0:
             return []
         return resp.get("result", {}).get("list", [])

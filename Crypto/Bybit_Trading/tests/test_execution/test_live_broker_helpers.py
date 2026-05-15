@@ -173,6 +173,9 @@ def test_bbkc_demo_legacy_notional_qty_uses_max_position_pct_and_leverage():
     broker._risk.config = RiskConfig(max_position_pct=0.05)
     broker._qty_step = {"BTCUSDT": 0.001}
     broker._min_qty = {"BTCUSDT": 0.001}
+    # Stage B-2/B-3 attributes (this test predates them; init manually).
+    broker._per_symbol_max_pos_pct = {}
+    broker._kill_switch = None
 
     qty = broker.calc_legacy_notional_qty("BTCUSDT", entry_price=77_093.30)
 

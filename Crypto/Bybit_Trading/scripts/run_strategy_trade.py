@@ -65,6 +65,7 @@ from src.core.mode import (
 )
 from src.data_manager.db import DBManager
 from src.execution.bbkc_demo_broker import BbkcBroker
+from src.runtime.kill_switch import KillSwitch
 from src.runtime.strategy_runner import StrategyTradeRunner
 from src.strategies.registry import StrategyRegistry
 from src.strategies.registry_builder import build_strategy_registry
@@ -311,6 +312,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     db.initialize()
 
+    # Stage B-2: per-symbol weights from config (optional). Empty dict
+    # means uniform risk.max_position_pct - existing behaviour preserved.
+    weights = dict(cfg.trading.weights) if getattr(cfg.trading, "weights", None) else {}
+    if weights:
+        bad = [s for s in weights if s not in universe]
+        if bad:
+            print(
+                f"ERROR: trading.weights references symbols not in the universe: {bad}. "
+                f"universe={universe}"
+            )
+            return 1
+
+    # Stage B-3: kill switch (env vars + run_dir/disable_new_entry.flag).
+    kill_switch = KillSwitch(run_dir=run_dir)
+
     broker = BbkcBroker(
         rest_client=rest,
         run_dir=run_dir,
@@ -318,7 +334,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         alert_manager=alert,
         risk_config=cfg.risk,             # FIX: was RiskConfig() default
         leverage=cfg.app.leverage,
+        per_symbol_max_pos_pct=weights or None,
+        kill_switch=kill_switch,
     )
+
+    # Stage B-1: set leverage per symbol and verify via read-back. We do
+    # this BEFORE the live banner so the operator sees the verified
+    # value (or the abort) in the same pre-flight phase.
+    try:
+        broker.ensure_leverage_set(universe)
+    except RuntimeError as exc:
+        print(f"ERROR: leverage pre-flight failed: {exc}")
+        return 1
 
     # ------------------------------------------------------------------
     # Live banner + 5s pre-flight wait (real-money safety).

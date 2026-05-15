@@ -59,6 +59,7 @@ from src.core.alert import AlertManager
 from src.core.config import RiskConfig
 from src.execution.broker import Portfolio, Position
 from src.execution.live_broker import LiveBroker
+from src.runtime.kill_switch import KillSwitch
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,17 @@ class BbkcBroker(LiveBroker):
     Mode-agnostic - talks to demo or mainnet identically. The REST endpoint is
     a property of the injected ``BybitRestClient`` (configured via
     ``config.app.mode``), not of this class.
+
+    Stage B additions:
+
+      * ``per_symbol_max_pos_pct`` (B-2) overrides ``risk.max_position_pct``
+        for the specific symbol when computing legacy-style notional qty.
+      * ``kill_switch`` (B-3) is consulted before every NEW entry order;
+        when engaged the order is logged + alerted + dropped. Existing
+        positions remain managed (close / SL / TP updates are unaffected).
+      * ``ensure_leverage_set`` (B-1) is intended to be called once at
+        runner startup; it sets the leverage per symbol via the REST API
+        and verifies the change via a position read-back.
     """
 
     def __init__(
@@ -80,6 +92,8 @@ class BbkcBroker(LiveBroker):
         risk_config: Optional[RiskConfig] = None,
         leverage: int = 3,
         initial_capital: float = 10_000.0,
+        per_symbol_max_pos_pct: Optional[Dict[str, float]] = None,
+        kill_switch: Optional[KillSwitch] = None,
     ) -> None:
         super().__init__(
             rest_client=rest_client,
@@ -94,6 +108,12 @@ class BbkcBroker(LiveBroker):
         self._symbols_allowed: Set[str] = set(symbols_allowed)
         self._qty_step: Dict[str, float] = {}
         self._min_qty: Dict[str, float] = {}
+        # Stage B-2: optional per-symbol max_position_pct override.
+        self._per_symbol_max_pos_pct: Dict[str, float] = (
+            dict(per_symbol_max_pos_pct) if per_symbol_max_pos_pct else {}
+        )
+        # Stage B-3: optional kill switch (env + file-flag toggle).
+        self._kill_switch: Optional[KillSwitch] = kill_switch
         self._fetch_instrument_specs()
 
     # ------------------------------------------------------------------
@@ -182,6 +202,32 @@ class BbkcBroker(LiveBroker):
             return False
         return True
 
+    def _check_kill_switch(self, symbol: str, source: str) -> bool:
+        """Stage B-3: short-circuit NEW entries when the kill switch is engaged.
+
+        Returns True when the order may proceed, False when it must be
+        dropped (and a WARN log + an on_error alert have been emitted).
+        Close / update_stop / update_tp do NOT call this - existing
+        positions stay manageable while new exposure is paused.
+        """
+        if self._kill_switch is None:
+            return True
+        if not self._kill_switch.is_new_entry_disabled():
+            return True
+        reason = self._kill_switch.reason() or "(unknown reason)"
+        logger.warning(
+            "[BbkcBroker] %s %s BLOCKED by kill switch: %s",
+            source, symbol, reason,
+        )
+        if self._alert is not None:
+            try:
+                self._alert.on_error(
+                    f"new entry blocked (kill switch): {source} {symbol} - {reason}"
+                )
+            except Exception:
+                pass
+        return False
+
     def calc_qty(
         self, symbol: str, risk_pct: float, stop_distance: float,
     ) -> float:
@@ -190,10 +236,19 @@ class BbkcBroker(LiveBroker):
         return rounded
 
     def calc_legacy_notional_qty(self, symbol: str, entry_price: float) -> float:
-        """Legacy live sizing: margin = equity * max_position_pct, notional = margin * leverage."""
+        """Legacy live sizing: margin = equity * mpp, notional = margin * leverage.
+
+        Stage B-2: ``mpp`` is taken from ``per_symbol_max_pos_pct`` when
+        the symbol has an entry there; otherwise it falls back to the
+        uniform ``risk.max_position_pct`` so existing single-weight runs
+        are unchanged.
+        """
         if entry_price <= 0:
             return 0.0
-        margin_alloc = self._equity * self._risk.config.max_position_pct
+        mpp = self._per_symbol_max_pos_pct.get(symbol)
+        if mpp is None:
+            mpp = self._risk.config.max_position_pct
+        margin_alloc = self._equity * float(mpp)
         notional = margin_alloc * self._leverage
         return self._round_qty(symbol, notional / entry_price)
 
@@ -202,6 +257,8 @@ class BbkcBroker(LiveBroker):
         take_profit: Optional[float] = None, reason: str = "",
     ) -> str:
         if not self._check_universe(symbol, "buy"):
+            return ""
+        if not self._check_kill_switch(symbol, "buy"):
             return ""
         qty = self._round_qty(symbol, qty)
         if qty <= 0:
@@ -219,6 +276,8 @@ class BbkcBroker(LiveBroker):
         take_profit: Optional[float] = None, reason: str = "",
     ) -> str:
         if not self._check_universe(symbol, "sell"):
+            return ""
+        if not self._check_kill_switch(symbol, "sell"):
             return ""
         qty = self._round_qty(symbol, qty)
         if qty <= 0:
@@ -246,6 +305,8 @@ class BbkcBroker(LiveBroker):
     ) -> str:
         if not self._check_universe(symbol, "manual_buy"):
             return ""
+        if not self._check_kill_switch(symbol, "manual_buy"):
+            return ""
         qty = self._round_qty(symbol, qty)
         if qty <= 0:
             return ""
@@ -259,12 +320,85 @@ class BbkcBroker(LiveBroker):
     ) -> str:
         if not self._check_universe(symbol, "manual_sell"):
             return ""
+        if not self._check_kill_switch(symbol, "manual_sell"):
+            return ""
         qty = self._round_qty(symbol, qty)
         if qty <= 0:
             return ""
         oid = super().manual_sell(symbol, qty, stop_loss, take_profit, reason)
         self._log_order("manual_sell", symbol, qty, stop_loss or 0.0, take_profit, reason, oid)
         return oid
+
+    # ------------------------------------------------------------------
+    # Stage B-1: set_leverage + read-back
+    # ------------------------------------------------------------------
+    def ensure_leverage_set(self, symbols: Optional[List[str]] = None) -> None:
+        """Set leverage on every symbol and verify via a position read-back.
+
+        Raises ``RuntimeError`` if the exchange-side leverage does not
+        match ``self._leverage`` after the set call. The runner aborts
+        before any order is dispatched on a mismatch.
+
+        ``rest.set_leverage`` returns ``False`` for both "already at
+        target" and "real failure", so we always re-read positions and
+        treat the read-back as the single source of truth.
+        """
+        targets = list(symbols) if symbols is not None else sorted(self._symbols_allowed)
+        if not targets:
+            return
+        target = int(self._leverage)
+        try:
+            self._rest.set_leverage  # type: ignore[attr-defined]
+        except AttributeError as exc:
+            raise RuntimeError(
+                "rest_client has no set_leverage method - cannot verify leverage"
+            ) from exc
+
+        for sym in targets:
+            try:
+                self._rest.set_leverage(sym, target)
+            except Exception as exc:
+                logger.warning(
+                    "[BbkcBroker] set_leverage(%s, %dx) raised %s; "
+                    "proceeding to read-back",
+                    sym, target, exc,
+                )
+            # Read-back: every position row for sym must report leverage==target.
+            # Pass symbol= so we get the empty hedge slots too (without it
+            # Bybit only returns rows with size > 0, which gives us zero
+            # rows on a clean demo account).
+            try:
+                sym_rows = self._rest.get_positions(symbol=sym)
+            except TypeError:
+                # Older rest_client without the symbol kwarg - filter manually.
+                sym_rows = [p for p in self._rest.get_positions()
+                            if p.get("symbol") == sym]
+            except Exception as exc:
+                raise RuntimeError(
+                    f"leverage read-back failed: get_positions raised {exc}"
+                ) from exc
+            if not sym_rows:
+                raise RuntimeError(
+                    f"leverage read-back: no position row for {sym} "
+                    "(account/symbol mode mismatch?)"
+                )
+            for p in sym_rows:
+                lev_raw = p.get("leverage", "")
+                try:
+                    lev = int(float(lev_raw))
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"leverage read-back: unparseable value "
+                        f"{lev_raw!r} for {sym}"
+                    ) from exc
+                if lev != target:
+                    raise RuntimeError(
+                        f"leverage mismatch for {sym}: expected {target}x, "
+                        f"got {lev}x"
+                    )
+            logger.info(
+                "[BbkcBroker] %s leverage verified = %dx", sym, target,
+            )
 
     # ------------------------------------------------------------------
     # Heartbeat helpers

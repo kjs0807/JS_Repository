@@ -103,17 +103,23 @@ class AlertConfig:
 
 @dataclass
 class TradingConfig:
-    """Generic strategy-runner inputs (Stage A-2).
+    """Generic strategy-runner inputs (Stage A-2 + B-2).
 
     The runtime layer (mode, REST client, broker, monitoring) is decoupled
     from the strategy. ``trading`` says *which* strategy to run, on *what*
     universe, at *what* timeframe, and *where* to put the run directory.
     Per-strategy parameters live in :class:`AppConfig.strategies`.
+
+    Stage B-2: ``weights`` overrides ``risk.max_position_pct`` per symbol.
+    When empty (default), every symbol uses the uniform ``risk`` value.
+    Example: ``{"ETHUSDT": 0.30, "BTCUSDT": 0.10}`` runs ETH at 30% and
+    BTC at 10% of the account equity per trade.
     """
     strategy: str = "BBKCSqueeze"
     universe: List[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
     timeframe: str = "1h"
     root_out_dir: str = "logs/live_demo"
+    weights: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
