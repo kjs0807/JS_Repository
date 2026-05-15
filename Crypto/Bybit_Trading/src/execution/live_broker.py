@@ -1,12 +1,29 @@
-"""LiveBroker - Bybit API 실거래 브로커."""
+"""LiveBroker - Bybit API live/demo broker.
+
+Stage B-4 adds per-category failure classification on every order
+attempt that flows through :meth:`_execute_order`; the counter is
+exposed via :meth:`get_failure_counters`. Stage B-5 lets the runner
+attach a :class:`CircuitBreaker` via :meth:`set_circuit_breaker` so the
+breaker sees every outcome and can trip the on-disk kill switch when
+the failure rate climbs.
+
+``close()`` is intentionally NOT wrapped: managing already-open
+positions has to keep working even when the circuit breaker has
+paused new entries.
+"""
 from __future__ import annotations
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from src.core.config import RiskConfig
 from src.core.alert import AlertManager
 from src.api.rest_client import BybitRestClient
 from src.execution.broker import Broker, Position, Portfolio, Fill, Order
 from src.execution.risk import RiskManager
+from src.runtime.order_failure import (
+    ALL_CATEGORIES,
+    OrderFailureCategory,
+    classify_order_failure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +38,43 @@ class LiveBroker:
         self._initial_capital = initial_capital
         self._positions: Dict[str, Position] = {}
         self._equity: float = initial_capital
+        # Stage B-4: counter[category] = N failures since process start.
+        self._failure_counters: Dict[str, int] = {c: 0 for c in ALL_CATEGORIES}
+        self._success_count: int = 0
+        # Stage B-5: optional circuit breaker (CircuitBreaker instance).
+        # set_circuit_breaker() wires it in after construction so the
+        # broker stays decoupled from the circuit-breaker module.
+        self._circuit_breaker: Optional[Any] = None
         self._sync_wallet()
+
+    # ------------------------------------------------------------------
+    # Stage B-4/B-5 wiring
+    # ------------------------------------------------------------------
+    def set_circuit_breaker(self, breaker: Any) -> None:
+        """Attach a circuit breaker. ``breaker`` must implement
+        ``record(success: bool, category: str)``."""
+        self._circuit_breaker = breaker
+
+    def get_failure_counters(self) -> Dict[str, int]:
+        """Snapshot of per-category failure counts since process start."""
+        return dict(self._failure_counters)
+
+    def get_order_success_count(self) -> int:
+        return self._success_count
+
+    def _record_outcome(self, success: bool, category: str = "") -> None:
+        if success:
+            self._success_count += 1
+        else:
+            cat = category or OrderFailureCategory.OTHER
+            self._failure_counters[cat] = self._failure_counters.get(cat, 0) + 1
+        if self._circuit_breaker is not None:
+            try:
+                self._circuit_breaker.record(success=success, category=category)
+            except Exception as exc:
+                logger.warning(
+                    "[LiveBroker] circuit_breaker.record raised: %s", exc,
+                )
 
     def _position_idx_for_side(self, side: str) -> int:
         """Hedge mode 가정: LONG=1, SHORT=2.
@@ -168,15 +221,72 @@ class LiveBroker:
             order_type="MARKET", stop_loss=stop_loss, take_profit=take_profit,
             strategy_name=source, source=source, reason=reason, created_at=0)
         decision = self._risk.check_order(order, self.get_portfolio())
-        if decision.action == "REJECT": return ""
+        if decision.action == "REJECT":
+            self._record_outcome(False, OrderFailureCategory.RISK_REJECT)
+            return ""
         params: Dict = {"symbol": symbol, "side": side, "qty": str(qty), "order_type": "Market"}
         if stop_loss and stop_loss > 0: params["stop_loss"] = str(stop_loss)
         if take_profit and take_profit > 0: params["take_profit"] = str(take_profit)
-        result = self._rest.place_order(**params)
+        try:
+            result = self._rest.place_order(**params)
+        except Exception as exc:
+            # pybit raises InvalidRequestError for retCode != 0 on most
+            # paths. Classify, alert, and let the strategy see "" so it
+            # cannot proceed assuming the order is open.
+            category = classify_order_failure(exc)
+            logger.warning(
+                "[LiveBroker] place_order raised for %s %s qty=%s: %s [%s]",
+                symbol, side, qty, exc, category,
+            )
+            if self._alert is not None:
+                try:
+                    self._alert.on_error(
+                        f"order failed [{category}]: {symbol} {side} "
+                        f"qty={qty}: {exc}"
+                    )
+                except Exception:
+                    pass
+            self._record_outcome(False, category)
+            return ""
+        # rest_client.place_order swallows retCode != 0 in some
+        # versions and returns ``{"error": retMsg}``. Detect and
+        # classify identically.
+        if isinstance(result, dict) and "error" in result and "orderId" not in result:
+            ret_msg = result.get("error", "")
+            category = classify_order_failure(result)
+            logger.warning(
+                "[LiveBroker] place_order rejected for %s %s: %s [%s]",
+                symbol, side, ret_msg, category,
+            )
+            if self._alert is not None:
+                try:
+                    self._alert.on_error(
+                        f"order rejected [{category}]: {symbol} {side}: {ret_msg}"
+                    )
+                except Exception:
+                    pass
+            self._record_outcome(False, category)
+            return ""
         order_id = result.get("orderId", "")
-        if order_id and self._alert:
-            pos_side = "LONG" if side == "Buy" else "SHORT"
-            self._alert.on_trade_entry(symbol=symbol, side=pos_side, qty=qty, price=0.0, strategy=source)
+        if order_id:
+            if self._alert is not None:
+                pos_side = "LONG" if side == "Buy" else "SHORT"
+                try:
+                    self._alert.on_trade_entry(
+                        symbol=symbol, side=pos_side, qty=qty,
+                        price=0.0, strategy=source,
+                    )
+                except Exception:
+                    pass
+            self._record_outcome(True, "")
+        else:
+            # pybit returned success-shaped dict but no orderId. Treat
+            # defensively so the strategy never thinks an order is open.
+            logger.warning(
+                "[LiveBroker] place_order returned no orderId for %s %s: %s",
+                symbol, side, result,
+            )
+            self._record_outcome(False, OrderFailureCategory.OTHER)
         return order_id
 
 __all__ = ["LiveBroker"]

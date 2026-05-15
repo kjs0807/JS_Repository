@@ -65,6 +65,7 @@ from src.core.mode import (
 )
 from src.data_manager.db import DBManager
 from src.execution.bbkc_demo_broker import BbkcBroker
+from src.runtime.circuit_breaker import CircuitBreaker
 from src.runtime.kill_switch import KillSwitch
 from src.runtime.strategy_runner import StrategyTradeRunner
 from src.strategies.registry import StrategyRegistry
@@ -346,6 +347,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     except RuntimeError as exc:
         print(f"ERROR: leverage pre-flight failed: {exc}")
         return 1
+
+    # Stage B-5: order-failure circuit breaker. Trips after a 1-hour
+    # window where failure rate >= 10% (with at least 5 attempts), and
+    # engages the kill switch via the on-disk flag so a process restart
+    # cannot quietly resume entries.
+    circuit_breaker = CircuitBreaker(
+        kill_switch=kill_switch,
+        alert_manager=alert,
+        window_seconds=3600.0,
+        failure_rate_threshold=0.10,
+        min_sample=5,
+    )
+    broker.set_circuit_breaker(circuit_breaker)
 
     # ------------------------------------------------------------------
     # Live banner + 5s pre-flight wait (real-money safety).
