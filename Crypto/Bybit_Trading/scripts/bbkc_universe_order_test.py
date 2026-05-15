@@ -1,4 +1,4 @@
-"""BBKC universe experiment — Bybit Demo minimum-valid-qty order feasibility test.
+"""BBKC universe experiment - Bybit Demo minimum-valid-qty order feasibility test.
 
 For each candidate symbol:
   1. Fetch instrument specs (qty_step, min_qty, min_notional, tick_size).
@@ -13,7 +13,10 @@ For each candidate symbol:
   6. Confirm no position is left open.
 
 Hard safety rails:
-  - Refuses to run unless BYBIT_BASE_URL points at api-demo.bybit.com.
+  - Resolves credentials via :mod:`src.core.mode` so this script can
+    NEVER accidentally hit mainnet - the demo endpoint is hard-coded
+    and the resolver is forced into demo mode. Legacy
+    ``BYBIT_BASE_URL`` / ``BYBIT_API_KEY`` env vars are not honoured.
   - After all symbols, re-checks every position; if anything is open it
     prints a RED ALERT and exits non-zero (caller must stop the experiment).
 
@@ -24,28 +27,21 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.core.mode import (
+    BASE_URL_BY_MODE, MODE_DEMO, ModeError,
+    fingerprint, resolve_runtime,
+)
+
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "AVAXUSDT", "XRPUSDT", "SOLUSDT", "DOGEUSDT"]
 DEMO_HOST = "api-demo.bybit.com"
-
-
-def _load_env() -> None:
-    env_path = PROJECT_ROOT / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
 
 
 def _qty_decimals(qty_step: float) -> int:
@@ -76,20 +72,33 @@ def _classify_failure(msg: str) -> str:
 
 
 def main() -> int:
-    _load_env()
-    base_url = os.environ.get("BYBIT_BASE_URL", "")
-    api_key = os.environ.get("BYBIT_API_KEY", "")
-    api_secret = os.environ.get("BYBIT_API_SECRET", "")
+    # C-2c: resolve mode through src.core.mode. We FORCE demo here
+    # because this script intentionally only runs against the Bybit
+    # demo endpoint - no CLI override, no env-var override, no
+    # i-understand-real-money escape hatch is exposed. Anyone wanting
+    # to live-test should use scripts.run_strategy_trade, not this.
+    try:
+        mode, base_url, api_key, api_secret = resolve_runtime(
+            config_mode=MODE_DEMO,
+            cli_mode=MODE_DEMO,
+            ack=False,
+        )
+    except ModeError as exc:
+        print(f"ABORT: {exc}")
+        return 2
 
     print("=" * 70)
-    print("BBKC universe — Bybit Demo order feasibility test")
-    print(f"  BYBIT_BASE_URL = {base_url!r}")
-    if DEMO_HOST not in base_url:
-        print(f"  ABORT: base_url is not the demo endpoint ({DEMO_HOST}). "
-              "Refusing to place any order.")
-        return 2
-    if not api_key or not api_secret:
-        print("  ABORT: BYBIT_API_KEY / BYBIT_API_SECRET not set.")
+    print("BBKC universe - Bybit Demo order feasibility test")
+    print(f"  mode      = {mode}")
+    print(f"  base_url  = {base_url}")
+    print(f"  api key   = {fingerprint(api_key)}")
+    if mode != MODE_DEMO or DEMO_HOST not in base_url:
+        # Belt-and-braces guard: even if resolve_runtime returned demo
+        # somehow without the demo host, refuse to send any order.
+        print(
+            f"  ABORT: resolver did not produce the demo endpoint "
+            f"({DEMO_HOST}). Refusing to place any order.",
+        )
         return 2
     print("  demo endpoint confirmed -> proceeding.")
     print("=" * 70)
@@ -187,7 +196,7 @@ def main() -> int:
             row["pos_after_buy_err"] = str(exc)
         row["pos_after_buy"] = pos_after_buy
 
-        # --- SELL reduceOnly (market) — only if we actually have a position
+        # --- SELL reduceOnly (market) - only if we actually have a position
         sell_ok = False
         sell_err = ""
         if pos_after_buy > 0:
@@ -223,7 +232,7 @@ def main() -> int:
 
         print(f"\n  {sym}: price={price} qty_step={qty_step} min_qty={min_qty} "
               f"min_notional={min_notional} -> min_valid_qty={qty_str} "
-              f"(notional≈{order_notional:.2f})")
+              f"(notional~={order_notional:.2f})")
         print(f"    BUY ok={buy_ok} err={buy_err!r} | pos_after_buy={pos_after_buy} | "
               f"SELL ok={sell_ok} err={sell_err!r} | pos_final={pos_final}")
 
@@ -244,12 +253,12 @@ def main() -> int:
         leftover = [{"sweep_error": str(exc)}]
     if leftover:
         print("  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print("  !!! OPEN POSITION(S) REMAIN — STOP THE EXPERIMENT, INVESTIGATE")
+        print("  !!! OPEN POSITION(S) REMAIN - STOP THE EXPERIMENT, INVESTIGATE")
         for x in leftover:
             print(f"  !!! {x}")
         print("  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
     else:
-        print("  clean — no open positions.")
+        print("  clean - no open positions.")
 
     out_dir = PROJECT_ROOT / "logs" / "research" / "bbkc_squeeze" / "universe_exp"
     out_dir.mkdir(parents=True, exist_ok=True)

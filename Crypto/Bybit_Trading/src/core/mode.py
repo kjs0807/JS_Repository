@@ -10,12 +10,16 @@ calls into this module to:
   4. enforce the ``--i-understand-real-money`` safety gate before any
      mainnet REST call is made.
 
-Stage A-hardening:
+Stage A-hardening + Stage C-2c (current policy):
 
-  * Live mode REJECTS the legacy ``BYBIT_API_KEY`` / ``BYBIT_API_SECRET``
-    fallback. Real-money runs must use the prefixed credentials.
-  * Demo mode still accepts the legacy fallback but emits a deprecation
-    warning so the operator notices.
+  * The ONLY accepted credential source is the per-mode prefixed pair:
+    ``BYBIT_DEMO_API_KEY`` / ``BYBIT_DEMO_API_SECRET`` in demo mode,
+    ``BYBIT_LIVE_API_KEY`` / ``BYBIT_LIVE_API_SECRET`` in live mode.
+    The legacy un-prefixed ``BYBIT_API_KEY`` / ``BYBIT_API_SECRET``
+    pair is REJECTED in EVERY mode (no demo fallback). Stage C-2c
+    migrated the last non-BBKC scripts off the legacy slot, so
+    keeping it as a silent fallback would only invite an operator to
+    leave a stale demo key behind and have it picked up by mistake.
   * ``--force-live`` is a deprecated alias for ``--mode live``. Combining
     it with ``--mode demo`` is treated as a contradiction and rejected.
   * Bybit's public kline stream is identical for demo and mainnet (only
@@ -105,17 +109,23 @@ def ws_url_for(mode: str) -> str:
 def resolve_api_credentials(mode: str) -> Tuple[str, str]:
     """Look up Bybit API credentials for the given mode from the environment.
 
-    Precedence:
+    Stage C-2c rewrite: the *only* accepted source is the per-mode
+    prefixed pair.
 
-    1. ``BYBIT_DEMO_API_KEY`` / ``BYBIT_DEMO_API_SECRET`` when ``mode=demo``
-    2. ``BYBIT_LIVE_API_KEY`` / ``BYBIT_LIVE_API_SECRET`` when ``mode=live``
-    3. Legacy ``BYBIT_API_KEY`` / ``BYBIT_API_SECRET`` is accepted ONLY in
-       demo mode (with deprecation WARN). Live runs MUST supply the
-       prefixed pair - the legacy fallback is rejected to avoid a
-       quietly-mismatched key/endpoint combination on real money.
+    * ``BYBIT_DEMO_API_KEY`` / ``BYBIT_DEMO_API_SECRET`` when ``mode=demo``
+    * ``BYBIT_LIVE_API_KEY`` / ``BYBIT_LIVE_API_SECRET`` when ``mode=live``
 
-    Returns ``("", "")`` when no credentials are found - the caller
-    decides whether that is fatal (it always is for the trading runner).
+    The legacy un-prefixed ``BYBIT_API_KEY`` / ``BYBIT_API_SECRET`` pair
+    is no longer honoured. Before this rewrite they were accepted in
+    demo mode with a deprecation warning, but every non-BBKC script
+    that used to read them has been migrated to call
+    :func:`resolve_runtime`, so keeping them around would be a
+    foot-gun (operator might leave a stale demo key in the legacy
+    slot and never notice).
+
+    Returns ``("", "")`` when the per-mode pair is missing - the
+    caller decides whether that is fatal (it always is for the
+    trading runner; ``resolve_runtime`` then raises ``ModeError``).
     """
     if mode == MODE_DEMO:
         prefix = "BYBIT_DEMO_"
@@ -128,23 +138,6 @@ def resolve_api_credentials(mode: str) -> Tuple[str, str]:
     secret = os.getenv(f"{prefix}API_SECRET", "").strip()
     if key and secret:
         return key, secret
-
-    # Legacy fallback - DEMO ONLY. Real-money runs cannot fall back to
-    # an un-prefixed key pair because the operator might have left a
-    # demo key in BYBIT_API_KEY and gotten lucky in tests.
-    if mode == MODE_LIVE:
-        return "", ""
-
-    legacy_key = os.getenv("BYBIT_API_KEY", "").strip()
-    legacy_secret = os.getenv("BYBIT_API_SECRET", "").strip()
-    if legacy_key and legacy_secret:
-        logger.warning(
-            "Using legacy BYBIT_API_KEY / BYBIT_API_SECRET for mode=%s. "
-            "Migrate to %sAPI_KEY / %sAPI_SECRET in .env "
-            "(legacy fallback is allowed only in demo mode).",
-            mode, prefix, prefix,
-        )
-        return legacy_key, legacy_secret
     return "", ""
 
 

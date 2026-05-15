@@ -6,7 +6,9 @@ Covers the six scenarios mandated by the Stage A spec:
   3. mode=live with ack → live base_url + live keys selected
   4. CLI --mode overrides config app.mode (priority)
   5. fingerprint never leaks the full secret
-  6. legacy BYBIT_API_KEY fallback still works but emits a deprecation WARN
+  6. legacy BYBIT_API_KEY pair is rejected in EVERY mode (Stage C-2c
+     removed the demo fallback; every non-BBKC script now uses
+     :func:`src.core.mode.resolve_runtime`).
 """
 from __future__ import annotations
 
@@ -107,28 +109,30 @@ class TestResolveApiCredentials:
         monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo_s")
         assert M.resolve_api_credentials(M.MODE_LIVE) == ("", "")
 
-    def test_legacy_fallback_warns_in_demo(self, monkeypatch, clean_env, caplog):
+    def test_legacy_pair_rejected_in_demo(self, monkeypatch, clean_env, caplog):
+        """Stage C-2c: the legacy ``BYBIT_API_KEY`` / ``BYBIT_API_SECRET``
+        pair is no longer honoured in *any* mode. With ONLY the legacy
+        pair set, demo resolution returns ``("", "")`` so the runner
+        will refuse to start with a clear error."""
         monkeypatch.setenv("BYBIT_API_KEY", "legacy_k")
         monkeypatch.setenv("BYBIT_API_SECRET", "legacy_s")
         with caplog.at_level(logging.WARNING, logger="src.core.mode"):
             key, secret = M.resolve_api_credentials(M.MODE_DEMO)
-        assert (key, secret) == ("legacy_k", "legacy_s")
-        assert any("legacy" in r.message.lower() for r in caplog.records)
+        assert (key, secret) == ("", "")
+        # No deprecation warning either — the fallback is removed, not
+        # warned about. Quiet rejection is the correct shape.
+        assert not any("legacy" in r.message.lower() for r in caplog.records)
 
-    def test_legacy_fallback_rejected_in_live(self, monkeypatch, clean_env):
-        """Stage A-hardening: live mode MUST NOT accept the legacy fallback.
-
-        Even if the operator has BYBIT_API_KEY in .env, live runs require
-        the BYBIT_LIVE_* prefix so a stray demo key cannot mismatch the
-        mainnet endpoint.
-        """
+    def test_legacy_pair_rejected_in_live(self, monkeypatch, clean_env):
+        """Live still refuses the legacy pair (unchanged from Stage A
+        hardening; codified here so a regression cannot silently
+        re-enable the fallback)."""
         monkeypatch.setenv("BYBIT_API_KEY", "legacy_k")
         monkeypatch.setenv("BYBIT_API_SECRET", "legacy_s")
-        # No BYBIT_LIVE_* set -> live lookup returns empty (legacy ignored).
         assert M.resolve_api_credentials(M.MODE_LIVE) == ("", "")
 
-    def test_prefixed_overrides_legacy(self, monkeypatch, clean_env):
-        # Both set → prefixed wins, no WARN.
+    def test_prefixed_pair_ignores_legacy_in_demo(self, monkeypatch, clean_env):
+        # Both set → the prefixed pair is used, legacy is ignored.
         monkeypatch.setenv("BYBIT_DEMO_API_KEY", "demo_k")
         monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo_s")
         monkeypatch.setenv("BYBIT_API_KEY", "legacy_k")
@@ -293,9 +297,10 @@ class TestResolveRuntime:
     def test_live_legacy_credentials_rejected_with_ack(
         self, monkeypatch, clean_env,
     ):
-        """Stage A-hardening: live + ack + legacy-only keys must STILL fail
-        because the legacy fallback is demo-only. The runner should not be
-        able to dispatch mainnet orders against an un-prefixed key pair."""
+        """Stage A-hardening + C-2c: live + ack + legacy-only keys must
+        STILL fail. C-2c removed the demo fallback too, but this guard
+        specifically asserts that operator acknowledgement does not
+        magically promote a legacy pair into a valid live credential."""
         monkeypatch.setenv("BYBIT_API_KEY", "legacy_k")
         monkeypatch.setenv("BYBIT_API_SECRET", "legacy_s")
         # No BYBIT_LIVE_* set.
