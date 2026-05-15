@@ -94,6 +94,57 @@ class TestLoadConfig:
         assert config.alert.telegram_token == "bot123"
         assert config.alert.telegram_chat_id == "chat456"
 
+    # ── Stage A: base_url is derived from app.mode (single source of truth) ──
+    def test_base_url_derived_for_demo(self, tmp_path):
+        import yaml as _yaml
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(_yaml.dump({"app": {"mode": "demo"}}), encoding="utf-8")
+        cfg = load_config(config_path=str(yaml_path))
+        assert cfg.app.mode == "demo"
+        assert cfg.app.base_url == "https://api-demo.bybit.com"
+
+    def test_base_url_derived_for_live(self, tmp_path):
+        import yaml as _yaml
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(_yaml.dump({"app": {"mode": "live"}}), encoding="utf-8")
+        cfg = load_config(config_path=str(yaml_path))
+        assert cfg.app.mode == "live"
+        assert cfg.app.base_url == "https://api.bybit.com"
+
+    def test_explicit_yaml_base_url_is_overridden_with_warning(
+        self, tmp_path, caplog,
+    ):
+        import logging as _logging
+        import yaml as _yaml
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(
+            _yaml.dump({"app": {"mode": "demo", "base_url": "https://example.com"}}),
+            encoding="utf-8",
+        )
+        with caplog.at_level(_logging.WARNING, logger="src.core.config"):
+            cfg = load_config(config_path=str(yaml_path))
+        assert cfg.app.base_url == "https://api-demo.bybit.com"
+        assert any("overridden" in r.message.lower() for r in caplog.records)
+
+    def test_invalid_mode_fails_fast(self, tmp_path):
+        """Stage A-hardening: typo in app.mode must raise, NOT silently fallback.
+
+        Previously load_config logged ERROR and fell back to demo. That made
+        a typo like ``mode: liev`` silently route to demo on a machine the
+        operator thought was configured for live (or vice versa). Now we
+        raise ``ModeError`` so the runner cannot start at all.
+        """
+        import yaml as _yaml
+        import pytest as _pytest
+        from src.core.mode import ModeError
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(
+            _yaml.dump({"app": {"mode": "paper"}}), encoding="utf-8",
+        )
+        with _pytest.raises(ModeError) as excinfo:
+            load_config(config_path=str(yaml_path))
+        assert "paper" in str(excinfo.value)
+
 
 # ── Round 5: BBKCExitConfig + BBKC_EXIT_MODE env override (§7.1) ──────────
 

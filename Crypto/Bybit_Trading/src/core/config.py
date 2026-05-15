@@ -1,10 +1,28 @@
-"""설정 모듈. config.yaml + .env → AppConfig 통합 로드."""
+"""Configuration loader. ``config.yaml`` + ``.env`` -> ``AppConfig``.
+
+Sections:
+
+  app           Runtime (mode, leverage, db_path, ...). ``app.mode`` is the
+                single source of truth for the Bybit endpoint via
+                :mod:`src.core.mode`.
+  backtest      Fees / slippage / starting capital for the engine.
+  risk          Per-trade and per-day guards used by the live broker.
+  data          OHLCV ingestion knobs.
+  alert         Telegram / on_error / on_daily_summary toggles.
+  trading       Stage A-2: generic strategy runner inputs - strategy name,
+                universe, timeframe, output dir.
+  strategies    Stage A-2: per-strategy parameter bag, looked up by
+                strategy ``name``. e.g. ``strategies.BBKCSqueeze.params``.
+  bbkc_exit     Legacy BBKC exit cell. Kept for back-compat - the new
+                generic path prefers ``strategies.BBKCSqueeze.params`` but
+                falls back to this block when the new key is absent.
+"""
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -84,6 +102,21 @@ class AlertConfig:
 
 
 @dataclass
+class TradingConfig:
+    """Generic strategy-runner inputs (Stage A-2).
+
+    The runtime layer (mode, REST client, broker, monitoring) is decoupled
+    from the strategy. ``trading`` says *which* strategy to run, on *what*
+    universe, at *what* timeframe, and *where* to put the run directory.
+    Per-strategy parameters live in :class:`AppConfig.strategies`.
+    """
+    strategy: str = "BBKCSqueeze"
+    universe: List[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
+    timeframe: str = "1h"
+    root_out_dir: str = "logs/live_demo"
+
+
+@dataclass
 class BBKCExitConfig:
     """Round 5 BBKC 청산 운영 정책. config.yaml의 ``bbkc_exit`` 섹션 + env var.
 
@@ -105,6 +138,11 @@ class AppConfig:
     risk: RiskConfig = field(default_factory=RiskConfig)
     data: DataConfig = field(default_factory=DataConfig)
     alert: AlertConfig = field(default_factory=AlertConfig)
+    trading: TradingConfig = field(default_factory=TradingConfig)
+    # Per-strategy parameter bag. Looked up by strategy.name. Each entry
+    # typically has a ``params`` dict that the registry-based instantiation
+    # passes through ``strategy.set_params(...)``.
+    strategies: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     bbkc_exit: BBKCExitConfig = field(default_factory=BBKCExitConfig)
 
 
@@ -123,11 +161,15 @@ def load_config(config_path: str = "config.yaml") -> AppConfig:
         section_map = {
             "app": config.app, "backtest": config.backtest,
             "risk": config.risk, "data": config.data, "alert": config.alert,
-            "bbkc_exit": config.bbkc_exit,
+            "trading": config.trading, "bbkc_exit": config.bbkc_exit,
         }
         for section_name, instance in section_map.items():
             if section_name in raw and isinstance(raw[section_name], dict):
                 _merge_dataclass(instance, raw[section_name])
+        # ``strategies`` is a free-form Dict[str, Dict[str, Any]] - we
+        # store it as-is so the runner can look up params by strategy name.
+        if "strategies" in raw and isinstance(raw["strategies"], dict):
+            config.strategies = dict(raw["strategies"])
     env_token = os.getenv("TELEGRAM_BOT_TOKEN")
     if env_token:
         config.alert.telegram_token = env_token
@@ -144,10 +186,36 @@ def load_config(config_path: str = "config.yaml") -> AppConfig:
             env_bbkc_mode,
         )
         config.bbkc_exit.mode = env_bbkc_mode
+
+    # Stage A: app.mode is the single source of truth for base_url.
+    # Any base_url set explicitly in yaml is overridden by the mode-derived
+    # value with a WARN so operators notice the deprecation. Stage A-
+    # hardening: invalid modes FAIL FAST (no silent demo fallback) so a
+    # typo in the yaml cannot quietly route to the wrong environment.
+    import logging as _logging
+    from src.core.mode import base_url_for, VALID_MODES, MODE_DEMO, ModeError
+    _log = _logging.getLogger(__name__)
+    requested_mode = (config.app.mode or MODE_DEMO).lower().strip()
+    if requested_mode not in VALID_MODES:
+        raise ModeError(
+            f"invalid app.mode={config.app.mode!r} in config; "
+            f"must be one of {list(VALID_MODES)}"
+        )
+    config.app.mode = requested_mode
+    derived_url = base_url_for(requested_mode)
+    if config.app.base_url and config.app.base_url != derived_url:
+        _log.warning(
+            "config.app.base_url=%r is overridden by app.mode=%s -> %s. "
+            "base_url is no longer user-configurable; remove it from yaml.",
+            config.app.base_url, requested_mode, derived_url,
+        )
+    config.app.base_url = derived_url
+
     return config
 
 
 __all__ = [
     "AppConfig", "AppSettings", "BacktestConfig", "RiskConfig",
-    "DataConfig", "AlertConfig", "BBKCExitConfig", "load_config",
+    "DataConfig", "AlertConfig", "TradingConfig", "BBKCExitConfig",
+    "load_config",
 ]

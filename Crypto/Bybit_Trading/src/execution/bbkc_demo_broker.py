@@ -1,23 +1,30 @@
-"""BbkcDemoBroker — LiveBroker subclass for BBKC[BIGTHREE] demo trading.
+"""BbkcBroker - LiveBroker subclass for BBKC trading (demo *or* live).
 
 This is the broker the user actually wanted: a thin layer on top of
-``LiveBroker`` that calls the real Bybit Demo API for every order and
+``LiveBroker`` that calls the real Bybit REST API for every order and
 pulls the real wallet / position state for heartbeat display. It is
 the structural equivalent of legacy ``main.py trade`` but scoped to a
-single strategy (``BBKCSqueeze``) and a fixed universe (``BIGTHREE``).
+single strategy (``BBKCSqueeze``).
+
+Mode-agnostic: the same class talks to demo (``api-demo.bybit.com``) or
+mainnet (``api.bybit.com``) - only the supplied :class:`BybitRestClient`'s
+``base_url`` differs, and that base_url is derived from ``config.app.mode``
+via :mod:`src.core.mode`. There is no demo-specific or live-specific code
+path here. The legacy class name ``BbkcDemoBroker`` is kept as an alias at
+the bottom for back-compat (deprecated).
 
 Why a subclass rather than raw LiveBroker
 -----------------------------------------
-1. **Universe guard** — the same safety rail as PaperBroker. A bug in
+1. **Universe guard** - the same safety rail as PaperBroker. A bug in
    strategy code cannot submit orders on SOL/LINK even if it tries.
-2. **Qty rounding to instrument lot step** — Bybit rejects orders that
+2. **Qty rounding to instrument lot step** - Bybit rejects orders that
    are not multiples of the instrument's ``qtyStep``. Legacy had this
    in ``TradingEngine._round_qty``; we port the same idea here by
    fetching instrument specs once at construction time.
-3. **Order audit log** — every submitted order (and its Bybit response)
+3. **Order audit log** - every submitted order (and its Bybit response)
    gets appended to ``orders.jsonl`` inside the run directory so the
    14-day run can be audited line-by-line.
-4. **Public sync()** — heartbeat code can call ``broker.sync()`` without
+4. **Public sync()** - heartbeat code can call ``broker.sync()`` without
    poking private LiveBroker methods.
 
 What is NOT changed
@@ -56,9 +63,13 @@ from src.execution.live_broker import LiveBroker
 logger = logging.getLogger(__name__)
 
 
-class BbkcDemoBroker(LiveBroker):
-    """LiveBroker + BIGTHREE universe guard + lot-step qty rounding +
-    orders.jsonl audit log."""
+class BbkcBroker(LiveBroker):
+    """LiveBroker + universe guard + lot-step qty rounding + orders.jsonl audit log.
+
+    Mode-agnostic - talks to demo or mainnet identically. The REST endpoint is
+    a property of the injected ``BybitRestClient`` (configured via
+    ``config.app.mode``), not of this class.
+    """
 
     def __init__(
         self,
@@ -86,7 +97,7 @@ class BbkcDemoBroker(LiveBroker):
         self._fetch_instrument_specs()
 
     # ------------------------------------------------------------------
-    # Instrument spec — qty step / min qty per symbol
+    # Instrument spec - qty step / min qty per symbol
     # ------------------------------------------------------------------
 
     def _fetch_instrument_specs(self) -> None:
@@ -94,14 +105,14 @@ class BbkcDemoBroker(LiveBroker):
         Bybit ``get_instruments``.
 
         On failure we fall back to 3-decimal rounding (0.001) so a
-        missing API key does not brick the broker entirely — orders
+        missing API key does not brick the broker entirely - orders
         may get rejected by Bybit but that's a recoverable error.
         """
         try:
             instruments = self._rest.get_instruments()
         except Exception as exc:
             logger.warning(
-                "[BbkcDemoBroker] instruments fetch failed: %s — using 0.001 fallback",
+                "[BbkcBroker] instruments fetch failed: %s - using 0.001 fallback",
                 exc,
             )
             for sym in self._symbols_allowed:
@@ -126,7 +137,7 @@ class BbkcDemoBroker(LiveBroker):
             except Exception:
                 self._min_qty[sym] = 0.001
             logger.info(
-                "[BbkcDemoBroker] %s qty_step=%s min_qty=%s",
+                "[BbkcBroker] %s qty_step=%s min_qty=%s",
                 sym, self._qty_step[sym], self._min_qty[sym],
             )
         for sym in self._symbols_allowed:
@@ -134,7 +145,7 @@ class BbkcDemoBroker(LiveBroker):
                 self._qty_step[sym] = 0.001
                 self._min_qty[sym] = 0.001
                 logger.warning(
-                    "[BbkcDemoBroker] %s missing from instruments response, "
+                    "[BbkcBroker] %s missing from instruments response, "
                     "using fallback qty_step=0.001",
                     sym,
                 )
@@ -165,7 +176,7 @@ class BbkcDemoBroker(LiveBroker):
     def _check_universe(self, symbol: str, source: str) -> bool:
         if symbol not in self._symbols_allowed:
             logger.warning(
-                "[BbkcDemoBroker] %s blocked for %s — not in allowed universe %s",
+                "[BbkcBroker] %s blocked for %s - not in allowed universe %s",
                 source, symbol, sorted(self._symbols_allowed),
             )
             return False
@@ -195,7 +206,7 @@ class BbkcDemoBroker(LiveBroker):
         qty = self._round_qty(symbol, qty)
         if qty <= 0:
             logger.warning(
-                "[BbkcDemoBroker] buy %s skipped — qty below min after rounding",
+                "[BbkcBroker] buy %s skipped - qty below min after rounding",
                 symbol,
             )
             return ""
@@ -212,7 +223,7 @@ class BbkcDemoBroker(LiveBroker):
         qty = self._round_qty(symbol, qty)
         if qty <= 0:
             logger.warning(
-                "[BbkcDemoBroker] sell %s skipped — qty below min after rounding",
+                "[BbkcBroker] sell %s skipped - qty below min after rounding",
                 symbol,
             )
             return ""
@@ -263,14 +274,14 @@ class BbkcDemoBroker(LiveBroker):
         """Refresh both wallet and positions from the real REST API.
 
         LiveBroker already has ``sync_positions`` and a private
-        ``_sync_wallet`` — this just exposes a single public call and
+        ``_sync_wallet`` - this just exposes a single public call and
         swallows no exceptions (so the caller sees why a sync failed).
         """
         self._sync_wallet()
         self.sync_positions()
 
     def live_portfolio(self) -> Portfolio:
-        """Public alias for get_portfolio — returns a fresh Portfolio
+        """Public alias for get_portfolio - returns a fresh Portfolio
         snapshot without forcing a REST call. Use ``sync()`` first if
         you need up-to-date numbers."""
         return self.get_portfolio()
@@ -299,7 +310,7 @@ class BbkcDemoBroker(LiveBroker):
             with self._orders_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row) + "\n")
         except Exception as exc:
-            logger.error("[BbkcDemoBroker] failed to write orders.jsonl: %s", exc)
+            logger.error("[BbkcBroker] failed to write orders.jsonl: %s", exc)
 
     @property
     def run_dir(self) -> Path:
@@ -310,4 +321,10 @@ class BbkcDemoBroker(LiveBroker):
         return set(self._symbols_allowed)
 
 
-__all__ = ["BbkcDemoBroker"]
+# Stage A: back-compat alias. ``BbkcDemoBroker`` was the original name when
+# the runner only supported Bybit demo. The class itself is mode-agnostic, so
+# it has been renamed to :class:`BbkcBroker`. Existing imports of
+# ``BbkcDemoBroker`` continue to work via this alias.
+BbkcDemoBroker = BbkcBroker
+
+__all__ = ["BbkcBroker", "BbkcDemoBroker"]

@@ -25,14 +25,47 @@ data:
     - 4h
 
 alert:
-  telegram_enabled: true       # token/chat_id는 .env(TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)에서 주입
+  telegram_enabled: true       # token/chat_id from .env (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)
   alert_on_trade: true
   alert_on_error: true
   alert_on_daily_summary: true
 
-# Round 5: BBKC be_trail 청산 운영 정책 (round 4 ROBUST_PROMOTE 1순위 후보)
+# Stage A-2: generic strategy-runner inputs. The runtime layer (mode,
+# REST client, broker, monitoring) is mode-agnostic; this block says
+# which strategy to run, on what universe, at what timeframe.
+trading:
+  strategy: BBKCSqueeze
+  universe:
+    - BTCUSDT
+    - ETHUSDT
+    - AVAXUSDT
+  timeframe: 1h
+  root_out_dir: logs/live_demo
+
+# Stage A-2: per-strategy parameter bag. Looked up by strategy.name.
+# When ``strategies.<Name>.params`` is present it overrides legacy blocks
+# (e.g. bbkc_exit). For BBKCSqueeze, missing keys fall back to bbkc_exit.
+strategies:
+  BBKCSqueeze:
+    params:
+      exit_mode: be_trail
+      trail_be_at_tp_frac: 0.25
+      trail_start_at_tp_frac: 0.60
+      trail_distance_tp_frac: 0.30
+      drop_tp: false
+      time_stop_bars: 0
+  # Example for a future strategy (commented out to keep registry tests pure):
+  # Donchian_FixedRR:
+  #   params:
+  #     entry_period: 20
+  #     stop_atr: 2.5
+  #     tp_r_ratio: 2.0
+
+# DEPRECATED (Stage A-2): kept for back-compat. The wrapper
+# scripts/run_bbkc_live_trade.py and the generic adapter prefer
+# strategies.BBKCSqueeze.params; this block is consulted as fallback only.
 bbkc_exit:
-  mode: be_trail        # be_trail | fixed (env BBKC_EXIT_MODE로 override 가능)
+  mode: be_trail              # be_trail | fixed (env BBKC_EXIT_MODE can override)
   trail_be_at_tp_frac: 0.25
   trail_start_at_tp_frac: 0.60
   trail_distance_tp_frac: 0.30
