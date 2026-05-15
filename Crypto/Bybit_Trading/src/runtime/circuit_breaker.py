@@ -1,22 +1,35 @@
-"""Stage B-5: order-failure circuit breaker.
+"""Stage B-5 / C-1: order-failure circuit breaker.
 
-Watches a sliding window of recent order outcomes. When the failure
-rate within the window exceeds a threshold AND a minimum sample size
-has been reached, the breaker trips:
+Watches a sliding window of recent order outcomes. The breaker trips
+when ALL three conditions hold within the window:
+
+  * ``total >= min_sample`` — enough activity to draw a meaningful rate
+  * ``failures >= min_failures`` — at least N actual failures (C-1
+    addition; a single transient network blip in a 5-event window must
+    not be enough)
+  * ``rate >= failure_rate_threshold`` — the failure ratio is above the
+    threshold
+
+On trip:
 
   * the supplied :class:`KillSwitch` is engaged via the file-flag path,
-    so subsequent NEW entries are blocked even if this process is
-    restarted (the flag persists on disk).
-  * an ``alert.on_error`` is fired.
-  * subsequent calls to :meth:`record` keep updating stats but cannot
-    re-trip (idempotent).
+    so subsequent NEW entries are blocked even after a process restart.
+  * ``alert.on_breaker_tripped`` is fired (falls back to ``on_error``
+    if the alert manager only has the legacy interface).
+  * subsequent ``record`` calls keep updating stats but cannot re-trip
+    (idempotent).
 
-The breaker only touches NEW-entry outcomes - the broker wires it into
-``_execute_order`` (which covers both strategy and manual entries) but
-NOT into ``close()`` so existing positions stay manageable.
+Eligibility (C-1, B2 decision)
+------------------------------
+``record(..., breaker_eligible=False)`` outcomes are kept OUT of the
+sliding window entirely so they cannot influence the trip calculation.
+This is how ``risk_reject`` (local risk policy refusal, not an exchange
+failure) and ``kill_switch_block`` (already-paused new entries) are
+prevented from tripping the breaker on top of themselves.
 
 Clearing the tripped state is an explicit operator action: remove the
-file flag in ``run_dir`` and call :meth:`reset` (or restart the bot).
+file flag in ``run_dir`` AND call :meth:`reset` (or restart the bot
+after deleting the flag).
 """
 from __future__ import annotations
 
@@ -38,6 +51,7 @@ class CircuitBreaker:
         window_seconds: float = 3600.0,
         failure_rate_threshold: float = 0.10,
         min_sample: int = 5,
+        min_failures: int = 2,
         clock: Optional[Callable[[], float]] = None,
     ) -> None:
         if window_seconds <= 0:
@@ -46,11 +60,14 @@ class CircuitBreaker:
             raise ValueError("failure_rate_threshold must be in (0, 1]")
         if min_sample < 1:
             raise ValueError("min_sample must be >= 1")
+        if min_failures < 1:
+            raise ValueError("min_failures must be >= 1")
         self._ks = kill_switch
         self._alert = alert_manager
         self._window_seconds = float(window_seconds)
         self._threshold = float(failure_rate_threshold)
         self._min_sample = int(min_sample)
+        self._min_failures = int(min_failures)
         self._clock = clock or time.time
         # (ts_seconds, success, category)
         self._events: Deque[Tuple[float, bool, str]] = deque()
@@ -59,7 +76,20 @@ class CircuitBreaker:
     # ------------------------------------------------------------------
     # recording / introspection
     # ------------------------------------------------------------------
-    def record(self, success: bool, category: str = "") -> None:
+    def record(
+        self,
+        success: bool,
+        category: str = "",
+        breaker_eligible: bool = True,
+    ) -> None:
+        """Record an order outcome.
+
+        ``breaker_eligible=False`` drops the event entirely so that
+        ``risk_reject`` / ``kill_switch_block`` cannot trip the breaker.
+        See module docstring for the rationale.
+        """
+        if not breaker_eligible:
+            return
         now = self._clock()
         self._events.append((now, bool(success), str(category)))
         self._evict(now)
@@ -78,6 +108,8 @@ class CircuitBreaker:
             "window_seconds": self._window_seconds,
             "threshold": self._threshold,
             "min_sample": self._min_sample,
+            "min_failures": self._min_failures,
+            "top_category": self._top_category(),
         }
 
     @property
@@ -116,6 +148,8 @@ class CircuitBreaker:
         if total < self._min_sample:
             return
         failures = sum(1 for _, ok, _ in self._events if not ok)
+        if failures < self._min_failures:
+            return
         rate = failures / total
         if rate < self._threshold:
             return
@@ -137,7 +171,17 @@ class CircuitBreaker:
                 )
         if self._alert is not None:
             try:
-                self._alert.on_error(f"circuit breaker tripped - {msg}")
+                # Prefer the structured alert; fall back to on_error if the
+                # alert manager is older (legacy interface).
+                handler = getattr(self._alert, "on_breaker_tripped", None)
+                if callable(handler):
+                    handler(
+                        rate=rate, failures=failures, total=total,
+                        top_category=top_cat,
+                        window_minutes=window_min,
+                    )
+                else:
+                    self._alert.on_error(f"circuit breaker tripped - {msg}")
             except Exception as exc:
                 logger.warning(
                     "[circuit_breaker] alert delivery failed: %s", exc,

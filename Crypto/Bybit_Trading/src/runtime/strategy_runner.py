@@ -37,6 +37,7 @@ from src.data_manager.gap_filler import (
     current_db_tail_ms,
     fill_gap_for_universe,
 )
+from src.runtime.account_snapshot import AccountSnapshotWriter
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,17 @@ class StrategyTradeRunner:
         stop_at_ms: int,
         strategy_factory: Callable[[], Any],
         ws_url: Optional[str] = None,
+        *,
+        # Stage C-1 wiring — all optional so existing callers / tests stay green.
+        snapshot_writer: Optional[AccountSnapshotWriter] = None,
+        alert_manager: Optional[Any] = None,
+        kill_switch: Optional[Any] = None,
+        circuit_breaker: Optional[Any] = None,
+        run_id: str = "",
+        mode: str = "",
+        leverage: int = 0,
+        api_key_fingerprint: str = "",
+        heartbeat_interval_seconds: float = 60.0,
     ) -> None:
         if not universe:
             raise ValueError("StrategyTradeRunner: universe is empty")
@@ -167,6 +179,23 @@ class StrategyTradeRunner:
         self._stopped = False
         self._ws: Optional[BybitWebSocketClient] = None
         self._bars_seen = 0
+        # Stage C-1: optional observability dependencies.
+        self._snapshot_writer = snapshot_writer
+        self._alert = alert_manager
+        self._kill_switch = kill_switch
+        self._circuit_breaker = circuit_breaker
+        self._run_id = run_id
+        self._mode = mode
+        self._leverage = int(leverage) if leverage else 0
+        self._api_key_fingerprint = api_key_fingerprint
+        self._heartbeat_interval_ms = int(heartbeat_interval_seconds * 1000)
+        # Edge-trigger flag so we alert ONCE per kill-switch engage
+        # (operator gets one Telegram per event, not one per heartbeat).
+        # Breaker trips are alerted by CircuitBreaker itself — see
+        # ``_check_state_edge_alerts``.
+        self._ks_alerted = False
+        # Reason captured at shutdown (signal / stop-at / exception).
+        self._shutdown_reason = "unknown"
         # Per-symbol strategy instances. Built lazily on first dispatch
         # so the factory's failure surfaces during the first bar (not
         # during construction) and any factory-time logging interleaves
@@ -205,6 +234,7 @@ class StrategyTradeRunner:
         def _handler(signum: int, frame: Any) -> None:
             logger.warning("[runner] signal %d received, stopping...", signum)
             self._stopped = True
+            self._shutdown_reason = f"signal {signum}"
             if self._ws is not None:
                 try:
                     self._ws.stop()
@@ -372,6 +402,7 @@ class StrategyTradeRunner:
         if self._stop_at_ms > 0 and _now_ms() >= self._stop_at_ms:
             logger.info("[runner] stop-at reached, shutting down")
             self._stopped = True
+            self._shutdown_reason = "stop-at reached"
             if self._ws is not None:
                 try:
                     self._ws.stop()
@@ -379,11 +410,128 @@ class StrategyTradeRunner:
                     pass
 
     # ------------------------------------------------------------------
+    # Stage C-1 helpers — alerts + heartbeat snapshot
+    # ------------------------------------------------------------------
+    def _send_start_alert(self, portfolio: Any) -> None:
+        if self._alert is None:
+            return
+        try:
+            self._alert.on_start(
+                mode=self._mode,
+                strategy=self._strategy_name,
+                universe=list(self._universe),
+                leverage=self._leverage,
+                equity=float(getattr(portfolio, "equity", 0.0) or 0.0),
+                api_key_fingerprint=self._api_key_fingerprint,
+                timeframe=self._timeframe,
+                run_id=self._run_id,
+            )
+        except Exception as exc:
+            logger.warning("[runner] on_start alert failed: %s", exc)
+
+    def _send_shutdown_alert(self, portfolio: Optional[Any]) -> None:
+        if self._alert is None:
+            return
+        equity = float(getattr(portfolio, "equity", 0.0) or 0.0) if portfolio else 0.0
+        daily_pnl = (
+            float(getattr(portfolio, "daily_pnl", 0.0) or 0.0) if portfolio else 0.0
+        )
+        positions = len(getattr(portfolio, "positions", []) or []) if portfolio else 0
+        try:
+            self._alert.on_shutdown(
+                reason=self._shutdown_reason,
+                equity=equity, daily_pnl=daily_pnl,
+                positions=positions, bars_seen=self._bars_seen,
+            )
+        except Exception as exc:
+            logger.warning("[runner] on_shutdown alert failed: %s", exc)
+
+    def _check_state_edge_alerts(self) -> None:
+        """Fire kill-switch edge alert exactly once per transition.
+
+        Note: breaker trip alerts are the **CircuitBreaker's** sole
+        responsibility — it fires ``alert.on_breaker_tripped`` from
+        inside ``_maybe_trip`` the moment the trip happens. We
+        deliberately do NOT re-fire here so the operator does not
+        receive duplicate Telegram messages (one from the breaker
+        immediately, one from the next heartbeat tick).
+        """
+        # Kill switch — operator-engaged OR breaker-engaged both surface here.
+        if (
+            self._alert is not None
+            and self._kill_switch is not None
+            and not self._ks_alerted
+        ):
+            try:
+                engaged = bool(self._kill_switch.is_new_entry_disabled())
+            except Exception:
+                engaged = False
+            if engaged:
+                try:
+                    reason = self._kill_switch.reason() or "(unknown)"
+                except Exception:
+                    reason = "(unknown)"
+                try:
+                    self._alert.on_kill_switch_engaged(reason=reason)
+                except Exception as exc:
+                    logger.warning(
+                        "[runner] on_kill_switch_engaged alert failed: %s", exc,
+                    )
+                self._ks_alerted = True
+
+    def _write_account_snapshot(
+        self, portfolio: Any, ws_connected: bool,
+    ) -> None:
+        if self._snapshot_writer is None:
+            return
+        failure_counters: Dict[str, int] = {}
+        if hasattr(self._broker, "get_failure_counters"):
+            try:
+                failure_counters = dict(
+                    self._broker.get_failure_counters() or {}
+                )
+            except Exception:
+                pass
+        breaker_stats = None
+        if self._circuit_breaker is not None:
+            try:
+                breaker_stats = self._circuit_breaker.stats()
+            except Exception:
+                pass
+        ks_engaged = False
+        ks_reason = ""
+        if self._kill_switch is not None:
+            try:
+                ks_engaged = bool(self._kill_switch.is_new_entry_disabled())
+                if ks_engaged:
+                    ks_reason = self._kill_switch.reason() or ""
+            except Exception:
+                pass
+        try:
+            self._snapshot_writer.write(
+                portfolio=portfolio,
+                failure_counters=failure_counters,
+                breaker_stats=breaker_stats,
+                kill_switch_engaged=ks_engaged,
+                kill_switch_reason=ks_reason,
+                bars_seen=self._bars_seen,
+                ws_connected=ws_connected,
+            )
+        except Exception as exc:
+            logger.warning("[runner] snapshot write failed: %s", exc)
+
+    # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
     def run(self) -> None:
         self._install_signal_handler()
         self._initial_sync()
+        # After sync, the broker has real equity — fire start alert with
+        # the operator's actual account state.
+        try:
+            self._send_start_alert(self._broker.live_portfolio())
+        except Exception as exc:
+            logger.warning("[runner] start-alert portfolio fetch failed: %s", exc)
         self._initial_gap_fill()
 
         if self._ws_url:
@@ -398,12 +546,14 @@ class StrategyTradeRunner:
             self._universe, self._ws_interval,
         )
         last_heartbeat = _now_ms()
+        final_portfolio: Optional[Any] = None
         try:
             while not self._stopped:
                 if self._stop_at_ms > 0 and _now_ms() >= self._stop_at_ms:
+                    self._shutdown_reason = "stop-at reached"
                     break
                 time.sleep(5.0)
-                if _now_ms() - last_heartbeat >= 60_000:
+                if _now_ms() - last_heartbeat >= self._heartbeat_interval_ms:
                     try:
                         self._broker.sync()
                         portfolio = self._broker.live_portfolio()
@@ -424,9 +574,17 @@ class StrategyTradeRunner:
                             len(portfolio.positions),
                             pos_str,
                         )
+                        # C-1: persist heartbeat row + check edge alerts.
+                        self._write_account_snapshot(
+                            portfolio, ws_connected=ws.is_connected,
+                        )
+                        self._check_state_edge_alerts()
                     except Exception as exc:
                         logger.error("[heartbeat] sync failed: %s", exc)
                     last_heartbeat = _now_ms()
+        except Exception as exc:
+            self._shutdown_reason = f"exception: {exc}"
+            raise
         finally:
             try:
                 ws.stop()
@@ -434,16 +592,27 @@ class StrategyTradeRunner:
                 pass
             try:
                 self._broker.sync()
-                portfolio = self._broker.live_portfolio()
+                final_portfolio = self._broker.live_portfolio()
                 logger.info(
                     "[final] equity=%.2f daily_pnl=%+.2f positions=%d bars_seen=%d",
-                    portfolio.equity,
-                    portfolio.daily_pnl,
-                    len(portfolio.positions),
+                    final_portfolio.equity,
+                    final_portfolio.daily_pnl,
+                    len(final_portfolio.positions),
                     self._bars_seen,
+                )
+                self._write_account_snapshot(
+                    final_portfolio, ws_connected=False,
                 )
             except Exception as exc:
                 logger.error("[final] sync failed: %s", exc)
+            # One last edge-check + shutdown alert. The alert path is
+            # best-effort so any failure here cannot mask the original
+            # exit reason.
+            try:
+                self._check_state_edge_alerts()
+            except Exception:
+                pass
+            self._send_shutdown_alert(final_portfolio)
 
 
 __all__ = ["StrategyTradeRunner", "timeframe_to_ws_interval"]

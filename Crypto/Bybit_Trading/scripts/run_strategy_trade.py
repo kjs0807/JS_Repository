@@ -65,8 +65,10 @@ from src.core.mode import (
 )
 from src.data_manager.db import DBManager
 from src.execution.bbkc_demo_broker import BbkcBroker
+from src.runtime.account_snapshot import AccountSnapshotWriter
 from src.runtime.circuit_breaker import CircuitBreaker
 from src.runtime.kill_switch import KillSwitch
+from src.runtime.run_log import install_run_log_handler
 from src.runtime.strategy_runner import StrategyTradeRunner
 from src.strategies.registry import StrategyRegistry
 from src.strategies.registry_builder import build_strategy_registry
@@ -280,6 +282,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     run_dir = Path(root_out_dir) / strategy_name / args.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    # Stage C-1: mirror every log record to ``run_dir/run.log``. Done
+    # before the banner so the file captures the banner too.
+    install_run_log_handler(run_dir)
+
     # ------------------------------------------------------------------
     # Demo banner (no real-money risk - short and stdout-flushed).
     # ------------------------------------------------------------------
@@ -348,16 +354,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ERROR: leverage pre-flight failed: {exc}")
         return 1
 
-    # Stage B-5: order-failure circuit breaker. Trips after a 1-hour
-    # window where failure rate >= 10% (with at least 5 attempts), and
-    # engages the kill switch via the on-disk flag so a process restart
-    # cannot quietly resume entries.
+    # Stage B-5 / C-1: order-failure circuit breaker. Trips when
+    # ALL of:
+    #   * total >= min_sample (5)
+    #   * failures >= min_failures (2)   ← C-1 (B2 sensitivity tuning):
+    #     a single transient blip in a 5-event window must not be enough.
+    #   * rate >= failure_rate_threshold (10%)
+    # On trip: engages the kill switch via the on-disk flag so a
+    # process restart cannot quietly resume entries. ``risk_reject``
+    # outcomes are NOT eligible to feed the breaker (LiveBroker passes
+    # ``breaker_eligible=False`` for those — they are local policy
+    # refusals, not exchange failures).
     circuit_breaker = CircuitBreaker(
         kill_switch=kill_switch,
         alert_manager=alert,
         window_seconds=3600.0,
         failure_rate_threshold=0.10,
         min_sample=5,
+        min_failures=2,
     )
     broker.set_circuit_breaker(circuit_breaker)
 
@@ -422,8 +436,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
 
     # ------------------------------------------------------------------
-    # Runner (strategy-agnostic).
+    # Runner (strategy-agnostic) + Stage C-1 observability wiring.
     # ------------------------------------------------------------------
+    snapshot_writer = AccountSnapshotWriter(
+        path=run_dir / "account.jsonl",
+        mode=mode,
+        strategy=strategy_name,
+        universe=universe,
+        timeframe=timeframe,
+    )
     runner = StrategyTradeRunner(
         broker=broker,
         db=db,
@@ -433,6 +454,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         stop_at_ms=stop_ms,
         strategy_factory=strategy_factory,
         ws_url=ws_url_for(mode),
+        snapshot_writer=snapshot_writer,
+        alert_manager=alert,
+        kill_switch=kill_switch,
+        circuit_breaker=circuit_breaker,
+        run_id=args.run_id,
+        mode=mode,
+        leverage=cfg.app.leverage,
+        api_key_fingerprint=fingerprint(api_key),
     )
     runner.run()
     return 0

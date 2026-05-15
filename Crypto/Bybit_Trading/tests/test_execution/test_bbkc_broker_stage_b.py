@@ -43,6 +43,15 @@ def _make_broker(
     broker._min_qty = {"BTCUSDT": 0.001, "ETHUSDT": 0.01}
     broker._per_symbol_max_pos_pct = dict(per_sym) if per_sym else {}
     broker._kill_switch = kill_switch
+    # Stage B-4/B-5 + C-1: LiveBroker attrs that the __new__ bypass skipped.
+    from src.runtime.order_failure import ALL_CATEGORIES
+    broker._failure_counters = {c: 0 for c in ALL_CATEGORIES}
+    broker._success_count = 0
+    broker._circuit_breaker = None
+    # C-1: unified OrderLogger — MagicMock no-op sink. Tests that care
+    # about audit-log content set their own.
+    broker._order_logger = MagicMock()
+    broker._kill_switch_ref = kill_switch
     return broker
 
 

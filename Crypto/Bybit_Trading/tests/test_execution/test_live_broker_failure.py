@@ -30,6 +30,10 @@ def _make_broker() -> LiveBroker:
     broker._failure_counters = {c: 0 for c in ALL_CATEGORIES}
     broker._success_count = 0
     broker._circuit_breaker = None
+    # Stage C-1: order logger + kill switch ref. None disables audit
+    # logging and the kill-switch snapshot field; both are optional.
+    broker._order_logger = None
+    broker._kill_switch_ref = None
     return broker
 
 
@@ -135,7 +139,9 @@ def test_circuit_breaker_record_called_on_success():
     broker.set_circuit_breaker(cb)
     broker._rest.place_order.return_value = {"orderId": "X"}
     broker._execute_order("BTCUSDT", "Buy", 0.01, 75_000.0, None, "STRATEGY", "t")
-    cb.record.assert_called_once_with(success=True, category="")
+    cb.record.assert_called_once_with(
+        success=True, category="", breaker_eligible=True,
+    )
 
 
 def test_circuit_breaker_record_called_on_failure_with_category():
@@ -148,6 +154,28 @@ def test_circuit_breaker_record_called_on_failure_with_category():
     broker._execute_order("BTCUSDT", "Buy", 0.0001, 75_000.0, None, "STRATEGY", "t")
     cb.record.assert_called_once_with(
         success=False, category=OrderFailureCategory.MIN_QTY,
+        breaker_eligible=True,
+    )
+
+
+def test_risk_reject_is_breaker_ineligible():
+    """C-1 (B2): risk_reject is local-policy refusal and must NOT feed
+    the breaker. The counter still increments so we can audit how often
+    RiskManager refuses, but ``breaker_eligible=False`` keeps it out of
+    the trip calculation entirely."""
+    broker = _make_broker()
+    cb = MagicMock()
+    broker.set_circuit_breaker(cb)
+    broker._risk.check_order = MagicMock(
+        return_value=MagicMock(action="REJECT", reason="daily limit"),
+    )
+    broker._execute_order("BTCUSDT", "Buy", 0.01, 75_000.0, None, "STRATEGY", "t")
+    cb.record.assert_called_once_with(
+        success=False, category=OrderFailureCategory.RISK_REJECT,
+        breaker_eligible=False,
+    )
+    assert (
+        broker.get_failure_counters()[OrderFailureCategory.RISK_REJECT] == 1
     )
 
 

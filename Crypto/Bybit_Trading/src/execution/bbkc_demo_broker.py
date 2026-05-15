@@ -46,20 +46,23 @@ Safety
 """
 from __future__ import annotations
 
-import json
 import logging
 import math
-import time
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 from src.api.rest_client import BybitRestClient
 from src.core.alert import AlertManager
 from src.core.config import RiskConfig
-from src.execution.broker import Portfolio, Position
+from src.execution.broker import Portfolio
 from src.execution.live_broker import LiveBroker
 from src.runtime.kill_switch import KillSwitch
+from src.runtime.order_logger import (
+    OrderLogger,
+    RESULT_KILL_SWITCH_BLOCK,
+    RESULT_QTY_BELOW_MIN,
+    RESULT_UNIVERSE_BLOCK,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +117,14 @@ class BbkcBroker(LiveBroker):
         )
         # Stage B-3: optional kill switch (env + file-flag toggle).
         self._kill_switch: Optional[KillSwitch] = kill_switch
+        # Stage C-1: unified orders.jsonl audit log. Both this broker
+        # (pre-flight blocks: universe / kill_switch / qty-below-min) and
+        # LiveBroker._execute_order (risk_reject / exchange outcomes)
+        # write to the same path with the same schema.
+        self._order_logger = OrderLogger(self._orders_path)
+        self.set_order_logger(self._order_logger)
+        if kill_switch is not None:
+            self.set_kill_switch_ref(kill_switch)
         self._fetch_instrument_specs()
 
     # ------------------------------------------------------------------
@@ -199,6 +210,19 @@ class BbkcBroker(LiveBroker):
                 "[BbkcBroker] %s blocked for %s - not in allowed universe %s",
                 source, symbol, sorted(self._symbols_allowed),
             )
+            self._order_logger.log(
+                action=source, symbol=symbol, side="",
+                qty=0.0, source=self._source_label(source),
+                reason="universe block",
+                result=RESULT_UNIVERSE_BLOCK,
+                failure_message=(
+                    f"symbol {symbol} not in {sorted(self._symbols_allowed)}"
+                ),
+                breaker_eligible=False,
+                circuit_breaker_tripped=self._breaker_tripped(),
+                kill_switch_engaged=self._ks_engaged(),
+                equity_snapshot=float(self._equity),
+            )
             return False
         return True
 
@@ -209,6 +233,11 @@ class BbkcBroker(LiveBroker):
         dropped (and a WARN log + an on_error alert have been emitted).
         Close / update_stop / update_tp do NOT call this - existing
         positions stay manageable while new exposure is paused.
+
+        C-1: the block is logged to orders.jsonl with
+        ``breaker_eligible=False`` so it never feeds the breaker
+        (operator-engaged or breaker-engaged kill switches must not
+        snowball into a second-order trip).
         """
         if self._kill_switch is None:
             return True
@@ -226,7 +255,59 @@ class BbkcBroker(LiveBroker):
                 )
             except Exception:
                 pass
+        self._order_logger.log(
+            action=source, symbol=symbol, side="",
+            qty=0.0, source=self._source_label(source),
+            reason="kill switch engaged",
+            result=RESULT_KILL_SWITCH_BLOCK,
+            failure_message=reason,
+            breaker_eligible=False,
+            circuit_breaker_tripped=self._breaker_tripped(),
+            kill_switch_engaged=True,
+            equity_snapshot=float(self._equity),
+        )
         return False
+
+    # ------------------------------------------------------------------
+    # Snapshot helpers (Stage C-1)
+    # ------------------------------------------------------------------
+    def _source_label(self, action: str) -> str:
+        return "MANUAL" if action.startswith("manual_") else "STRATEGY"
+
+    def _ks_engaged(self) -> bool:
+        if self._kill_switch is None:
+            return False
+        try:
+            return bool(self._kill_switch.is_new_entry_disabled())
+        except Exception:
+            return False
+
+    def _breaker_tripped(self) -> bool:
+        return bool(
+            self._circuit_breaker is not None
+            and getattr(self._circuit_breaker, "tripped", False)
+        )
+
+    def _log_qty_below_min(
+        self, action: str, symbol: str, side: str,
+        stop_loss: Optional[float], take_profit: Optional[float],
+        reason: str,
+    ) -> None:
+        self._order_logger.log(
+            action=action, symbol=symbol, side=side,
+            qty=0.0, source=self._source_label(action),
+            reason=reason,
+            result=RESULT_QTY_BELOW_MIN,
+            failure_message=(
+                f"qty below min_qty={self._min_qty.get(symbol, 0.0)} "
+                f"after rounding to step={self._qty_step.get(symbol, 0.0)}"
+            ),
+            stop_loss=stop_loss, take_profit=take_profit,
+            breaker_eligible=False,
+            circuit_breaker_tripped=self._breaker_tripped(),
+            kill_switch_engaged=self._ks_engaged(),
+            equity_snapshot=float(self._equity),
+        )
 
     def calc_qty(
         self, symbol: str, risk_pct: float, stop_distance: float,
@@ -274,10 +355,11 @@ class BbkcBroker(LiveBroker):
                 "[BbkcBroker] buy %s skipped - qty below min after rounding",
                 symbol,
             )
+            self._log_qty_below_min(
+                "buy", symbol, "Buy", stop_loss, take_profit, reason,
+            )
             return ""
-        oid = super().buy(symbol, qty, stop_loss, take_profit, reason)
-        self._log_order("buy", symbol, qty, stop_loss, take_profit, reason, oid)
-        return oid
+        return super().buy(symbol, qty, stop_loss, take_profit, reason)
 
     def sell(
         self, symbol: str, qty: float, stop_loss: float,
@@ -293,17 +375,31 @@ class BbkcBroker(LiveBroker):
                 "[BbkcBroker] sell %s skipped - qty below min after rounding",
                 symbol,
             )
+            self._log_qty_below_min(
+                "sell", symbol, "Sell", stop_loss, take_profit, reason,
+            )
             return ""
-        oid = super().sell(symbol, qty, stop_loss, take_profit, reason)
-        self._log_order("sell", symbol, qty, stop_loss, take_profit, reason, oid)
-        return oid
+        return super().sell(symbol, qty, stop_loss, take_profit, reason)
 
     def close(self, symbol: str, reason: str = "") -> str:
+        # ``close()`` intentionally bypasses kill_switch / breaker — managing
+        # existing positions must keep working. Universe still applies so a
+        # stray symbol cannot be touched, but audit logging happens here
+        # because LiveBroker.close() does not currently route through
+        # ``_execute_order``.
         if not self._check_universe(symbol, "close"):
             return ""
         oid = super().close(symbol, reason)
-        self._log_order(
-            "close", symbol, 0.0, 0.0, None, reason, oid,
+        self._order_logger.log(
+            action="close", symbol=symbol, side="",
+            qty=0.0, source="STRATEGY", reason=reason,
+            result=("success" if oid else "exchange_fail"),
+            failure_message=("" if oid else "close returned no orderId"),
+            order_id=oid,
+            breaker_eligible=False,
+            circuit_breaker_tripped=self._breaker_tripped(),
+            kill_switch_engaged=self._ks_engaged(),
+            equity_snapshot=float(self._equity),
         )
         return oid
 
@@ -317,10 +413,11 @@ class BbkcBroker(LiveBroker):
             return ""
         qty = self._round_qty(symbol, qty)
         if qty <= 0:
+            self._log_qty_below_min(
+                "manual_buy", symbol, "Buy", stop_loss, take_profit, reason,
+            )
             return ""
-        oid = super().manual_buy(symbol, qty, stop_loss, take_profit, reason)
-        self._log_order("manual_buy", symbol, qty, stop_loss or 0.0, take_profit, reason, oid)
-        return oid
+        return super().manual_buy(symbol, qty, stop_loss, take_profit, reason)
 
     def manual_sell(
         self, symbol: str, qty: float, stop_loss: Optional[float] = None,
@@ -332,10 +429,11 @@ class BbkcBroker(LiveBroker):
             return ""
         qty = self._round_qty(symbol, qty)
         if qty <= 0:
+            self._log_qty_below_min(
+                "manual_sell", symbol, "Sell", stop_loss, take_profit, reason,
+            )
             return ""
-        oid = super().manual_sell(symbol, qty, stop_loss, take_profit, reason)
-        self._log_order("manual_sell", symbol, qty, stop_loss or 0.0, take_profit, reason, oid)
-        return oid
+        return super().manual_sell(symbol, qty, stop_loss, take_profit, reason)
 
     # ------------------------------------------------------------------
     # Stage B-1: set_leverage + read-back
@@ -430,31 +528,10 @@ class BbkcBroker(LiveBroker):
         you need up-to-date numbers."""
         return self.get_portfolio()
 
-    # ------------------------------------------------------------------
-    # Order audit log
-    # ------------------------------------------------------------------
-
-    def _log_order(
-        self, action: str, symbol: str, qty: float,
-        stop_loss: Optional[float], take_profit: Optional[float],
-        reason: str, order_id: str,
-    ) -> None:
-        row = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "ts_ms": int(time.time() * 1000),
-            "action": action,
-            "symbol": symbol,
-            "qty": float(qty),
-            "stop_loss": float(stop_loss) if stop_loss else None,
-            "take_profit": float(take_profit) if take_profit else None,
-            "reason": reason,
-            "order_id": order_id,
-        }
-        try:
-            with self._orders_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(row) + "\n")
-        except Exception as exc:
-            logger.error("[BbkcBroker] failed to write orders.jsonl: %s", exc)
+    # Stage C-1: order audit logging is now delegated to the unified
+    # :class:`OrderLogger` (``self._order_logger``). LiveBroker logs every
+    # outcome that reaches the exchange; BbkcBroker logs the pre-flight
+    # blocks (universe / kill_switch / qty-below-min) and close() above.
 
     @property
     def run_dir(self) -> Path:

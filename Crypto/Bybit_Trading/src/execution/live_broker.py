@@ -19,10 +19,18 @@ from src.core.alert import AlertManager
 from src.api.rest_client import BybitRestClient
 from src.execution.broker import Broker, Position, Portfolio, Fill, Order
 from src.execution.risk import RiskManager
+from src.runtime.kill_switch import KillSwitch
 from src.runtime.order_failure import (
     ALL_CATEGORIES,
     OrderFailureCategory,
     classify_order_failure,
+)
+from src.runtime.order_logger import (
+    OrderLogger,
+    RESULT_EXCHANGE_FAIL,
+    RESULT_EXCHANGE_REJECT,
+    RESULT_RISK_REJECT,
+    RESULT_SUCCESS,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,15 +53,33 @@ class LiveBroker:
         # set_circuit_breaker() wires it in after construction so the
         # broker stays decoupled from the circuit-breaker module.
         self._circuit_breaker: Optional[Any] = None
+        # Stage C-1: optional unified order audit log + kill switch
+        # reference for snapshot fields.
+        self._order_logger: Optional[OrderLogger] = None
+        self._kill_switch_ref: Optional[KillSwitch] = None
         self._sync_wallet()
 
     # ------------------------------------------------------------------
-    # Stage B-4/B-5 wiring
+    # Stage B-4/B-5 + C-1 wiring
     # ------------------------------------------------------------------
     def set_circuit_breaker(self, breaker: Any) -> None:
         """Attach a circuit breaker. ``breaker`` must implement
-        ``record(success: bool, category: str)``."""
+        ``record(success: bool, category: str, breaker_eligible: bool=True)``."""
         self._circuit_breaker = breaker
+
+    def set_order_logger(self, order_logger: OrderLogger) -> None:
+        """Attach the unified orders.jsonl audit logger (Stage C-1)."""
+        self._order_logger = order_logger
+
+    def set_kill_switch_ref(self, kill_switch: KillSwitch) -> None:
+        """Attach the kill switch for audit-log snapshot fields.
+
+        Note: this is a *reference for snapshotting only*. Kill-switch
+        gating of new entries lives in :class:`BbkcBroker` so the audit
+        log captures the block BEFORE we reach _execute_order. Plain
+        LiveBroker callers (legacy main_live.py) do not need this wired.
+        """
+        self._kill_switch_ref = kill_switch
 
     def get_failure_counters(self) -> Dict[str, int]:
         """Snapshot of per-category failure counts since process start."""
@@ -62,7 +88,18 @@ class LiveBroker:
     def get_order_success_count(self) -> int:
         return self._success_count
 
-    def _record_outcome(self, success: bool, category: str = "") -> None:
+    def _kill_switch_snapshot(self) -> bool:
+        if self._kill_switch_ref is None:
+            return False
+        try:
+            return bool(self._kill_switch_ref.is_new_entry_disabled())
+        except Exception:
+            return False
+
+    def _record_outcome(
+        self, success: bool, category: str = "",
+        breaker_eligible: bool = True,
+    ) -> None:
         if success:
             self._success_count += 1
         else:
@@ -70,7 +107,11 @@ class LiveBroker:
             self._failure_counters[cat] = self._failure_counters.get(cat, 0) + 1
         if self._circuit_breaker is not None:
             try:
-                self._circuit_breaker.record(success=success, category=category)
+                self._circuit_breaker.record(
+                    success=success,
+                    category=category,
+                    breaker_eligible=breaker_eligible,
+                )
             except Exception as exc:
                 logger.warning(
                     "[LiveBroker] circuit_breaker.record raised: %s", exc,
@@ -221,8 +262,37 @@ class LiveBroker:
             order_type="MARKET", stop_loss=stop_loss, take_profit=take_profit,
             strategy_name=source, source=source, reason=reason, created_at=0)
         decision = self._risk.check_order(order, self.get_portfolio())
+        action_map = {"Buy": "buy", "Sell": "sell"}
+        action_label = action_map.get(side, side.lower())
+        if source == "MANUAL":
+            action_label = f"manual_{action_label}"
+        # C-1: snapshot kill_switch / breaker state for every audit row.
+        ks_engaged = self._kill_switch_snapshot()
+        breaker_state = bool(
+            self._circuit_breaker is not None
+            and getattr(self._circuit_breaker, "tripped", False)
+        )
+
         if decision.action == "REJECT":
-            self._record_outcome(False, OrderFailureCategory.RISK_REJECT)
+            # B2 (C-1 finalised): risk_reject is local-policy refusal,
+            # not an exchange failure. Counter + log capture it, but the
+            # circuit breaker MUST NOT count it.
+            self._record_outcome(
+                False, OrderFailureCategory.RISK_REJECT,
+                breaker_eligible=False,
+            )
+            self._audit(
+                action=action_label, symbol=symbol, side=side, qty=qty,
+                source=source, reason=reason,
+                result=RESULT_RISK_REJECT,
+                failure_category=OrderFailureCategory.RISK_REJECT,
+                failure_message=decision.reason or "",
+                order_id="",
+                stop_loss=stop_loss, take_profit=take_profit,
+                breaker_eligible=False,
+                circuit_breaker_tripped=breaker_state,
+                kill_switch_engaged=ks_engaged,
+            )
             return ""
         params: Dict = {"symbol": symbol, "side": side, "qty": str(qty), "order_type": "Market"}
         if stop_loss and stop_loss > 0: params["stop_loss"] = str(stop_loss)
@@ -246,7 +316,19 @@ class LiveBroker:
                     )
                 except Exception:
                     pass
-            self._record_outcome(False, category)
+            self._record_outcome(False, category, breaker_eligible=True)
+            self._audit(
+                action=action_label, symbol=symbol, side=side, qty=qty,
+                source=source, reason=reason,
+                result=RESULT_EXCHANGE_REJECT,
+                failure_category=category,
+                failure_message=str(exc),
+                order_id="",
+                stop_loss=stop_loss, take_profit=take_profit,
+                breaker_eligible=True,
+                circuit_breaker_tripped=breaker_state,
+                kill_switch_engaged=ks_engaged,
+            )
             return ""
         # rest_client.place_order swallows retCode != 0 in some
         # versions and returns ``{"error": retMsg}``. Detect and
@@ -265,7 +347,19 @@ class LiveBroker:
                     )
                 except Exception:
                     pass
-            self._record_outcome(False, category)
+            self._record_outcome(False, category, breaker_eligible=True)
+            self._audit(
+                action=action_label, symbol=symbol, side=side, qty=qty,
+                source=source, reason=reason,
+                result=RESULT_EXCHANGE_REJECT,
+                failure_category=category,
+                failure_message=str(ret_msg),
+                order_id="",
+                stop_loss=stop_loss, take_profit=take_profit,
+                breaker_eligible=True,
+                circuit_breaker_tripped=breaker_state,
+                kill_switch_engaged=ks_engaged,
+            )
             return ""
         order_id = result.get("orderId", "")
         if order_id:
@@ -278,7 +372,19 @@ class LiveBroker:
                     )
                 except Exception:
                     pass
-            self._record_outcome(True, "")
+            self._record_outcome(True, "", breaker_eligible=True)
+            self._audit(
+                action=action_label, symbol=symbol, side=side, qty=qty,
+                source=source, reason=reason,
+                result=RESULT_SUCCESS,
+                failure_category="",
+                failure_message="",
+                order_id=order_id,
+                stop_loss=stop_loss, take_profit=take_profit,
+                breaker_eligible=True,
+                circuit_breaker_tripped=breaker_state,
+                kill_switch_engaged=ks_engaged,
+            )
         else:
             # pybit returned success-shaped dict but no orderId. Treat
             # defensively so the strategy never thinks an order is open.
@@ -286,7 +392,34 @@ class LiveBroker:
                 "[LiveBroker] place_order returned no orderId for %s %s: %s",
                 symbol, side, result,
             )
-            self._record_outcome(False, OrderFailureCategory.OTHER)
+            self._record_outcome(
+                False, OrderFailureCategory.OTHER, breaker_eligible=True,
+            )
+            self._audit(
+                action=action_label, symbol=symbol, side=side, qty=qty,
+                source=source, reason=reason,
+                result=RESULT_EXCHANGE_FAIL,
+                failure_category=OrderFailureCategory.OTHER,
+                failure_message="no orderId in success-shaped response",
+                order_id="",
+                stop_loss=stop_loss, take_profit=take_profit,
+                breaker_eligible=True,
+                circuit_breaker_tripped=breaker_state,
+                kill_switch_engaged=ks_engaged,
+            )
         return order_id
+
+    # ------------------------------------------------------------------
+    # Stage C-1: audit helper. Never raises (OrderLogger.log() is
+    # best-effort), so an audit failure cannot derail an order path.
+    # ------------------------------------------------------------------
+    def _audit(self, **kwargs: Any) -> None:
+        if self._order_logger is None:
+            return
+        kwargs.setdefault("equity_snapshot", float(self._equity))
+        try:
+            self._order_logger.log(**kwargs)
+        except Exception as exc:
+            logger.warning("[LiveBroker] order_logger.log raised: %s", exc)
 
 __all__ = ["LiveBroker"]
