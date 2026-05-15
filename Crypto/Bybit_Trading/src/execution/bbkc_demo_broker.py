@@ -242,6 +242,14 @@ class BbkcBroker(LiveBroker):
         the symbol has an entry there; otherwise it falls back to the
         uniform ``risk.max_position_pct`` so existing single-weight runs
         are unchanged.
+
+        NOTE on scope: per-symbol weights affect THIS method only, not
+        :meth:`LiveBroker.calc_qty` (the ``risk_pct`` + ``stop_distance``
+        path). Strategies that size via ``calc_qty`` ignore
+        ``trading.weights``. The BBKC live path uses
+        ``calc_legacy_notional_qty`` so the weights take effect for the
+        intended deployment; extending ``calc_qty`` is a Stage B+ design
+        item and intentionally out of scope here.
         """
         if entry_price <= 0:
             return 0.0
@@ -366,17 +374,19 @@ class BbkcBroker(LiveBroker):
             # Read-back: every position row for sym must report leverage==target.
             # Pass symbol= so we get the empty hedge slots too (without it
             # Bybit only returns rows with size > 0, which gives us zero
-            # rows on a clean demo account).
+            # rows on a clean demo account). Defensive: filter on
+            # row["symbol"] == sym in case Bybit ever returns extra rows
+            # for related products on a wider response.
             try:
-                sym_rows = self._rest.get_positions(symbol=sym)
+                raw_rows = self._rest.get_positions(symbol=sym)
             except TypeError:
                 # Older rest_client without the symbol kwarg - filter manually.
-                sym_rows = [p for p in self._rest.get_positions()
-                            if p.get("symbol") == sym]
+                raw_rows = self._rest.get_positions()
             except Exception as exc:
                 raise RuntimeError(
                     f"leverage read-back failed: get_positions raised {exc}"
                 ) from exc
+            sym_rows = [p for p in raw_rows if p.get("symbol") == sym]
             if not sym_rows:
                 raise RuntimeError(
                     f"leverage read-back: no position row for {sym} "

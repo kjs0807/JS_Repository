@@ -96,3 +96,26 @@ def test_env_and_file_both_active_is_still_disabled(monkeypatch, tmp_path):
     # reason() prefers env first (priority order is implementation detail
     # but must not be ""):
     assert ks.reason() != ""
+
+
+def test_fs_stat_failure_is_fail_safe_true(monkeypatch, tmp_path, caplog):
+    """Pre-B4 hardening: when we cannot stat the flag (e.g. transient OS
+    error), assume the switch is ENGAGED. Pausing new entries is safer
+    than dispatching real-money orders into uncertain state."""
+    import logging
+    from src.runtime import kill_switch as ks_mod
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    ks = KillSwitch(run_dir=run_dir)
+
+    # Patch Path.exists to raise an OSError once.
+    import pathlib
+
+    def _boom(self):
+        raise OSError("stat: simulated transient failure")
+
+    monkeypatch.setattr(pathlib.Path, "exists", _boom)
+    with caplog.at_level(logging.WARNING, logger="src.runtime.kill_switch"):
+        assert ks.is_new_entry_disabled() is True
+    assert any("FAIL-SAFE" in r.message for r in caplog.records)

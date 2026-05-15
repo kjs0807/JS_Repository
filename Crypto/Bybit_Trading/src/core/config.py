@@ -114,6 +114,14 @@ class TradingConfig:
     When empty (default), every symbol uses the uniform ``risk`` value.
     Example: ``{"ETHUSDT": 0.30, "BTCUSDT": 0.10}`` runs ETH at 30% and
     BTC at 10% of the account equity per trade.
+
+    SCOPE: ``weights`` is consumed by
+    :meth:`BbkcBroker.calc_legacy_notional_qty` only. Strategies that
+    size positions via ``broker.calc_qty(risk_pct, stop_distance)`` (the
+    risk-per-trade percent path used by e.g. some Donchian variants) do
+    NOT see ``weights``. This is intentional for the current BBKC
+    deployment; extending ``calc_qty`` to honour per-symbol weights is
+    a separate design decision and is tracked for Stage B+.
     """
     strategy: str = "BBKCSqueeze"
     universe: List[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])

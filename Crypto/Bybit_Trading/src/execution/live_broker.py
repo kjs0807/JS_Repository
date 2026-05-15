@@ -1,4 +1,4 @@
-"""LiveBroker — Bybit API 실거래 브로커."""
+"""LiveBroker - Bybit API 실거래 브로커."""
 from __future__ import annotations
 import logging
 from typing import Dict, List, Optional
@@ -64,7 +64,7 @@ class LiveBroker:
         except Exception as exc:
             logger.warning(
                 "set_trading_stop(stop_loss) failed for %s: %s "
-                "— local stop_loss not updated to keep server/local consistent",
+                "- local stop_loss not updated to keep server/local consistent",
                 symbol, exc,
             )
 
@@ -99,7 +99,7 @@ class LiveBroker:
         except Exception as exc:
             logger.warning(
                 "set_trading_stop(take_profit) failed for %s: %s "
-                "— local take_profit not updated",
+                "- local take_profit not updated",
                 symbol, exc,
             )
 

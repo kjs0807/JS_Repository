@@ -69,14 +69,18 @@ class KillSwitch:
             return False
         try:
             return self._flag_path.exists()
-        except OSError:
-            # Best effort: a transient FS error should not silently leave
-            # the kill switch unarmed.
+        except OSError as exc:
+            # Fail-safe: if we cannot determine whether the flag exists,
+            # treat the kill switch as ENGAGED. Pausing new entries on a
+            # transient FS error is safer than dispatching real-money
+            # orders into uncertain state. Operators get a WARN so the
+            # condition is visible.
             logger.warning(
-                "[kill_switch] could not stat %s; assuming disabled is FALSE",
-                self._flag_path,
+                "[kill_switch] cannot stat %s (%s); FAIL-SAFE assuming "
+                "kill switch is engaged.",
+                self._flag_path, exc,
             )
-            return False
+            return True
 
     def is_new_entry_disabled(self) -> bool:
         """True when ANY trigger is active."""

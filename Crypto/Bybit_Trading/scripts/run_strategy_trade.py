@@ -359,12 +359,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as exc:
             print(f"ERROR: pre-flight broker.sync() failed: {exc}")
             return 1
-        est_max_notional = (
-            live_equity
-            * cfg.risk.max_position_pct
-            * cfg.app.leverage
-            * len(universe)
-        )
+        # Stage B-2: banner must reflect per-symbol weights when set, so the
+        # number the operator sees matches what the broker will actually
+        # size at. Symbols without an explicit weight fall back to the
+        # uniform risk.max_position_pct (broker does the same).
+        if weights:
+            total_pct = sum(
+                float(weights.get(s, cfg.risk.max_position_pct))
+                for s in universe
+            )
+            est_max_notional = live_equity * total_pct * cfg.app.leverage
+        else:
+            est_max_notional = (
+                live_equity
+                * cfg.risk.max_position_pct
+                * cfg.app.leverage
+                * len(universe)
+            )
         banner = live_startup_banner(
             mode=mode,
             base_url=base_url,

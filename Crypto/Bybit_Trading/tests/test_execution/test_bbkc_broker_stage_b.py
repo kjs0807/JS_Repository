@@ -233,6 +233,33 @@ class TestEnsureLeverageSet:
         ]
         broker.ensure_leverage_set(["BTCUSDT"])   # must not raise
 
+    def test_defensive_symbol_filter(self):
+        """Pre-B4 hardening: even if the REST response contains unrelated
+        symbols (Bybit can sometimes echo wider data), only the rows
+        whose 'symbol' field matches must drive the leverage check."""
+        broker = _make_broker(leverage=3)
+        broker._rest.set_leverage.return_value = True
+        broker._rest.get_positions.return_value = [
+            # Unrelated symbol with WRONG leverage - must be ignored.
+            {"symbol": "AVAXUSDT", "positionIdx": 1, "leverage": "10", "size": "0"},
+            # The symbol we asked about, correct leverage.
+            {"symbol": "BTCUSDT", "positionIdx": 1, "leverage": "3", "size": "0"},
+            {"symbol": "BTCUSDT", "positionIdx": 2, "leverage": "3", "size": "0"},
+        ]
+        broker.ensure_leverage_set(["BTCUSDT"])  # must not raise
+
+    def test_defensive_filter_no_match_raises(self):
+        """If the response contains only unrelated symbols, treat it as
+        'no row for sym' (same as an empty response)."""
+        broker = _make_broker(leverage=3)
+        broker._rest.set_leverage.return_value = True
+        broker._rest.get_positions.return_value = [
+            {"symbol": "AVAXUSDT", "positionIdx": 1, "leverage": "3", "size": "0"},
+        ]
+        with pytest.raises(RuntimeError) as excinfo:
+            broker.ensure_leverage_set(["BTCUSDT"])
+        assert "no position row" in str(excinfo.value).lower()
+
     def test_empty_symbol_list_is_noop(self):
         broker = _make_broker(leverage=3)
         broker.ensure_leverage_set([])

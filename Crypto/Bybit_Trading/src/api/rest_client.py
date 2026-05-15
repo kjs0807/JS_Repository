@@ -132,7 +132,7 @@ class BybitRestClient:
         positionIdx: 0=OneWay, 1=Hedge Buy, 2=Hedge Sell.
         Round 5 §5.1 참조. category="linear", tpslMode="Full" 고정.
 
-        Raises: pybit/HTTP 예외 — caller가 잡아 WARN 로그로 처리할 것.
+        Raises: pybit/HTTP 예외 - caller가 잡아 WARN 로그로 처리할 것.
         """
         params: Dict[str, Any] = {
             "category": "linear",
