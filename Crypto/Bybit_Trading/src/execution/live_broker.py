@@ -184,11 +184,21 @@ class LiveBroker:
 
     def close(self, symbol: str, reason: str = "") -> str:
         pos = self._positions.get(symbol)
-        if pos is None: return ""
+        if pos is None:
+            return ""
         side = "Sell" if pos.side == "LONG" else "Buy"
-        result = self._rest.place_order(symbol=symbol, side=side, qty=str(pos.qty), order_type="Market")
+        pos_idx = self._position_idx_for_side(pos.side)
+        result = self._rest.place_order(
+            symbol=symbol,
+            side=side,
+            qty=str(pos.qty),
+            order_type="Market",
+            position_idx=pos_idx,
+            reduce_only=True,
+        )
         order_id = result.get("orderId", "")
-        if order_id: self._positions.pop(symbol, None)
+        if order_id:
+            self._positions.pop(symbol, None)
         return order_id
 
     def update_stop(self, symbol: str, new_stop: float) -> None:

@@ -29,6 +29,37 @@ class TestLiveBroker:
             1700000000000,60000.0,70000.0,0.0,"Test")
         self.mock_rest.place_order.return_value = {"orderId": "close1"}
         assert self.broker.close("BTCUSDT", reason="manual") == "close1"
+        self.mock_rest.place_order.assert_called_once_with(
+            symbol="BTCUSDT",
+            side="Sell",
+            qty="0.01",
+            order_type="Market",
+            position_idx=1,
+            reduce_only=True,
+        )
+        assert self.broker.get_position("BTCUSDT") is None
+
+    def test_close_short_uses_hedge_short_position_idx_and_reduce_only(self):
+        self.broker._positions["ETHUSDT"] = Position("ETHUSDT","SHORT",0.2,3200.0,
+            1700000000000,3400.0,3000.0,0.0,"Test")
+        self.mock_rest.place_order.return_value = {"orderId": "close2"}
+        assert self.broker.close("ETHUSDT", reason="manual") == "close2"
+        self.mock_rest.place_order.assert_called_once_with(
+            symbol="ETHUSDT",
+            side="Buy",
+            qty="0.2",
+            order_type="Market",
+            position_idx=2,
+            reduce_only=True,
+        )
+        assert self.broker.get_position("ETHUSDT") is None
+
+    def test_close_without_order_id_keeps_local_position(self):
+        self.broker._positions["BTCUSDT"] = Position("BTCUSDT","LONG",0.01,65000.0,
+            1700000000000,60000.0,70000.0,0.0,"Test")
+        self.mock_rest.place_order.return_value = {"error": "simulated reject"}
+        assert self.broker.close("BTCUSDT", reason="manual") == ""
+        assert self.broker.get_position("BTCUSDT") is not None
 
     def test_get_portfolio(self):
         port = self.broker.get_portfolio()
