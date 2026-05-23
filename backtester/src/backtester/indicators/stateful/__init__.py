@@ -7,7 +7,8 @@ hence the separate ``stateful`` namespace. Indicators here still satisfy the
 ``IndicatorEngine`` can precompute them with no special handling.
 """
 
+from backtester.indicators.stateful.beda import BedaBand
 from backtester.indicators.stateful.frama import FRAMAChannel
 from backtester.indicators.stateful.sats import SATSConfig, SATSIndicator
 
-__all__ = ["FRAMAChannel", "SATSConfig", "SATSIndicator"]
+__all__ = ["BedaBand", "FRAMAChannel", "SATSConfig", "SATSIndicator"]

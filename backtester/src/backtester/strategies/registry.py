@@ -10,6 +10,10 @@ from typing import Any
 
 from backtester.core.errors import ConfigError
 from backtester.strategies.base import BaseStrategy
+from backtester.strategies.beda_bollinger_pullback import (
+    BedaBollingerPullbackStrategy,
+)
+from backtester.strategies.beda_bollinger_modes import BedaBollingerModesStrategy
 from backtester.strategies.bbkc_legacy_compat import BBKCLegacyCompatStrategy
 from backtester.strategies.bbkc_multi_legacy_compat import BBKCMultiLegacyCompatStrategy
 from backtester.strategies.bbkc_squeeze import BBKCSqueezeStrategy
@@ -26,6 +30,8 @@ from backtester.strategies.frama_pullback_channel import (
 from backtester.strategies.sats import SATSStrategy
 
 STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
+    "beda_bollinger_modes": BedaBollingerModesStrategy,
+    "beda_bollinger_pullback": BedaBollingerPullbackStrategy,
     "bbkc_legacy_compat": BBKCLegacyCompatStrategy,
     "bbkc_multi_legacy_compat": BBKCMultiLegacyCompatStrategy,
     "bbkc_squeeze": BBKCSqueezeStrategy,

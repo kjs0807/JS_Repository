@@ -1,0 +1,70 @@
+run_id: beda_btcusdt_5m_sqlite
+data_source:
+  base_dir: ..\Crypto\Bybit_Trading\db\bybit_data.db
+  type: sqlite
+instruments:
+- symbol: BTCUSDT
+  asset_class: crypto_perp
+  tick_size: '0.1'
+  tick_value: '0.1'
+  contract_multiplier: '1'
+  quote_currency: USDT
+  base_currency: BTC
+  size_unit: base_asset
+  fee_model:
+    type: flat
+    taker: '0.00055'
+    maker: '0.0002'
+  exchange_rule:
+    symbol: BTCUSDT
+    price_tick: '0.1'
+    qty_step: '0.001'
+    min_qty: '0.001'
+    min_notional: '5'
+    max_leverage: '100'
+  margin_model:
+    maintenance_margin_rate: '0.005'
+    liquidation_fee_rate: '0.0006'
+timeframes_per_symbol:
+  BTCUSDT:
+  - 5m
+primary_symbol: BTCUSDT
+primary_timeframe: 5m
+start: '2025-01-01T00:00:00+00:00'
+end: '2026-05-07T00:00:00+00:00'
+gap_policy: notify
+execution_model: slippage_bps
+bar_path_model: pessimistic
+slippage_bps: 3.0
+initial_equity: '50000'
+risk_limits:
+  max_orders_per_symbol: 10
+  blacklist_symbols: []
+  max_position_size: null
+  max_total_exposure: null
+  max_leverage: '10'
+  max_drawdown_halt: null
+warmup_bars: 0
+random_seed: 0
+output_dir: runs
+log_level: INFO
+persist_run_data: copy
+snapshot_every_bars: 1
+on_run_exists: auto_suffix
+strategy_name: beda_bollinger_pullback
+strategy_params:
+  rsi_length: 13
+  atr_period: 14
+  slow_mult: 2.0
+  fast_mult: 1.0
+  bb_period: 20
+  bb_std: 2.0
+  long_rsi_take_profit: 65.0
+  short_rsi_take_profit: 35.0
+  allow_short: true
+  leverage: '3'
+  margin_pct: '0.03'
+funding_models: {}
+allow_short: true
+allow_flip: false
+funding_source_dir: null

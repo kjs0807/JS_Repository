@@ -16,7 +16,7 @@ matches the Bybit_Trading project's convention::
         UNIQUE (symbol, open_time)
     );
 
-The default ``timeframe_table`` map covers ``5m`` / ``15m`` / ``30m`` /
+The default ``timeframe_table`` map covers ``1m`` / ``5m`` / ``15m`` / ``30m`` /
 ``1h`` / ``4h`` / ``1d`` and matches Bybit_Trading's table names exactly so
 ``SQLiteDataSource("Crypto/Bybit_Trading/db/bybit_data.db")`` works out of
 the box. Custom DBs can pass an alternative mapping.
@@ -53,6 +53,7 @@ from backtester.data.base import (
 
 
 _DEFAULT_TIMEFRAME_TABLE: dict[str, str] = {
+    "1m": "ohlcv_1m",
     "5m": "ohlcv_5m",
     "15m": "ohlcv_15m",
     "30m": "ohlcv_30m",
