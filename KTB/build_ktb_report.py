@@ -175,6 +175,17 @@ def dv01_per_notional(tenor_years: float, ytm_pct: float, notional: float) -> fl
     return approx_duration(tenor_years, ytm_pct) * 0.0001 * notional
 
 
+def scenario_pnl_for_yield_bp(tenor_years: float, ytm_pct: float, notional: float, bp_change: float) -> float:
+    return -approx_duration(tenor_years, ytm_pct) * (bp_change / 10000.0) * notional
+
+
+def total_with_parallel_shock_million(total_return: float | None, tenor_years: float, ytm_pct: float, bp_change: float, notional: float = 10_000_000_000) -> float | None:
+    if total_return is None:
+        return None
+    carry_roll_pnl = total_return * notional
+    return (carry_roll_pnl + scenario_pnl_for_yield_bp(tenor_years, ytm_pct, notional, bp_change)) / 1_000_000
+
+
 def round_notional(notional: float | None, increment: float) -> float | None:
     if notional is None:
         return None
@@ -477,6 +488,19 @@ def align_curve_to_date(curve: Curve, as_of: date) -> Curve:
     return Curve(curve.name, aligned_points, aligned_history)
 
 
+def add_irs_3m_cd_proxy(curve: Curve, cd_repo: dict[str, Any], as_of: date) -> Curve:
+    points = dict(curve.points)
+    history = {k: list(v) for k, v in curve.history.items()}
+    cd_hist = [(d, v) for d, v in cd_repo.get("cd_series", []) if d <= as_of]
+    if cd_hist:
+        history[0.25] = cd_hist
+        points[0.25] = cd_hist[0][1]
+    elif cd_repo.get("cd_3m") is not None:
+        history[0.25] = [(as_of, cd_repo["cd_3m"])]
+        points[0.25] = cd_repo["cd_3m"]
+    return Curve(curve.name, points, history)
+
+
 def build_tenor_cr(curve: Curve, funding: float, periods: dict[str, float]) -> list[dict[str, Any]]:
     rows = []
     for tenor, ytm in sorted(curve.points.items()):
@@ -641,6 +665,7 @@ def curve_pair_rows(
                 total_return = total_pnl / combined_notional if combined_notional else None
                 net_dv01 = abs(dv01_per_notional(lt, ly, base_notional))
                 be_slope = total_pnl / net_dv01 if net_dv01 else None
+                slope_shock_sign = 1 if direction == "Steepener" else -1
                 rows.append(
                     {
                         "curve": curve.name.replace("_YIELD", ""),
@@ -659,6 +684,9 @@ def curve_pair_rows(
                         "long_tenor_notional": base_notional,
                         "carry_roll_pnl": total_pnl,
                         "total_return": total_return,
+                        "slope_dv01": net_dv01,
+                        "+10bp_slope_pnl": total_pnl + slope_shock_sign * net_dv01 * 10 if net_dv01 else None,
+                        "-10bp_slope_pnl": total_pnl - slope_shock_sign * net_dv01 * 10 if net_dv01 else None,
                         "breakeven_slope_bp": be_slope,
                     }
                 )
@@ -688,6 +716,20 @@ def build_bond_rv(
         fitted = interp_inside_range(curve.points, b["remaining_years"]) if curve and b["remaining_years"] is not None else None
         residual = b["ytm"] - fitted if fitted is not None and b["ytm"] is not None else None
         lend = lending.get(b["name"], {})
+        flows = lend.get("flow_by_investor") or {}
+        flow_today_vals = [v.get("today") for v in flows.values() if v.get("today") is not None]
+        flow_5d_vals = [v.get("5d") for v in flows.values() if v.get("5d") is not None]
+        flow_20d_vals = [v.get("20d") for v in flows.values() if v.get("20d") is not None]
+        top_buy_5d = max(
+            ((k, v.get("5d")) for k, v in flows.items() if v.get("5d") is not None),
+            key=lambda x: x[1],
+            default=(None, None),
+        )
+        top_sell_5d = min(
+            ((k, v.get("5d")) for k, v in flows.items() if v.get("5d") is not None),
+            key=lambda x: x[1],
+            default=(None, None),
+        )
         basket_names = basket_flags.get(b["code"], [])
         rows.append(
             {
@@ -716,6 +758,13 @@ def build_bond_rv(
                 "bank_lending": lend.get("bank_lending"),
                 "foreign_lending": lend.get("foreign_lending"),
                 "securities_borrow": lend.get("securities_borrow"),
+                "total_flow_today": sum(flow_today_vals) if flow_today_vals else None,
+                "total_flow_5d": sum(flow_5d_vals) if flow_5d_vals else None,
+                "total_flow_20d": sum(flow_20d_vals) if flow_20d_vals else None,
+                "top_buy_investor_5d": top_buy_5d[0],
+                "top_buy_5d": top_buy_5d[1],
+                "top_sell_investor_5d": top_sell_5d[0],
+                "top_sell_5d": top_sell_5d[1],
                 "top_flow_investor_5d": lend.get("top_flow_investor_5d"),
                 "top_flow_5d": lend.get("top_flow_5d"),
                 "flow_by_investor": lend.get("flow_by_investor"),
@@ -1354,6 +1403,8 @@ def add_methodology(ws):
         ("KTB Flattener", "장기 KTB 매수, 단기 KTB 대차매도", "Long-tenor long + Short-tenor short", "단기 매도 leg에 담보 carry와 대차 fee 반영"),
         ("대차매도 Carry", "빌린 채권을 매도하고 담보채권을 보유할 때의 carry", "-채권 long carry + 1Y 산금채 담보 carry - 대차수수료", "대차수수료 기본값은 연 0.35%"),
         ("IRS Receive/Pay", "고정금리 수취/지급 IRS 포지션", "Receive carry = IRS - CD3M, Pay carry = CD3M - IRS", "IRS curve는 대차/담보 비용 없음"),
+        ("IRS 3M Proxy", "IRS 6M 이하 rolldown 계산을 위한 3개월 지점 대용치", "IRS 3M proxy = CD 3M", "실제 3M IRS 고시가 아니라 계산용 proxy"),
+        ("Breakeven bp", "carry/rolldown 이익이 금리 또는 slope 변화로 상쇄되는 폭", "Tenor: total / duration, Curve: total P&L / slope DV01", "양수라면 그만큼 불리하게 움직여야 손익 0"),
         ("Z-score", "최근 분포 대비 현재값의 표준화 위치", "(현재값 - 평균) / 표준편차", "절대값 2 이상은 극단 구간 후보"),
         ("Percentile", "현재값이 과거 분포에서 위치한 백분위", "과거값 중 현재 이하 비율", "0.9 이상은 넓음/cheap, 0.1 이하는 타이트/rich 후보"),
         ("Fitted Curve Residual", "개별 종목 YTM과 generic curve 보간값의 차이", "Actual YTM - Fitted YTM", "양수는 curve 대비 cheap 후보"),
@@ -1407,6 +1458,74 @@ def build_dashboard_rows(
     if lend:
         rows.append({"signal": "Largest 5D lending balance move", "item": lend[0]["name"], "detail": lend[0].get("futures_basket_refs"), "value": lend[0]["lending_5d_change"], "interpretation": "Check lending/borrow flow"})
     return rows
+
+
+def build_bond_rv_flow_cross_rows(bond_rv_rows: list[dict[str, Any]], limit: int = 16) -> list[dict[str, Any]]:
+    candidates = []
+    for r in bond_rv_rows:
+        z = r.get("residual_z")
+        if z is None or r.get("curve_range_status") != "OK":
+            continue
+        total_5d = flow_to_krw_eok(r.get("total_flow_5d"))
+        total_today = flow_to_krw_eok(r.get("total_flow_today"))
+        lending_5d = lending_to_krw_eok(r.get("lending_5d_change"))
+        signal = None
+        interpretation = None
+        if z > 0:
+            if total_5d is not None and total_5d > 0:
+                signal = "Cheap + Buy Confirmed"
+                interpretation = "Curve 대비 cheap하고 전체 순매수가 확인됩니다."
+            elif (total_5d is not None and total_5d < 0) or (lending_5d is not None and lending_5d > 0):
+                signal = "Cheap but Supply/Lending Pressure"
+                interpretation = "Cheap하지만 매도 또는 대차 압력이 남아 있습니다."
+        elif z < 0:
+            if (total_5d is not None and total_5d < 0) or (lending_5d is not None and lending_5d > 0):
+                signal = "Rich + Sell/Short Pressure"
+                interpretation = "Rich한 종목에 매도/대차 압력이 붙어 있습니다."
+            elif total_5d is not None and total_5d > 0:
+                signal = "Rich but Buy Supported"
+                interpretation = "Rich하지만 강한 매수가 가격을 지지할 수 있습니다."
+        if signal is None:
+            continue
+        score = abs(z)
+        if total_5d is not None:
+            score += min(abs(total_5d) / 1000.0, 2.0)
+        if lending_5d is not None:
+            score += min(abs(lending_5d) / 500.0, 1.5)
+        if r.get("is_benchmark") or r.get("is_futures_basket"):
+            score += 0.5
+        candidates.append(
+            {
+                "Signal": signal,
+                "Bond": r["name"],
+                "Maturity": r["maturity"],
+                "RV z": z,
+                "Residual bp": r.get("residual_bp"),
+                "Total Today 억": total_today,
+                "Total 5D 억": total_5d,
+                "Top Buyer 5D": r.get("top_buy_investor_5d"),
+                "Top Buyer 억": flow_to_krw_eok(r.get("top_buy_5d")),
+                "Top Seller 5D": r.get("top_sell_investor_5d"),
+                "Top Seller 억": flow_to_krw_eok(r.get("top_sell_5d")),
+                "Lending 5D 억": lending_5d,
+                "Benchmark": r.get("benchmark_tenor"),
+                "Basket": r.get("futures_basket_refs"),
+                "Interpretation": interpretation,
+                "_score": score,
+            }
+        )
+    candidates.sort(key=lambda x: x["_score"], reverse=True)
+    out = []
+    per_signal = Counter()
+    for row in candidates:
+        if per_signal[row["Signal"]] >= 4:
+            continue
+        clean = {k: v for k, v in row.items() if k != "_score"}
+        out.append(clean)
+        per_signal[row["Signal"]] += 1
+        if len(out) >= limit:
+            break
+    return out
 
 
 def sparkline(values: list[float | None], width: int = 18) -> str:
@@ -1634,6 +1753,9 @@ def tenor_detail_display_rows(rows: list[dict[str, Any]], is_irs: bool = False) 
                     "carry 백만": return_to_krw_million(r.get("carry_return")),
                     "rolldown 백만": return_to_krw_million(r.get("rolldown_return")),
                     "total 백만": return_to_krw_million(r.get("total_return")),
+                    "DV01 백만/bp": dv01_per_notional(r["tenor_years"], r["irs_rate"], 10_000_000_000) / 1_000_000,
+                    "+10bp 후 total 백만": total_with_parallel_shock_million(r.get("total_return"), r["tenor_years"], r["irs_rate"], 10.0),
+                    "-10bp 후 total 백만": total_with_parallel_shock_million(r.get("total_return"), r["tenor_years"], r["irs_rate"], -10.0),
                     "breakeven_rate_bp": r.get("breakeven_rate_bp"),
                 }
             )
@@ -1650,6 +1772,9 @@ def tenor_detail_display_rows(rows: list[dict[str, Any]], is_irs: bool = False) 
                     "carry 백만": return_to_krw_million(r.get("carry_return")),
                     "rolldown 백만": return_to_krw_million(r.get("rolldown_return")),
                     "total 백만": return_to_krw_million(r.get("total_return")),
+                    "DV01 백만/bp": dv01_per_notional(r["tenor_years"], r["yield"], 10_000_000_000) / 1_000_000,
+                    "+10bp 후 total 백만": total_with_parallel_shock_million(r.get("total_return"), r["tenor_years"], r["yield"], 10.0),
+                    "-10bp 후 total 백만": total_with_parallel_shock_million(r.get("total_return"), r["tenor_years"], r["yield"], -10.0),
                     "return_per_dv01": r.get("return_per_dv01"),
                     "breakeven_yield_bp": r.get("breakeven_yield_bp"),
                 }
@@ -1677,6 +1802,9 @@ def curve_detail_display_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
                 "short_tenor_notional": r["short_tenor_notional"],
                 "long_tenor_notional": r["long_tenor_notional"],
                 "carry_roll_pnl 백만": pnl_to_krw_million(r.get("carry_roll_pnl")),
+                "slope_DV01 백만/bp": pnl_to_krw_million(r.get("slope_dv01")),
+                "+10bp slope 후 백만": pnl_to_krw_million(r.get("+10bp_slope_pnl")),
+                "-10bp slope 후 백만": pnl_to_krw_million(r.get("-10bp_slope_pnl")),
                 "breakeven_slope_bp": r.get("breakeven_slope_bp"),
             }
         )
@@ -1765,17 +1893,19 @@ def focus_rank(label: str | None) -> int:
 
 
 def flow_summary_display_row(r: dict[str, Any], focus: str, bucket: str) -> dict[str, Any]:
-    top_investor = r.get("top_flow_investor_5d")
-    top_investor_flow = (r.get("flow_by_investor") or {}).get(top_investor, {}) if top_investor else {}
     return {
         "Tenor": bucket,
         "Focus": focus,
         "Bond": r["name"],
         "Maturity": r["maturity"],
         "YTM": r["ytm"],
-        "5D 최대 주체": top_investor,
-        "해당 주체 Today 억": flow_to_krw_eok(top_investor_flow.get("today")),
-        "해당 주체 5D 합계 억": flow_to_krw_eok(r.get("top_flow_5d")),
+        "Total Today 억": flow_to_krw_eok(r.get("total_flow_today")),
+        "Total 5D 억": flow_to_krw_eok(r.get("total_flow_5d")),
+        "Total 20D 억": flow_to_krw_eok(r.get("total_flow_20d")),
+        "Top Buyer 5D": r.get("top_buy_investor_5d"),
+        "Top Buyer 5D 억": flow_to_krw_eok(r.get("top_buy_5d")),
+        "Top Seller 5D": r.get("top_sell_investor_5d"),
+        "Top Seller 5D 억": flow_to_krw_eok(r.get("top_sell_5d")),
         "대여거래 억": lending_to_krw_eok(r.get("lending_trade_today")),
         "상환거래 억": lending_to_krw_eok(r.get("lending_redeem_today")),
         "Lending Bal 억": lending_to_krw_eok(r.get("lending_balance")),
@@ -1789,15 +1919,15 @@ def build_flow_summary_sheet(ws, as_of: date, bond_rv_rows: list[dict[str, Any]]
     ws.sheet_view.showGridLines = False
     ws["A1"] = f"Flow / Lending Summary ({as_of:%Y-%m-%d})"
     ws["A1"].font = Font(bold=True, size=16, color="1F2937")
-    ws.merge_cells("A1:N1")
-    ws["A2"] = "순매수 flow는 억원 환산입니다. Today는 당일, 5D 합계는 최근 5개 관측치 합산입니다."
+    ws.merge_cells("A1:R1")
+    ws["A2"] = "순매수 flow는 억원 환산입니다. Top Buy/Sell은 전체 투자자 합산 5D 기준이며, Buyer/Seller는 방향별 최대 기여 주체입니다."
     ws["A2"].font = Font(color="666666")
-    ws.merge_cells("A2:N2")
+    ws.merge_cells("A2:R2")
     row = 4
 
     def write(title: str, headers: list[str], rows: list[dict[str, Any]], note: str | None = None):
         nonlocal row
-        widths = [8, 18, 24, 12, 8, 14, 14, 16, 12, 12, 13, 13, 10, 28]
+        widths = [8, 18, 24, 12, 8, 13, 12, 12, 13, 13, 13, 13, 12, 12, 13, 13, 10, 28]
         row = write_summary_section(ws, row, title, headers, rows, widths[: len(headers)], note=note)
 
     buckets = ["2Y", "3Y", "5Y", "10Y", "20Y", "30Y"]
@@ -1823,13 +1953,13 @@ def build_flow_summary_sheet(ws, as_of: date, bond_rv_rows: list[dict[str, Any]]
         watch_rows_out.extend(flow_summary_display_row(item, focus, bucket) for item, focus in focus_selected.values())
 
         top_buys = sorted(
-            [x for x in regular if x.get("top_flow_5d") is not None and x["top_flow_5d"] > 0],
-            key=lambda x: x["top_flow_5d"],
+            [x for x in regular if x.get("total_flow_5d") is not None and x["total_flow_5d"] > 0],
+            key=lambda x: x["total_flow_5d"],
             reverse=True,
         )[:3]
         top_sells = sorted(
-            [x for x in regular if x.get("top_flow_5d") is not None and x["top_flow_5d"] < 0],
-            key=lambda x: x["top_flow_5d"],
+            [x for x in regular if x.get("total_flow_5d") is not None and x["total_flow_5d"] < 0],
+            key=lambda x: x["total_flow_5d"],
         )[:3]
         top_lend_trades = sorted(
             [x for x in regular if x.get("lending_trade_today") is not None and x["lending_trade_today"] > 0],
@@ -1853,7 +1983,7 @@ def build_flow_summary_sheet(ws, as_of: date, bond_rv_rows: list[dict[str, Any]]
     sell_rows_out = sorted(sell_rows_out, key=sort_key)
     lend_trade_rows_out = sorted(lend_trade_rows_out, key=sort_key)
     redeem_rows_out = sorted(redeem_rows_out, key=sort_key)
-    headers = ["Tenor", "Focus", "Bond", "Maturity", "YTM", "5D 최대 주체", "해당 주체 Today 억", "해당 주체 5D 합계 억", "대여거래 억", "상환거래 억", "Lending Bal 억", "Lending 5D 억", "Benchmark", "Basket"]
+    headers = ["Tenor", "Focus", "Bond", "Maturity", "YTM", "Total Today 억", "Total 5D 억", "Total 20D 억", "Top Buyer 5D", "Top Buyer 5D 억", "Top Seller 5D", "Top Seller 5D 억", "대여거래 억", "상환거래 억", "Lending Bal 억", "Lending 5D 억", "Benchmark", "Basket"]
     write(
         "Benchmark/Basket Watchlist",
         headers,
@@ -1864,13 +1994,13 @@ def build_flow_summary_sheet(ws, as_of: date, bond_rv_rows: list[dict[str, Any]]
         "Tenor Net Buy Summary",
         headers,
         buy_rows_out,
-        "각 테너 bucket별 일반 종목 중 5D 순매수 Top 3만 표시합니다. 지표/바스켓은 위 Watchlist에서 봅니다.",
+        "각 테너 bucket별 일반 종목 중 전체 투자자 합산 5D 순매수 Top 3만 표시합니다. 지표/바스켓은 위 Watchlist에서 봅니다.",
     )
     write(
         "Tenor Net Sell Summary",
         headers,
         sell_rows_out,
-        "각 테너 bucket별 일반 종목 중 5D 순매도 Top 3만 표시합니다. 지표/바스켓은 위 Watchlist에서 봅니다.",
+        "각 테너 bucket별 일반 종목 중 전체 투자자 합산 5D 순매도 Top 3만 표시합니다. 지표/바스켓은 위 Watchlist에서 봅니다.",
     )
     write(
         "Tenor Lending Trade Summary",
@@ -1928,10 +2058,12 @@ def build_summary_sheet(
         by_hold = map_by_holding(tenor_rows, ("tenor",), "total_return")
         carry_by_hold = map_by_holding(tenor_rows, ("tenor",), "carry_return")
         roll_by_hold = map_by_holding(tenor_rows, ("tenor",), "rolldown_return")
+        be_by_hold = map_by_holding(tenor_rows, ("tenor",), "breakeven_yield_bp")
         rows = []
         for tenor, yld in sorted(curve.points.items()):
             label = tenor_label(tenor)
             hist = [(d, v) for d, v in curve.history.get(tenor, [])]
+            total_3m = by_hold.get((label,), {}).get("3M")
             rows.append(
                 {
                     "Tenor": label,
@@ -1945,20 +2077,23 @@ def build_summary_sheet(
                     "3M Direction": direction_signal(change_bp([(d, v * 100) for d, v in hist], 92)),
                     "Carry 3M 백만": return_to_krw_million(carry_by_hold.get((label,), {}).get("3M")),
                     "Roll 3M 백만": return_to_krw_million(roll_by_hold.get((label,), {}).get("3M")),
-                    "Total 3M 백만": return_to_krw_million(by_hold.get((label,), {}).get("3M")),
+                    "Total 3M 백만": return_to_krw_million(total_3m),
+                    "BE 3M bp": be_by_hold.get((label,), {}).get("3M"),
+                    "DV01 백만/bp": dv01_per_notional(tenor, yld, 10_000_000_000) / 1_000_000,
+                    "+10bp 후 3M 백만": total_with_parallel_shock_million(total_3m, tenor, yld, 10.0),
                     "Total 6M 백만": return_to_krw_million(by_hold.get((label,), {}).get("6M")),
                     "Total 1Y 백만": return_to_krw_million(by_hold.get((label,), {}).get("1Y")),
                 }
             )
-        headers = ["Tenor", "Last", "2D", "5D", "20D", "3M", "6M", "1Y", "3M Direction", "Carry 3M 백만", "Roll 3M 백만", "Total 3M 백만", "Total 6M 백만", "Total 1Y 백만"]
+        headers = ["Tenor", "Last", "2D", "5D", "20D", "3M", "6M", "1Y", "3M Direction", "Carry 3M 백만", "Roll 3M 백만", "Total 3M 백만", "BE 3M bp", "DV01 백만/bp", "+10bp 후 3M 백만", "Total 6M 백만", "Total 1Y 백만"]
         row = write_summary_section(
             ws,
             row,
             title,
             headers,
             rows,
-            [9, 9, 8, 8, 8, 8, 8, 8, 18, 12, 12, 12, 12, 12],
-            note="단위: 금리/스프레드 변화는 bp, Carry/Roll/Total은 100억 투자 기준 백만원",
+            [9, 9, 8, 8, 8, 8, 8, 8, 18, 12, 12, 12, 10, 12, 14, 12, 12],
+            note="단위: 금리/스프레드 변화는 bp, Carry/Roll/Total은 100억 투자 기준 백만원. BE는 3M carry/roll 손익이 0이 되는 불리한 금리 상승폭입니다.",
         )
 
     tenor_section("KTB Tenor: Level Change and Carry/Roll", ktb, ktb_tenor)
@@ -1970,6 +2105,8 @@ def build_summary_sheet(
     for tenor, rate in sorted(irs.points.items()):
         label = tenor_label(tenor)
         hist = irs.history.get(tenor, [])
+        rec_3m = by_dir.get(("Receive", label, "3M"), {}).get("total_return")
+        pay_3m = by_dir.get(("Pay", label, "3M"), {}).get("total_return")
         irs_rows.append(
             {
                 "Tenor": label,
@@ -1981,8 +2118,11 @@ def build_summary_sheet(
                 "6M": change_bp([(d, v * 100) for d, v in hist], 183),
                 "1Y": change_bp([(d, v * 100) for d, v in hist], 366),
                     "3M Direction": direction_signal(change_bp([(d, v * 100) for d, v in hist], 92)),
-                "Rec 3M 백만": return_to_krw_million(by_dir.get(("Receive", label, "3M"), {}).get("total_return")),
-                "Pay 3M 백만": return_to_krw_million(by_dir.get(("Pay", label, "3M"), {}).get("total_return")),
+                "Rec 3M 백만": return_to_krw_million(rec_3m),
+                "Pay 3M 백만": return_to_krw_million(pay_3m),
+                "Rec BE 3M bp": by_dir.get(("Receive", label, "3M"), {}).get("breakeven_rate_bp"),
+                "DV01 백만/bp": dv01_per_notional(tenor, rate, 10_000_000_000) / 1_000_000,
+                "Rec +10bp 후 백만": total_with_parallel_shock_million(rec_3m, tenor, rate, 10.0),
                 "Rec 6M 백만": return_to_krw_million(by_dir.get(("Receive", label, "6M"), {}).get("total_return")),
                 "Pay 6M 백만": return_to_krw_million(by_dir.get(("Pay", label, "6M"), {}).get("total_return")),
                 "Rec 1Y 백만": return_to_krw_million(by_dir.get(("Receive", label, "1Y"), {}).get("total_return")),
@@ -1993,10 +2133,10 @@ def build_summary_sheet(
         ws,
         row,
         "IRS Tenor: Receive/Pay Carry/Roll",
-        ["Tenor", "Last", "2D", "5D", "20D", "3M", "6M", "1Y", "3M Direction", "Rec 3M 백만", "Pay 3M 백만", "Rec 6M 백만", "Pay 6M 백만", "Rec 1Y 백만", "Pay 1Y 백만"],
+        ["Tenor", "Last", "2D", "5D", "20D", "3M", "6M", "1Y", "3M Direction", "Rec 3M 백만", "Pay 3M 백만", "Rec BE 3M bp", "DV01 백만/bp", "Rec +10bp 후 백만", "Rec 6M 백만", "Pay 6M 백만", "Rec 1Y 백만", "Pay 1Y 백만"],
         irs_rows,
-        [9, 9, 8, 8, 8, 8, 8, 8, 18, 12, 12, 12, 12, 12, 12],
-        note="단위: 금리 변화는 bp, Receive/Pay Carry/Roll은 IRS notional 100억 기준 백만원",
+        [9, 9, 8, 8, 8, 8, 8, 8, 18, 12, 12, 12, 12, 14, 12, 12, 12, 12],
+        note="단위: 금리 변화는 bp, Receive/Pay Carry/Roll은 IRS notional 100억 기준 백만원. 3M IRS point는 CD 3M proxy를 사용합니다.",
     )
 
     def curve_section(title: str, curve_rows: list[dict[str, Any]], series_map: dict[str, list[tuple[date, float]]]):
@@ -2023,21 +2163,23 @@ def build_summary_sheet(
                     "HR": g.get("hr"),
                     "Steep 3M 백만": pnl_to_krw_million(g.get(("Steepener", "3M"), {}).get("carry_roll_pnl")),
                     "Flat 3M 백만": pnl_to_krw_million(g.get(("Flattener", "3M"), {}).get("carry_roll_pnl")),
+                    "Steep BE bp": g.get(("Steepener", "3M"), {}).get("breakeven_slope_bp"),
+                    "Flat BE bp": g.get(("Flattener", "3M"), {}).get("breakeven_slope_bp"),
                     "Steep 6M 백만": pnl_to_krw_million(g.get(("Steepener", "6M"), {}).get("carry_roll_pnl")),
                     "Flat 6M 백만": pnl_to_krw_million(g.get(("Flattener", "6M"), {}).get("carry_roll_pnl")),
                     "Steep 1Y 백만": pnl_to_krw_million(g.get(("Steepener", "1Y"), {}).get("carry_roll_pnl")),
                     "Flat 1Y 백만": pnl_to_krw_million(g.get(("Flattener", "1Y"), {}).get("carry_roll_pnl")),
                 }
             )
-        headers = ["Trade", "Last", "2D", "5D", "20D", "3M", "6M", "1Y", "3M Direction", "HR", "Steep 3M 백만", "Flat 3M 백만", "Steep 6M 백만", "Flat 6M 백만", "Steep 1Y 백만", "Flat 1Y 백만"]
+        headers = ["Trade", "Last", "2D", "5D", "20D", "3M", "6M", "1Y", "3M Direction", "HR", "Steep 3M 백만", "Flat 3M 백만", "Steep BE bp", "Flat BE bp", "Steep 6M 백만", "Flat 6M 백만", "Steep 1Y 백만", "Flat 1Y 백만"]
         row = write_summary_section(
             ws,
             row,
             title,
             headers,
             out,
-            [10, 9, 8, 8, 8, 8, 8, 8, 18, 8, 12, 12, 12, 12, 12, 12],
-            note="단위: 스프레드 변화는 bp, Curve Carry/Roll P&L은 장기테너 100억 기준 백만원. 단기테너 금액은 KTB 10억, IRS 1억 단위 반올림. 양수 P&L은 정태 carry/roll 이익, 음수는 비용/손실.",
+            [10, 9, 8, 8, 8, 8, 8, 8, 18, 8, 12, 12, 10, 10, 12, 12, 12, 12],
+            note="단위: 스프레드 변화는 bp, Curve Carry/Roll P&L은 장기테너 100억 기준 백만원. HR은 장기 DV01 100억 기준 단기테너 헤지비율입니다. BE는 3M carry/roll 손익을 상쇄하는 불리한 slope 변화폭입니다.",
         )
 
     curve_section("KTB Curve: Spread Change and Steep/Flat Carry P&L", ktb_curve, ktb_curve_series)
@@ -2177,6 +2319,17 @@ def build_summary_sheet(
         note="벤치마크/선물 바스켓 종목은 모두 표시하고, 유사만기(잔존만기 차이 6개월 이내, 동일 prefix)는 residual z-score 절대값이 큰 순서로 추가합니다.",
     )
 
+    cross_rows = build_bond_rv_flow_cross_rows(rv_candidates)
+    row = write_summary_section(
+        ws,
+        row,
+        "Bond RV x Flow Cross Signals",
+        ["Signal", "Bond", "Maturity", "RV z", "Residual bp", "Total Today 억", "Total 5D 억", "Top Buyer 5D", "Top Buyer 억", "Top Seller 5D", "Top Seller 억", "Lending 5D 억", "Benchmark", "Basket", "Interpretation"],
+        cross_rows,
+        [24, 24, 12, 8, 10, 12, 12, 13, 12, 13, 12, 12, 10, 24, 32],
+        note="Bond RV 신호를 전체 투자자 합산 flow와 대차 변화로 교차 확인합니다. Cheap은 residual z>0, Rich는 residual z<0입니다.",
+    )
+
     cheap = sorted(rv_candidates, key=lambda r: r["residual_z"], reverse=True)[:4]
     rich = sorted(rv_candidates, key=lambda r: r["residual_z"])[:4]
     bond_rows = []
@@ -2230,6 +2383,7 @@ def main() -> Path:
     raw_irs_latest_date = latest_date_from_curve(irs)
     if raw_irs_latest_date > as_of:
         irs = align_curve_to_date(irs, as_of)
+    irs = add_irs_3m_cd_proxy(irs, cd_repo, as_of)
     bonds = parse_bond_list(wb_src, as_of, config)
     lending = parse_fullinfo_lending(wb_src)
     futures = parse_futures(wb_src)
@@ -2301,7 +2455,7 @@ def main() -> Path:
 
     lending_rows = []
     for r in bond_rv_rows:
-        lending_rows.append({k: r.get(k) for k in ["name", "prefix", "ytm", "is_benchmark", "is_futures_basket", "futures_basket_refs", "lending_balance", "lending_5d_change", "lending_20d_change", "lending_trade_today", "lending_redeem_today", "insurance_lending", "bank_lending", "foreign_lending", "securities_borrow", "top_flow_investor_5d", "top_flow_5d"]})
+        lending_rows.append({k: r.get(k) for k in ["name", "prefix", "ytm", "is_benchmark", "is_futures_basket", "futures_basket_refs", "lending_balance", "lending_5d_change", "lending_20d_change", "lending_trade_today", "lending_redeem_today", "insurance_lending", "bank_lending", "foreign_lending", "securities_borrow", "total_flow_today", "total_flow_5d", "total_flow_20d", "top_buy_investor_5d", "top_buy_5d", "top_sell_investor_5d", "top_sell_5d", "top_flow_investor_5d", "top_flow_5d"]})
     flow_change_rows = build_flow_change_rows(bond_rv_rows)
 
     print("Writing report workbook...", flush=True)
@@ -2370,6 +2524,7 @@ def main() -> Path:
         {"item": "CD 3M rate", "value": cd, "note": f"CD,REPO sheet, date {cd_repo['cd_latest_date']}"},
         {"item": "Borrow fee annual", "value": borrow_fee, "note": "KTB short borrow fee"},
         {"item": "Collateral proxy", "value": collateral_yield, "note": collateral_name},
+        {"item": "IRS 3M proxy", "value": cd, "note": "CD 3M is inserted as the 0.25Y IRS curve point for short IRS rolldown calculations"},
         {"item": "Base curve notional", "value": base, "note": "Long-tenor notional for all curve trades"},
         {"item": "Curve notional rounding", "value": "KTB 10억 / IRS 1억", "note": "Short-tenor notional is rounded after DV01 hedge ratio"},
         {"item": "Active futures contract", "value": active_contract_suffix(as_of, config), "note": "Rolls on maturity date"},
@@ -2445,18 +2600,18 @@ def main() -> Path:
     chart_cursor = add_clean_spread_panel(sheets["20_Spread_Charts"], chart_data, "Active Futures Basket RV", futures_basket_chart_series, 69, chart_cursor)
     chart_cursor = add_clean_spread_panel(sheets["20_Spread_Charts"], chart_data, "Active Futures-IRS Spreads", futures_irs_chart_series, 86, chart_cursor)
 
-    add_compact_table(sheets["08_KTB_Curve_CarryRoll"], series_summary_rows(ktb_chart_series), 2, 17)
-    chart_cursor = add_chart_source_and_line_chart(sheets["08_KTB_Curve_CarryRoll"], chart_data, "KTB Curve Slopes - 1Y", ktb_chart_series, 366, "Q9", chart_cursor, width=16, height=8)
-    add_compact_table(sheets["11_IRS_Curve_CarryRoll"], series_summary_rows(irs_chart_series), 2, 17)
-    chart_cursor = add_chart_source_and_line_chart(sheets["11_IRS_Curve_CarryRoll"], chart_data, "IRS Curve Slopes - 1Y", irs_chart_series, 366, "Q9", chart_cursor, width=16, height=8)
-    add_compact_table(sheets["12_Agency_Spread_CarryRoll"], series_summary_rows(agency_chart_series), 2, 15)
-    chart_cursor = add_chart_source_and_line_chart(sheets["12_Agency_Spread_CarryRoll"], chart_data, "Agency Spread Extremes - 1Y", agency_chart_series, 366, "O9", chart_cursor, width=16, height=8)
-    add_compact_table(sheets["13_KTB_IRS_Spread"], series_summary_rows(ktb_irs_chart_series), 2, 12)
-    chart_cursor = add_chart_source_and_line_chart(sheets["13_KTB_IRS_Spread"], chart_data, "KTB-IRS Spreads - 1Y", ktb_irs_chart_series, 366, "L9", chart_cursor, width=16, height=8)
-    add_compact_table(sheets["17_Futures_Basket_RV"], series_summary_rows(futures_basket_chart_series), 2, 12)
-    chart_cursor = add_chart_source_and_line_chart(sheets["17_Futures_Basket_RV"], chart_data, "Active Futures Basket RV - 1Y", futures_basket_chart_series, 366, "L9", chart_cursor, width=16, height=8)
-    add_compact_table(sheets["18_Futures_IRS_Spread"], series_summary_rows(futures_irs_chart_series), 2, 11)
-    chart_cursor = add_chart_source_and_line_chart(sheets["18_Futures_IRS_Spread"], chart_data, "Active Futures-IRS Spreads - 1Y", futures_irs_chart_series, 366, "K9", chart_cursor, width=16, height=8)
+    add_compact_table(sheets["08_KTB_Curve_CarryRoll"], series_summary_rows(ktb_chart_series), 2, 22)
+    chart_cursor = add_chart_source_and_line_chart(sheets["08_KTB_Curve_CarryRoll"], chart_data, "KTB Curve Slopes - 1Y", ktb_chart_series, 366, "V9", chart_cursor, width=16, height=8)
+    add_compact_table(sheets["11_IRS_Curve_CarryRoll"], series_summary_rows(irs_chart_series), 2, 22)
+    chart_cursor = add_chart_source_and_line_chart(sheets["11_IRS_Curve_CarryRoll"], chart_data, "IRS Curve Slopes - 1Y", irs_chart_series, 366, "V9", chart_cursor, width=16, height=8)
+    add_compact_table(sheets["12_Agency_Spread_CarryRoll"], series_summary_rows(agency_chart_series), 2, 23)
+    chart_cursor = add_chart_source_and_line_chart(sheets["12_Agency_Spread_CarryRoll"], chart_data, "Agency Spread Extremes - 1Y", agency_chart_series, 366, "W9", chart_cursor, width=16, height=8)
+    add_compact_table(sheets["13_KTB_IRS_Spread"], series_summary_rows(ktb_irs_chart_series), 2, 19)
+    chart_cursor = add_chart_source_and_line_chart(sheets["13_KTB_IRS_Spread"], chart_data, "KTB-IRS Spreads - 1Y", ktb_irs_chart_series, 366, "S9", chart_cursor, width=16, height=8)
+    add_compact_table(sheets["17_Futures_Basket_RV"], series_summary_rows(futures_basket_chart_series), 2, 20)
+    chart_cursor = add_chart_source_and_line_chart(sheets["17_Futures_Basket_RV"], chart_data, "Active Futures Basket RV - 1Y", futures_basket_chart_series, 366, "T9", chart_cursor, width=16, height=8)
+    add_compact_table(sheets["18_Futures_IRS_Spread"], series_summary_rows(futures_irs_chart_series), 2, 19)
+    chart_cursor = add_chart_source_and_line_chart(sheets["18_Futures_IRS_Spread"], chart_data, "Active Futures-IRS Spreads - 1Y", futures_irs_chart_series, 366, "S9", chart_cursor, width=16, height=8)
 
     for ws in wb.worksheets:
         style_sheet(ws)
