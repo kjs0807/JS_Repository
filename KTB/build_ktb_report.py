@@ -1085,6 +1085,288 @@ def futures_irs_history(future: dict[str, Any], irs: Curve) -> list[tuple[date, 
     return sorted(out)
 
 
+def header_has(label: Any, text: str) -> bool:
+    return label is not None and text in str(label)
+
+
+def first_header_index(headers: list[Any], *needles: str) -> int | None:
+    for i, label in enumerate(headers):
+        text = str(label) if label is not None else ""
+        if any(needle in text for needle in needles):
+            return i
+    return None
+
+
+def futures_tenor_from_name(name: str) -> float | None:
+    compact = str(name).replace(" ", "")
+    if compact.startswith("3"):
+        return 3.0
+    if compact.startswith("10"):
+        return 10.0
+    return None
+
+
+def futures_basket_yield_indices(headers: list[Any]) -> list[int]:
+    return [i for i, label in enumerate(headers) if header_has(label, "민평3사수익률")]
+
+
+def futures_implied_yield_index(headers: list[Any]) -> int | None:
+    return first_header_index(headers, "선물내재수익률", "현물수익률", "국채현물수익률")
+
+
+def build_futures_outputs(
+    futures: list[dict[str, Any]],
+    irs: Curve,
+    code_to_name: dict[str, str],
+    config: dict[str, Any],
+    as_of: date,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, list[str]]]:
+    active_suffix = active_contract_suffix(as_of, config)
+    basket_rows = []
+    spread_rows = []
+    basket_flags: dict[str, list[str]] = defaultdict(list)
+    for f in futures:
+        name = " ".join(str(f["name"]).split())
+        is_active = active_suffix in name
+        h = f["headers"]
+        rows = f["rows"]
+        if not rows:
+            continue
+        latest = rows[0]
+        date_latest = to_date(latest[0])
+        y_idx = futures_implied_yield_index(h)
+        spot_yield = latest[y_idx] if y_idx is not None else None
+        tenor = futures_tenor_from_name(name)
+        basket_codes = []
+        basket_yields = []
+        basket_yield_indices = []
+        for i, label in enumerate(h):
+            if header_has(label, "종목코드"):
+                code = latest[i]
+                y_label = str(label).replace("종목코드", "민평3사수익률")
+                y_i = h.index(y_label) if y_label in h else None
+                y = latest[y_i] if y_i is not None else None
+                basket_codes.append(code)
+                basket_yields.append(float(y) if isinstance(y, (int, float)) else None)
+                if y_i is not None:
+                    basket_yield_indices.append(y_i)
+                basket_flags[code].append(name + " " + str(label).replace("종목코드", ""))
+        if len(basket_yields) == 3 and all(v is not None for v in basket_yields):
+            value = basket_yields[1] - (basket_yields[0] + basket_yields[2]) / 2.0
+            hist = []
+            for row in rows:
+                ys = [row[i] for i in basket_yield_indices]
+                if len(ys) == 3 and all(isinstance(v, (int, float)) for v in ys):
+                    hist.append(float(ys[1]) - (float(ys[0]) + float(ys[2])) / 2.0)
+            metric = "Butterfly: basket2 - avg(basket1,basket3)"
+        elif len(basket_yields) == 2 and all(v is not None for v in basket_yields):
+            value = basket_yields[0] - basket_yields[1]
+            hist = []
+            for row in rows:
+                ys = [row[i] for i in basket_yield_indices]
+                if len(ys) == 2 and all(isinstance(v, (int, float)) for v in ys):
+                    hist.append(float(ys[0]) - float(ys[1]))
+            metric = "Spread: basket1 - basket2"
+        else:
+            value, hist, metric = None, [], None
+        if value is not None:
+            undervaluation_idx = first_header_index(h, "저평가")
+            basket_rows.append(
+                {
+                    "future": name,
+                    "is_active": is_active,
+                    "latest_date": date_latest,
+                    "metric": metric,
+                    "value_bp": value * 100,
+                    "z_score": zscore(hist[:252], value),
+                    "percentile": pct_rank(hist[:252], value),
+                    "basket_codes": ", ".join(str(c) for c in basket_codes),
+                    "basket_names": ", ".join(code_to_name.get(str(c), "") for c in basket_codes),
+                    "undervaluation": latest[undervaluation_idx] if undervaluation_idx is not None else None,
+                }
+            )
+        if tenor and spot_yield is not None and y_idx is not None:
+            irs_hist = series_by_date(irs, tenor)
+            irs_rate = irs_hist.get(date_latest)
+            if irs_rate is None:
+                irs_rate = interp(irs.points, tenor)
+            spread = float(spot_yield) - irs_rate if irs_rate is not None else None
+            hist_spreads = []
+            for row in rows:
+                d = to_date(row[0])
+                fy = row[y_idx]
+                iy = irs_hist.get(d)
+                if d and isinstance(fy, (int, float)) and iy is not None:
+                    hist_spreads.append(float(fy) - iy)
+            spread_rows.append(
+                {
+                    "future": name,
+                    "is_active": is_active,
+                    "latest_date": date_latest,
+                    "tenor": tenor_label(tenor),
+                    "futures_yield": spot_yield,
+                    "irs_rate_aligned": irs_rate,
+                    "spread_bp": spread * 100 if spread is not None else None,
+                    "z_score": zscore(hist_spreads[:252], spread) if spread is not None else None,
+                    "percentile": pct_rank(hist_spreads[:252], spread) if spread is not None else None,
+                }
+            )
+    return basket_rows, spread_rows, basket_flags
+
+
+def futures_basket_history(future: dict[str, Any]) -> tuple[str | None, list[tuple[date, float]]]:
+    h = future["headers"]
+    rows = future["rows"]
+    yidx = futures_basket_yield_indices(h)
+    out = []
+    if len(yidx) == 3:
+        for row in rows:
+            d = to_date(row[0])
+            vals = [row[i] for i in yidx]
+            if d and all(isinstance(v, (int, float)) for v in vals):
+                out.append((d, (float(vals[1]) - (float(vals[0]) + float(vals[2])) / 2.0) * 100.0))
+        return "Butterfly bp", sorted(out)
+    if len(yidx) == 2:
+        for row in rows:
+            d = to_date(row[0])
+            vals = [row[i] for i in yidx]
+            if d and all(isinstance(v, (int, float)) for v in vals):
+                out.append((d, (float(vals[0]) - float(vals[1])) * 100.0))
+        return "Basket1-Basket2 bp", sorted(out)
+    return None, []
+
+
+def futures_irs_history(future: dict[str, Any], irs: Curve) -> list[tuple[date, float]]:
+    h = future["headers"]
+    rows = future["rows"]
+    name = " ".join(str(future["name"]).split())
+    tenor = futures_tenor_from_name(name)
+    y_idx = futures_implied_yield_index(h)
+    if tenor is None or y_idx is None:
+        return []
+    irs_map = {d: v for d, v in irs.history.get(tenor, [])}
+    out = []
+    for row in rows:
+        d = to_date(row[0])
+        fy = row[y_idx]
+        if d and isinstance(fy, (int, float)) and d in irs_map:
+            out.append((d, (float(fy) - irs_map[d]) * 100.0))
+    return sorted(out)
+
+
+def futures_basket_code_indices(rows: list[list[Any]]) -> list[int]:
+    if not rows:
+        return []
+    latest = rows[0]
+    return [i for i, value in enumerate(latest) if isinstance(value, str) and value.startswith("KR")]
+
+
+def latest_numeric_basket_observation(rows: list[list[Any]], yidx: list[int]) -> tuple[date | None, list[float] | None]:
+    for row in rows:
+        d = to_date(row[0])
+        vals = [row[i] for i in yidx if i < len(row)]
+        if d and len(vals) == len(yidx) and all(isinstance(v, (int, float)) for v in vals):
+            return d, [float(v) for v in vals]
+    return None, None
+
+
+def build_futures_outputs(
+    futures: list[dict[str, Any]],
+    irs: Curve,
+    code_to_name: dict[str, str],
+    config: dict[str, Any],
+    as_of: date,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, list[str]]]:
+    active_suffix = active_contract_suffix(as_of, config)
+    basket_rows = []
+    spread_rows = []
+    basket_flags: dict[str, list[str]] = defaultdict(list)
+    for f in futures:
+        name = " ".join(str(f["name"]).split())
+        is_active = active_suffix in name
+        h = f["headers"]
+        rows = f["rows"]
+        if not rows:
+            continue
+        latest = rows[0]
+        date_latest = to_date(latest[0])
+        y_idx = futures_implied_yield_index(h)
+        spot_yield = latest[y_idx] if y_idx is not None else None
+        tenor = futures_tenor_from_name(name)
+
+        basket_yield_indices = futures_basket_yield_indices(h)
+        basket_code_indices = futures_basket_code_indices(rows)
+        basket_codes = [latest[i] for i in basket_code_indices]
+        for n, code in enumerate(basket_codes, start=1):
+            basket_flags[code].append(f"{name} basket{n}")
+
+        basket_date, basket_yields = latest_numeric_basket_observation(rows, basket_yield_indices)
+        hist = []
+        if len(basket_yield_indices) == 3:
+            for row in rows:
+                d = to_date(row[0])
+                ys = [row[i] for i in basket_yield_indices]
+                if d and all(isinstance(v, (int, float)) for v in ys):
+                    hist.append(float(ys[1]) - (float(ys[0]) + float(ys[2])) / 2.0)
+            value = basket_yields[1] - (basket_yields[0] + basket_yields[2]) / 2.0 if basket_yields else None
+            metric = "Butterfly: basket2 - avg(basket1,basket3)"
+        elif len(basket_yield_indices) == 2:
+            for row in rows:
+                d = to_date(row[0])
+                ys = [row[i] for i in basket_yield_indices]
+                if d and all(isinstance(v, (int, float)) for v in ys):
+                    hist.append(float(ys[0]) - float(ys[1]))
+            value = basket_yields[0] - basket_yields[1] if basket_yields else None
+            metric = "Spread: basket1 - basket2"
+        else:
+            value, metric = None, None
+
+        if value is not None:
+            undervaluation_idx = 2 if len(latest) > 2 else None
+            basket_rows.append(
+                {
+                    "future": name,
+                    "is_active": is_active,
+                    "latest_date": basket_date,
+                    "metric": metric,
+                    "value_bp": value * 100,
+                    "z_score": zscore(hist[:252], value),
+                    "percentile": pct_rank(hist[:252], value),
+                    "basket_codes": ", ".join(str(c) for c in basket_codes),
+                    "basket_names": ", ".join(code_to_name.get(str(c), "") for c in basket_codes),
+                    "undervaluation": latest[undervaluation_idx] if undervaluation_idx is not None else None,
+                }
+            )
+
+        if tenor and spot_yield is not None and y_idx is not None:
+            irs_hist = series_by_date(irs, tenor)
+            irs_rate = irs_hist.get(date_latest)
+            if irs_rate is None:
+                irs_rate = interp(irs.points, tenor)
+            spread = float(spot_yield) - irs_rate if irs_rate is not None else None
+            hist_spreads = []
+            for row in rows:
+                d = to_date(row[0])
+                fy = row[y_idx]
+                iy = irs_hist.get(d)
+                if d and isinstance(fy, (int, float)) and iy is not None:
+                    hist_spreads.append(float(fy) - iy)
+            spread_rows.append(
+                {
+                    "future": name,
+                    "is_active": is_active,
+                    "latest_date": date_latest,
+                    "tenor": tenor_label(tenor),
+                    "futures_yield": spot_yield,
+                    "irs_rate_aligned": irs_rate,
+                    "spread_bp": spread * 100 if spread is not None else None,
+                    "z_score": zscore(hist_spreads[:252], spread) if spread is not None else None,
+                    "percentile": pct_rank(hist_spreads[:252], spread) if spread is not None else None,
+                }
+            )
+    return basket_rows, spread_rows, basket_flags
+
+
 def filter_lookback(series: list[tuple[date, float]], days: int) -> tuple[list[tuple[date, float]], str]:
     clean = sorted((d, v) for d, v in series if d is not None and v is not None)
     if not clean:
