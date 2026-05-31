@@ -1,0 +1,72 @@
+{
+  "source_file": "Master_File.xlsx",
+  "output_dir": "outputs",
+  "report_file": "KTB_Master_Analysis_Report.xlsx",
+  "analysis": {
+    "base_notional_krw": 10000000000,
+    "borrow_fee_annual": 0.0035,
+    "holding_periods_years": {
+      "3M": 0.25,
+      "6M": 0.5,
+      "1Y": 1.0
+    },
+    "z_windows": [60, 120, 252],
+    "curve_fitting": "linear_interpolation_on_generic_curve",
+    "duration_model": "screening_approximation"
+  },
+  "benchmark_bonds": {
+    "2Y": "국고03000-2803(26-1)",
+    "3Y": "국고02750-2812(25-10)",
+    "5Y": "국고03375-3103(26-3)",
+    "10Y": "국고03250-3512(25-11)",
+    "20Y": "국고02750-4509(25-9)",
+    "30Y": "국고03500-5603(26-2)"
+  },
+  "futures": {
+    "front_contract": "2606",
+    "next_contract": "2609",
+    "contract_maturities": {
+      "2606": "2026-06-16",
+      "2609": "2026-09-15"
+    },
+    "active_contract_rule": "use_front_until_day_before_maturity_then_next_from_maturity_day"
+  },
+  "curve_pairs": {
+    "KTB": [
+      ["2Y", "3Y"],
+      ["2Y", "5Y"],
+      ["3Y", "5Y"],
+      ["3Y", "10Y"],
+      ["5Y", "10Y"],
+      ["10Y", "20Y"],
+      ["10Y", "30Y"],
+      ["20Y", "30Y"]
+    ],
+    "IRS": [
+      ["6M", "9M"],
+      ["6M", "1Y"],
+      ["9M", "1Y"],
+      ["1Y", "3Y"],
+      ["2Y", "3Y"],
+      ["2Y", "5Y"],
+      ["3Y", "5Y"]
+    ]
+  },
+  "tenor_years": {
+    "3M": 0.25,
+    "6M": 0.5,
+    "9M": 0.75,
+    "1Y": 1.0,
+    "1.5Y": 1.5,
+    "2Y": 2.0,
+    "2.5Y": 2.5,
+    "3Y": 3.0,
+    "4Y": 4.0,
+    "5Y": 5.0,
+    "7Y": 7.0,
+    "10Y": 10.0,
+    "15Y": 15.0,
+    "20Y": 20.0,
+    "30Y": 30.0
+  }
+}
