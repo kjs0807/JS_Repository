@@ -310,12 +310,17 @@ def parse_fullinfo_lending(wb) -> dict[str, dict[str, Any]]:
     starts = [(i, n) for i, n in enumerate(names) if n]
     recent_rows: dict[str, list[tuple[Any, ...]]] = {name: [] for _, name in starts}
     history_counts: dict[str, int] = {name: 0 for _, name in starts}
+    ytm_history: dict[str, list[tuple[date, float]]] = {name: [] for _, name in starts}
     # Keep only the most recent rows needed for latest, 5D and 20D changes. The
     # sheet is very wide, so avoiding a full in-memory copy matters a lot.
     for row in ws.iter_rows(min_row=4, values_only=True):
         for start, name in starts:
             if start < len(row) and row[start] is not None:
                 history_counts[name] += 1
+                d = to_date(row[start])
+                ytm = row[start + 1] if start + 1 < len(row) else None
+                if d and isinstance(ytm, (int, float)):
+                    ytm_history[name].append((d, float(ytm)))
                 if len(recent_rows[name]) <= 21:
                     recent_rows[name].append(tuple(row[start : start + 30]))
     out: dict[str, dict[str, Any]] = {}
@@ -375,6 +380,7 @@ def parse_fullinfo_lending(wb) -> dict[str, dict[str, Any]]:
         out[name] = {
             "latest_date": latest_date,
             "history_rows": history_counts[name],
+            "ytm_history": ytm_history.get(name, []),
             "ytm_latest": val(0, "민평3사 수익률(산출일) 당일"),
             "balance_today": val(0, "금일잔량"),
             "balance_5d_change": delta("금일잔량", 5),
@@ -693,6 +699,52 @@ def curve_pair_rows(
     return rows
 
 
+def curve_points_by_date(curve: Curve) -> dict[date, dict[float, float]]:
+    by_date: dict[date, dict[float, float]] = defaultdict(dict)
+    for tenor, series in curve.history.items():
+        for d, value in series:
+            by_date[d][tenor] = value
+    return by_date
+
+
+def historical_residual_z(
+    bond: dict[str, Any],
+    curve_by_date: dict[date, dict[float, float]],
+    ytm_history: list[tuple[date, float]],
+    as_of: date,
+    current_residual: float | None,
+    lookback_days: int = 366,
+    min_span_days: int = 183,
+    min_points: int = 30,
+) -> float | None:
+    if current_residual is None or not ytm_history or bond.get("maturity_date") is None:
+        return None
+    cutoff = as_of.toordinal() - lookback_days
+    residuals: list[tuple[date, float]] = []
+    for d, ytm in ytm_history:
+        if d.toordinal() < cutoff or d > as_of:
+            continue
+        curve_points = curve_by_date.get(d)
+        if not curve_points:
+            continue
+        remaining = years_between(d, bond["maturity_date"])
+        fitted = interp_inside_range(curve_points, remaining)
+        if fitted is not None:
+            residuals.append((d, ytm - fitted))
+    if len(residuals) < min_points:
+        return None
+    dates = [d for d, _ in residuals]
+    if (max(dates) - min(dates)).days < min_span_days:
+        return None
+    return zscore([v for _, v in residuals], current_residual)
+
+
+def combined_z(cross_section_z: float | None, historical_z: float | None) -> str:
+    def fmt(v: float | None) -> str:
+        return "N/A" if v is None else f"{v:+.2f}"
+    return f"{fmt(cross_section_z)} / {fmt(historical_z)}"
+
+
 def build_bond_rv(
     bonds: list[dict[str, Any]],
     ktb: Curve,
@@ -700,6 +752,9 @@ def build_bond_rv(
     lending: dict[str, dict[str, Any]],
     basket_flags: dict[str, list[str]],
 ) -> list[dict[str, Any]]:
+    as_of = latest_date_from_curve(ktb)
+    ktb_by_date = curve_points_by_date(ktb)
+    msb_by_date = curve_points_by_date(msb)
     residuals = []
     for b in bonds:
         if b["ytm"] is None or b["remaining_years"] is None:
@@ -712,10 +767,12 @@ def build_bond_rv(
     rows = []
     for b in bonds:
         curve = ktb if b["prefix"] == "KTB" else msb if b["prefix"] == "MSB" else None
+        curve_by_date = ktb_by_date if b["prefix"] == "KTB" else msb_by_date if b["prefix"] == "MSB" else {}
         range_status = curve_range_status(curve.points, b["remaining_years"]) if curve else "No curve"
         fitted = interp_inside_range(curve.points, b["remaining_years"]) if curve and b["remaining_years"] is not None else None
         residual = b["ytm"] - fitted if fitted is not None and b["ytm"] is not None else None
         lend = lending.get(b["name"], {})
+        hist_z = historical_residual_z(b, curve_by_date, lend.get("ytm_history") or [], as_of, residual)
         flows = lend.get("flow_by_investor") or {}
         flow_today_vals = [v.get("today") for v in flows.values() if v.get("today") is not None]
         flow_5d_vals = [v.get("5d") for v in flows.values() if v.get("5d") is not None]
@@ -743,6 +800,8 @@ def build_bond_rv(
                 "fitted_yield": fitted,
                 "residual_bp": residual * 100 if residual is not None else None,
                 "residual_z": zscore(residuals, residual) if residual is not None else None,
+                "historical_residual_z": hist_z,
+                "combined_residual_z": combined_z(zscore(residuals, residual) if residual is not None else None, hist_z),
                 "curve_range_status": range_status,
                 "balance": b["balance"],
                 "is_benchmark": b["is_benchmark"],
@@ -1709,6 +1768,52 @@ def signal_text(z: float | None, positive: str, negative: str) -> str:
     return "Neutral"
 
 
+def rv_side(residual_bp: float | None) -> str:
+    if residual_bp is None:
+        return ""
+    if residual_bp > 0:
+        return "Cheap: \uc2e4\uc81c YTM\uc774 \ucee4\ube0c\ubcf4\ub2e4 \ub192\uc74c"
+    if residual_bp < 0:
+        return "Rich: \uc2e4\uc81c YTM\uc774 \ucee4\ube0c\ubcf4\ub2e4 \ub0ae\uc74c"
+    return "Neutral"
+
+
+def rv_focus_label(row: dict[str, Any]) -> str:
+    labels = []
+    if row.get("is_benchmark"):
+        labels.append("\uc9c0\ud45c\ucc44")
+    if row.get("is_futures_basket"):
+        labels.append("\uc120\ubb3c \ubc14\uc2a4\ucf13")
+    if not labels and "Near benchmark" in str(row.get("rv_focus", "")):
+        labels.append("\uc9c0\ud45c\ucc44 \uc8fc\ubcc0")
+    if not labels and "Near basket" in str(row.get("rv_focus", "")):
+        labels.append("\ubc14\uc2a4\ucf13 \uc8fc\ubcc0")
+    return " + ".join(labels) if labels else str(row.get("rv_focus") or "")
+
+
+def rv_compare_row(row: dict[str, Any], ref: dict[str, Any], reason: str, ref_type: str) -> dict[str, Any]:
+    ytm_gap = None
+    if row.get("ytm") is not None and ref.get("ytm") is not None:
+        ytm_gap = (row["ytm"] - ref["ytm"]) * 100.0
+    mat_gap = None
+    if row.get("remaining_years") is not None and ref.get("remaining_years") is not None:
+        mat_gap = abs(row["remaining_years"] - ref["remaining_years"]) * 12.0
+    return {
+        "\uc120\uc815 \uc0ac\uc720": reason,
+        "\uc885\ubaa9": row["name"],
+        "\ub9cc\uae30": row["maturity"],
+        "YTM": row["ytm"],
+        "\ube44\uad50 \uae30\uc900": ref["name"],
+        "\ube44\uad50 \uc720\ud615": ref_type,
+        "\ub9cc\uae30\ucc28 \uc6d4": mat_gap,
+        "YTM \ucc28 bp": ytm_gap,
+        "\ucee4\ube0c \uad34\ub9ac bp": row["residual_bp"],
+        "\ud574\uc11d": rv_side(row.get("residual_bp")),
+        "\ub2e8\uba74/\uacfc\uac70 z": row.get("combined_residual_z"),
+        "\ubc14\uc2a4\ucf13 \ud3ec\ud568": row.get("futures_basket_refs"),
+    }
+
+
 def build_dashboard_rows(
     ktb_tenor, irs_tenor, ktb_curve, irs_curve, agency, ktb_irs, bond_rv, lending_rows, fut_basket, fut_irs
 ):
@@ -2555,57 +2660,82 @@ def build_summary_sheet(
 
     # Bond RV top signals.
     rv_candidates = [r for r in bond_rv_rows if r.get("residual_z") is not None and r.get("curve_range_status") == "OK"]
-    exact_focus = [r for r in rv_candidates if r.get("is_benchmark") or r.get("is_futures_basket")]
-    near_focus = [
+    by_name = {r["name"]: r for r in bond_rv_rows}
+    exact_focus = sorted(
+        [r for r in rv_candidates if r.get("is_benchmark") or r.get("is_futures_basket")],
+        key=lambda x: (x.get("maturity") or date.max, x["name"]),
+    )
+    focus_rows = [
+        {
+            "\ubd84\ub958": rv_focus_label(r),
+            "\uc885\ubaa9": r["name"],
+            "\ub9cc\uae30": r["maturity"],
+            "YTM": r["ytm"],
+            "\ucee4\ube0c \uad34\ub9ac bp": r["residual_bp"],
+            "\ud574\uc11d": rv_side(r.get("residual_bp")),
+            "\ub2e8\uba74/\uacfc\uac70 z": r.get("combined_residual_z"),
+            "\uc9c0\ud45c \ud14c\ub108": r.get("benchmark_tenor"),
+            "\ubc14\uc2a4\ucf13 \ud3ec\ud568": r.get("futures_basket_refs"),
+        }
+        for r in exact_focus
+    ]
+    row = write_summary_section(
+        ws,
+        row,
+        "Bond RV 1: \uc9c0\ud45c/\ubc14\uc2a4\ucf13 \uae30\uc900\uc810",
+        ["\ubd84\ub958", "\uc885\ubaa9", "\ub9cc\uae30", "YTM", "\ucee4\ube0c \uad34\ub9ac bp", "\ud574\uc11d", "\ub2e8\uba74/\uacfc\uac70 z", "\uc9c0\ud45c \ud14c\ub108", "\ubc14\uc2a4\ucf13 \ud3ec\ud568"],
+        focus_rows,
+        [16, 24, 12, 8, 12, 26, 8, 10, 30],
+        note="\uc9c0\ud45c\ucc44\uc640 \uad6d\ucc44\uc120\ubb3c \ubc14\uc2a4\ucf13 \ucc44\uad8c \uc790\uccb4\ub97c \uba3c\uc800 \ubcf4\uc5ec\uc90d\ub2c8\ub2e4. \ub2e8\uba74/\uacfc\uac70 z\ub294 \uc624\ub298 101\uac1c \uc885\ubaa9 \ub2e8\uba74 z / \ud574\ub2f9 \uc885\ubaa9\uc758 1Y \uacfc\uac70 residual z\uc785\ub2c8\ub2e4. \uacfc\uac70 \ud788\uc2a4\ud1a0\ub9ac 6\uac1c\uc6d4 \ubbf8\ub9cc\uc740 N/A\uc785\ub2c8\ub2e4.",
+    )
+
+    near_map = {}
+    near_candidates = [
         r
         for r in rv_candidates
         if r.get("rv_focus") and not (r.get("is_benchmark") or r.get("is_futures_basket"))
     ]
-    seen_codes = set()
-    focus_sorted = []
-    for r in sorted(exact_focus, key=lambda x: (x.get("remaining_years") or 999, x["name"])):
-        if r["code"] not in seen_codes:
-            focus_sorted.append(r)
-            seen_codes.add(r["code"])
-    for r in sorted(near_focus, key=lambda x: abs(x["residual_z"]), reverse=True):
-        if r["code"] not in seen_codes:
-            focus_sorted.append(r)
-            seen_codes.add(r["code"])
-        if len(focus_sorted) >= 24:
+    def add_near_row(r: dict[str, Any], ref: dict[str, Any], reason: str, ref_type: str) -> None:
+        key = (r["code"], ref["code"])
+        if key not in near_map:
+            near_map[key] = rv_compare_row(r, ref, reason, ref_type)
+            return
+        row_existing = near_map[key]
+        for col, value in [
+            ("\uc120\uc815 \uc0ac\uc720", reason),
+            ("\ube44\uad50 \uc720\ud615", ref_type),
+        ]:
+            parts = [p.strip() for p in str(row_existing.get(col) or "").split("+") if p.strip()]
+            if value not in parts:
+                parts.append(value)
+            row_existing[col] = " + ".join(parts)
+
+    for r in sorted(near_candidates, key=lambda x: abs(x["residual_z"]), reverse=True):
+        if r.get("nearest_benchmark") and r["nearest_benchmark"] in by_name:
+            ref = by_name[r["nearest_benchmark"]]
+            add_near_row(r, ref, "\uc9c0\ud45c\ucc44 \uc8fc\ubcc0", "\uc9c0\ud45c\ucc44")
+        if r.get("nearest_basket") and r["nearest_basket"] in by_name:
+            ref = by_name[r["nearest_basket"]]
+            add_near_row(r, ref, "\ubc14\uc2a4\ucf13 \uc8fc\ubcc0", "\uc120\ubb3c \ubc14\uc2a4\ucf13")
+        if len(near_map) >= 20:
             break
-    focus_sorted = sorted(focus_sorted, key=lambda x: (x.get("maturity") or date.max, x["name"]))
-    focus_rows = []
-    for r in focus_sorted:
-        focus_rows.append(
-            {
-                "Focus": r["rv_focus"],
-                "Bond": r["name"],
-                "Maturity": r["maturity"],
-                "YTM": r["ytm"],
-                "Residual bp": r["residual_bp"],
-                "z": r["residual_z"],
-                "Benchmark Ref": r["nearest_benchmark"],
-                "Bench Gap M": r["nearest_benchmark_gap_m"],
-                "Basket Ref": r["nearest_basket"],
-                "Basket Gap M": r["nearest_basket_gap_m"],
-                "Basket": r["futures_basket_refs"],
-            }
-        )
+    near_rows = list(near_map.values())
+    near_rows = sorted(near_rows, key=lambda x: (x.get("\ub9cc\uae30") or date.max, x["\uc885\ubaa9"], x["\ube44\uad50 \uc720\ud615"]))
     row = write_summary_section(
         ws,
         row,
-        "Bond RV: Benchmark/Basket Neighborhood",
-        ["Focus", "Bond", "Maturity", "YTM", "Residual bp", "z", "Benchmark Ref", "Bench Gap M", "Basket Ref", "Basket Gap M", "Basket"],
-        focus_rows,
-        [18, 24, 12, 8, 10, 8, 24, 10, 24, 10, 24],
-        note="벤치마크/선물 바스켓 종목은 모두 표시하고, 유사만기(잔존만기 차이 6개월 이내, 동일 prefix)는 residual z-score 절대값이 큰 순서로 추가합니다.",
+        "Bond RV 2: \uae30\uc900\uc810 \uc8fc\ubcc0 \uc0c1\ub300\uac00\uce58",
+        ["\uc120\uc815 \uc0ac\uc720", "\uc885\ubaa9", "\ub9cc\uae30", "YTM", "\ube44\uad50 \uae30\uc900", "\ube44\uad50 \uc720\ud615", "\ub9cc\uae30\ucc28 \uc6d4", "YTM \ucc28 bp", "\ucee4\ube0c \uad34\ub9ac bp", "\ud574\uc11d", "\ub2e8\uba74/\uacfc\uac70 z", "\ubc14\uc2a4\ucf13 \ud3ec\ud568"],
+        near_rows,
+        [14, 24, 12, 8, 24, 12, 10, 10, 12, 26, 8, 30],
+        note="\uc9c0\ud45c\ucc44/\ubc14\uc2a4\ucf13\uacfc \ub9cc\uae30 \ucc28\uc774\uac00 6\uac1c\uc6d4 \uc774\ub0b4\uc778 \ub3d9\uc77c \uc720\ud615 \uc885\ubaa9\uc744 \ud45c\uc2dc\ud569\ub2c8\ub2e4. YTM \ucc28 bp\ub294 \ud574\ub2f9 \uc885\ubaa9 YTM - \ube44\uad50 \uae30\uc900 YTM, \ub2e8\uba74/\uacfc\uac70 z\ub294 \uc624\ub298 \ub2e8\uba74 / \uc790\uae30 \uacfc\uac70 1Y \uae30\uc900\uc785\ub2c8\ub2e4.",
     )
 
     cross_rows = build_bond_rv_flow_cross_rows(rv_candidates)
     row = write_summary_section(
         ws,
         row,
-        "Bond RV x Flow Cross Signals",
+        "Bond RV x Flow: RV \uc2e0\ud638\uc640 \uc218\uae09 \ud655\uc778",
         ["Signal", "Bond", "Maturity", "RV z", "Residual bp", "Total Today 억", "Total 5D 억", "Top Buyer 5D", "Top Buyer 억", "Top Seller 5D", "Top Seller 억", "Lending 5D 억", "Benchmark", "Basket", "Interpretation"],
         cross_rows,
         [24, 24, 12, 8, 10, 12, 12, 13, 12, 13, 12, 12, 10, 24, 32],
@@ -2619,25 +2749,25 @@ def build_summary_sheet(
         for r in items:
             bond_rows.append(
                 {
-                    "Signal": tag,
-                    "Bond": r["name"],
-                    "Maturity": r["maturity"],
+                    "\uc2e0\ud638": tag,
+                    "\uc885\ubaa9": r["name"],
+                    "\ub9cc\uae30": r["maturity"],
                     "YTM": r["ytm"],
-                    "Residual bp": r["residual_bp"],
-                    "z": r["residual_z"],
-                    "Curve Range": r["curve_range_status"],
-                    "Benchmark": r["benchmark_tenor"],
-                    "Basket": r["futures_basket_refs"],
+                    "\ucee4\ube0c \uad34\ub9ac bp": r["residual_bp"],
+                    "\ud574\uc11d": rv_side(r.get("residual_bp")),
+                    "\ub2e8\uba74/\uacfc\uac70 z": r.get("combined_residual_z"),
+                    "\uc9c0\ud45c \ud14c\ub108": r["benchmark_tenor"],
+                    "\ubc14\uc2a4\ucf13 \ud3ec\ud568": r["futures_basket_refs"],
                 }
             )
     write_summary_section(
         ws,
         row,
-        "Bond RV: Z-score Extremes",
-        ["Signal", "Bond", "Maturity", "YTM", "Residual bp", "z", "Curve Range", "Benchmark", "Basket"],
+        "Bond RV 3: \uc804\uccb4 \uc885\ubaa9 Cheap/Rich \uadf9\ub2e8\uac12",
+        ["\uc2e0\ud638", "\uc885\ubaa9", "\ub9cc\uae30", "YTM", "\ucee4\ube0c \uad34\ub9ac bp", "\ud574\uc11d", "\ub2e8\uba74/\uacfc\uac70 z", "\uc9c0\ud45c \ud14c\ub108", "\ubc14\uc2a4\ucf13 \ud3ec\ud568"],
         bond_rows,
-        [9, 24, 12, 8, 10, 8, 14, 10, 24],
-        note="Residual = 개별 종목 YTM - 잔존만기 보간 generic curve. 전체 curve 범위 안 종목 중 z-score 상위/하위 각각 4개만 표시합니다.",
+        [9, 24, 12, 8, 12, 26, 8, 10, 30],
+        note="\uc804\uccb4 101\uac1c \uc885\ubaa9 \uc911 \ub3d9\uc77c\ub9cc\uae30 fitted curve\ub300\ube44 \uad34\ub9ac\uac00 \uac00\uc7a5 \ud070 cheap/rich \uc0c1\ud558\uc704 4\uac1c\uc529\uc744 \ubcf4\uc5ec\uc90d\ub2c8\ub2e4. \ub2e8\uba74/\uacfc\uac70 z\ub85c \uc624\ub298 \ub2e8\uba74\uc0c1 \uc2e0\ud638\uc640 \uc790\uae30 \uacfc\uac70 \ub300\ube44 \uc2e0\ud638\ub97c \uac19\uc774 \ud655\uc778\ud569\ub2c8\ub2e4.",
     )
     ws.freeze_panes = "A4"
 
